@@ -25,6 +25,7 @@ class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var pairing = false
+    private var pairingGeneration = 0L
     private val updater = object : Runnable {
         override fun run() { render(); handler.postDelayed(this, 2000) }
     }
@@ -47,9 +48,9 @@ class MainActivity : Activity() {
             if (!Access.has(this, Manifest.permission.CAMERA)) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else scan()
         }
         button("Start / resume connection") { BridgeService.start(this); render() }
-        button("Stop connection") { BridgeService.stop(this); render() }
+        button("Stop connection") { pairingGeneration++; pairing = false; BridgeService.stop(this); render() }
         button("Disconnect and erase local token/data") {
-            AlertDialog.Builder(this).setTitle("Disconnect?").setMessage("Erase encrypted credentials, command history and queued events. Reconnect requires a new server QR. Revoke the old device on the server to remove its registration.").setNegativeButton("Cancel", null).setPositiveButton("Disconnect") { _, _ -> BridgeService.stop(this, true); render() }.show()
+            AlertDialog.Builder(this).setTitle("Disconnect?").setMessage("Erase encrypted credentials, command history and queued events. Reconnect requires a new server QR. Revoke the old device on the server to remove its registration.").setNegativeButton("Cancel", null).setPositiveButton("Disconnect") { _, _ -> pairingGeneration++; pairing = false; BridgeService.stop(this, true); render() }.show()
         }
         text("Grant only the permissions you need. SMS access may be restricted by Android's installer or enterprise policy. Permission denial is reported honestly; there is no root, ADB or Shizuku requirement.")
         if (Build.VERSION.SDK_INT >= 33) button("Allow connection notifications") { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11) }
@@ -88,16 +89,25 @@ class MainActivity : Activity() {
     private fun claim(qr: PairingQr, deviceName: String) {
         if (pairing) return
         pairing = true
+        val generation = ++pairingGeneration
         status.text = "Claiming one-time pairing…"
         worker.execute {
             try {
                 val value = BridgeHttp.claim(qr, deviceName, BuildConfig.DEBUG)
-                if (Credentials(this).load() != null) failure("PAIRING_FAILED", "A device was already paired; disconnect before replacing it")
-                DurableStore(this).use { it.clearAll() }
-                Credentials(this).save(value)
-                handler.post { if (!isDestroyed) { pairing = false; BridgeService.start(this); render() } }
+                handler.post {
+                    if (!isDestroyed && generation == pairingGeneration) {
+                        try {
+                            if (Credentials(this).load() != null) failure("PAIRING_FAILED", "A device was already paired; disconnect before replacing it")
+                            DurableStore(this).use { it.clearAll() }
+                            Credentials(this).save(value)
+                            pairing = false
+                            BridgeService.start(this)
+                            render()
+                        } catch (e: Exception) { pairing = false; render(); message((e as? BridgeFailure)?.message ?: "Pairing persistence or foreground startup failed; inspect settings before retrying.") }
+                    }
+                }
             } catch (e: Exception) {
-                handler.post { if (!isDestroyed) { pairing = false; render(); message((e as? BridgeFailure)?.message ?: "Pairing failed. A claimed token cannot be reused; generate a fresh QR.") } }
+                handler.post { if (!isDestroyed && generation == pairingGeneration) { pairing = false; render(); message((e as? BridgeFailure)?.message ?: "Pairing failed. A claimed token cannot be reused; generate a fresh QR.") } }
             }
         }
     }

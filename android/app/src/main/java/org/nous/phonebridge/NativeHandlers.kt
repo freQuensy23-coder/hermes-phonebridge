@@ -57,7 +57,7 @@ class NativeHandlers(private val context: Context, private val store: DurableSto
             op.startsWith("clock.") -> NativeClocks(context).execute(op, args)
             else -> when (op) {
                 "device.info" -> { args.only(); deviceInfo() }
-                "device.capabilities" -> { args.only(); JSONObject().put("capabilities", Access.capabilities(context)).put("permissions", Access.permissions(context)) }
+                "capabilities", "device.capabilities" -> { args.only(); JSONObject().put("capabilities", Access.capabilities(context)).put("permissions", Access.permissions(context)) }
                 "apps.list" -> apps(args)
                 "apps.open" -> openApp(args)
                 "audio.get" -> { args.only(); audio() }
@@ -102,6 +102,7 @@ class NativeHandlers(private val context: Context, private val store: DurableSto
     fun launch(intent: Intent, pkg: String? = intent.`package`): JSONObject {
         Access.foreground(context)
         UiThread.call {
+            Access.foreground(context)
             val service = BridgeAccessibility.current
             (service ?: context).startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
@@ -156,7 +157,11 @@ class NativeHandlers(private val context: Context, private val store: DurableSto
                 items.put(JSONObject().put("id", cursor.getLong(0)).put("calendar_id", cursor.getLong(1)).put("title", cursor.getString(2)?.take(512) ?: "").put("start_ms", cursor.getLong(3)).put("end_ms", cursor.getLong(4)).put("location", cursor.getString(5)?.take(512) ?: ""))
             }
         } ?: failure("UNSUPPORTED", "Calendar provider unavailable")
-        return JSONObject().put("events", items).put("truncated", truncated)
+        val calendars = JSONArray()
+        context.contentResolver.query(CalendarContract.Calendars.CONTENT_URI, arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL), null, null, "${CalendarContract.Calendars._ID} ASC")?.use { cursor ->
+            while (cursor.moveToNext() && calendars.length() < 30) calendars.put(JSONObject().put("id", cursor.getLong(0)).put("name", cursor.getString(1)?.take(256) ?: "").put("writable", cursor.getInt(2) >= CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR))
+        }
+        return JSONObject().put("events", items).put("calendars", calendars).put("truncated", truncated).put("calendar_limit", 30)
     }
     private fun calendarCreate(args: Arguments): JSONObject {
         args.only("calendar_id", "title", "start_ms", "end_ms", "timezone", "description", "location")

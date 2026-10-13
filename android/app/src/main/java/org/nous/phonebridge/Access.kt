@@ -36,7 +36,7 @@ object Access {
         put("foreground", MainActivity.resumed)
     }
     fun capabilities(context: Context): JSONArray {
-        val ops = mutableSetOf("device.info", "device.capabilities", "apps.list", "audio.get", "audio.set", "clock.providers")
+        val ops = mutableSetOf("device.info", "capabilities", "device.capabilities", "apps.list", "audio.get", "audio.set", "clock.providers")
         val foreground = MainActivity.resumed || BridgeAccessibility.current != null
         if (foreground) {
             ops += listOf("apps.open", "calls.dial")

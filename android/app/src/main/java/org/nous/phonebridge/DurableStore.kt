@@ -32,6 +32,7 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
         val now = System.currentTimeMillis() / 1000
         val expires = args.long("expires_at", 1, Long.MAX_VALUE)
         val body = JSONObject().put("op", command.getString("op")).put("args", command.getJSONObject("args")).put("expires_at", expires)
+        PayloadBounds.validate(command.getJSONObject("args"))
         val digest = MessageDigest.getInstance("SHA-256").digest(canonical(body).toByteArray()).joinToString("") { "%02x".format(it) }
         val db = writableDatabase
         db.beginTransaction()
@@ -69,6 +70,7 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
     }
     @Synchronized fun event(name: String, data: JSONObject): String {
         requireBridge(name.length in 1..128, "Invalid event name")
+        PayloadBounds.validate(data, 15000)
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis() / 1000
         val frame = JSONObject().put("type", "event").put("id", id).put("name", name).put("data", data).put("time", now).toString()
@@ -90,7 +92,11 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
         buildList { while (cursor.moveToNext()) add(JSONObject(cursor.getString(0))) }
     }
     @Synchronized fun ack(id: String) { writableDatabase.delete("events", "id=?", arrayOf(id)) }
-    @Synchronized fun ownCalendar(id: Long) { writableDatabase.insertWithOnConflict("owned_calendar", null, ContentValues().apply { put("id", id) }, SQLiteDatabase.CONFLICT_IGNORE) }
+    @Synchronized fun ownCalendar(id: Long) {
+        val db = writableDatabase
+        db.insertWithOnConflict("owned_calendar", null, ContentValues().apply { put("id", id) }, SQLiteDatabase.CONFLICT_IGNORE)
+        db.execSQL("DELETE FROM owned_calendar WHERE id NOT IN (SELECT id FROM owned_calendar ORDER BY rowid DESC LIMIT 2048)")
+    }
     @Synchronized fun isOwnCalendar(id: Long): Boolean = readableDatabase.rawQuery("SELECT id FROM owned_calendar WHERE id=?", arrayOf(id.toString())).use { it.moveToFirst() }
     @Synchronized fun clearAll() {
         writableDatabase.beginTransaction()

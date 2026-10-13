@@ -19,6 +19,11 @@ OPERATIONS = frozenset({
     "clock.alarms.delete", "clock.timers.create", "clock.timers.dismiss", "clock.timers.show",
     "clock.timers.list", "clock.timers.cancel", "clock.timers.pause", "clock.timers.resume",
 })
+NATIVE_CLOCK_OPERATIONS = frozenset({
+    "clock.alarms.create", "clock.alarms.dismiss", "clock.alarms.snooze", "clock.alarms.show",
+    "clock.timers.create", "clock.timers.dismiss", "clock.timers.show",
+})
+PACKAGE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 

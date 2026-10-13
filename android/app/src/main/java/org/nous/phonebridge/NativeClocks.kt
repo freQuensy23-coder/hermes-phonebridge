@@ -16,7 +16,7 @@ class NativeClocks(private val context: Context) {
     fun providers(): JSONObject = JSONObject().put("providers", JSONArray(installed().map { pkg ->
         val info = pm.getPackageInfo(pkg, 0)
         val adapter = ClockAdapters(context).forPackage(pkg)
-        JSONObject().put("package", pkg).put("name", pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()).put("version", info.versionName ?: "").put("version_code", info.longVersionCode).put("adapter", adapter.name).put("native_actions", JSONArray(actions.filter { resolves(pkg, it.value) }.keys.sorted())).put("ui_actions", JSONArray(adapter.supported(info.versionName ?: "", info.longVersionCode).sorted())).put("screen_required", true).put("ui_support", adapter.reason(info.versionName ?: "", info.longVersionCode))
+        JSONObject().put("package", pkg).put("name", pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()).put("version", info.versionName ?: "").put("version_code", info.longVersionCode).put("adapter", adapter.name).put("native_actions", JSONArray(actions.filter { resolves(pkg, it.value) }.keys.sorted())).put("ui_actions", JSONArray(adapter.supported(info.versionName ?: "", info.longVersionCode).sorted())).put("screen_required", true).put("ui_support", adapter.reason(info.versionName ?: "", info.longVersionCode)).put("validation", JSONObject().put("ui_implemented", adapter.supported(info.versionName ?: "", info.longVersionCode).isNotEmpty()).put("ci_tested", false).put("physical_oem_tested", false))
     }))
     fun intent(op: String, args: Arguments): Intent {
         val action = actions[op] ?: failure("UNSUPPORTED", "Operation requires a clock UI adapter")
@@ -29,7 +29,8 @@ class NativeClocks(private val context: Context) {
         } else {
             candidates.singleOrNull() ?: failure("VALIDATION_ERROR", "Select an explicit package when zero or multiple clock providers resolve the action")
         }
-        val intent = Intent(action).setPackage(pkg)
+        val resolved = pm.queryIntentActivities(Intent(action).setPackage(pkg), PackageManager.MATCH_DEFAULT_ONLY).filter { it.activityInfo.exported && it.activityInfo.enabled }.distinctBy { it.activityInfo.name }.singleOrNull() ?: failure("UNSUPPORTED", "Clock action does not have one known exported activity")
+        val intent = Intent(action).setPackage(pkg).setComponent(android.content.ComponentName(pkg, resolved.activityInfo.name))
         when (op) {
             "clock.alarms.create" -> {
                 args.only("package", "hour", "minute", "label", "days")
@@ -52,7 +53,7 @@ class NativeClocks(private val context: Context) {
             }
             "clock.alarms.snooze" -> {
                 args.only("package", "minutes")
-                if (args.json.has("minutes")) intent.putExtra(AlarmClock.EXTRA_ALARM_SNOOZE_DURATION, args.int("minutes", 1, 120))
+                if (args.json.has("minutes")) intent.putExtra(AlarmClock.EXTRA_ALARM_SNOOZE_DURATION, args.int("minutes", 1, 1440))
             }
             "clock.timers.create" -> {
                 args.only("package", "seconds", "label")
@@ -76,7 +77,7 @@ class NativeClocks(private val context: Context) {
         if (op !in actions) return ClockAdapters(context).execute(op, args)
         val intent = intent(op, args)
         Access.foreground(context)
-        UiThread.call { (BridgeAccessibility.current ?: context).startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        UiThread.call { Access.foreground(context); (BridgeAccessibility.current ?: context).startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
         return JSONObject().put("outcome", "dispatched").put("verified", false).put("package", intent.`package`).put("backend", "native_intent").apply {
             if (op == "clock.alarms.dismiss") put("repeating_alarm", "next_occurrence_skipped")
             if (op == "clock.timers.dismiss" && intent.data == null) put("scope", "expired_timers_only")

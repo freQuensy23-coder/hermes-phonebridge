@@ -26,13 +26,17 @@ class Arguments(val json: JSONObject) {
     fun int(key: String, minimum: Int, maximum: Int, default: Int? = null): Int {
         if (!json.has(key)) return default ?: failure("VALIDATION_ERROR", "$key is required")
         val value = json.get(key)
-        requireBridge(value is Number && value.toDouble().isFinite() && value.toDouble() % 1.0 == 0.0 && value.toDouble() >= minimum && value.toDouble() <= maximum, "Invalid $key")
-        return (value as Number).toInt()
+        requireBridge(value is Int || value is Long, "Invalid $key")
+        val number = (value as Number).toLong()
+        requireBridge(number >= minimum && number <= maximum, "Invalid $key")
+        return number.toInt()
     }
     fun long(key: String, minimum: Long, maximum: Long): Long {
         val value = json.opt(key)
-        requireBridge(value is Number && value.toDouble().isFinite() && value.toDouble() % 1.0 == 0.0 && value.toDouble() >= minimum.toDouble() && value.toDouble() <= maximum.toDouble(), "Invalid $key")
-        return (value as Number).toLong()
+        requireBridge(value is Int || value is Long, "Invalid $key")
+        val number = (value as Number).toLong()
+        requireBridge(number >= minimum && number <= maximum, "Invalid $key")
+        return number
     }
     fun bool(key: String): Boolean {
         requireBridge(json.opt(key) is Boolean, "Invalid $key")
@@ -55,7 +59,7 @@ data class PairingQr(val server: HttpUrl, val token: String, val expiresAt: Long
             val server = args.string("server", 2048)!!.toHttpUrlOrNull() ?: failure("VALIDATION_ERROR", "Invalid server URL")
             validateServer(server, allowEmulator)
             val token = args.string("token", 512)!!
-            requireBridge(token.length >= 32 && token.matches(Regex("[A-Za-z0-9_-]+")), "Invalid pairing token")
+            requireBridge(token.matches(Regex("[A-Za-z0-9_-]{43}")), "Invalid pairing token")
             val expires = args.long("expires_at", 1, Long.MAX_VALUE)
             requireBridge(expires > now && expires <= now + 86400, "QR expired or expiry exceeds one day")
             return PairingQr(server, token, expires)

@@ -38,7 +38,7 @@ def provision(store, capabilities=None):
     claim = store.claim(ClaimRequest(token=pairing["qr_payload"]["token"], name="Pixel", platform="android"))
     device_id, session_id = store.connect(claim["device_token"])
     store.hello(device_id, session_id, HelloFrame(type="hello", version="0.1.0",
-                                               capabilities=capabilities or CAPABILITIES, permissions={}))
+                                               capabilities=CAPABILITIES if capabilities is None else capabilities, permissions={}))
     return pairing, claim, device_id, session_id
 
 
@@ -46,7 +46,7 @@ def provision(store, capabilities=None):
 def connected(client, claim, capabilities=None):
     with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {claim['device_token']}"}) as socket:
         socket.send_json({"type": "hello", "version": "0.1.0",
-                          "capabilities": capabilities or CAPABILITIES,
+                          "capabilities": CAPABILITIES if capabilities is None else capabilities,
                           "permissions": {"notifications": True}})
         ready_id = str(uuid4())
         socket.send_json({"type": "event", "id": ready_id, "name": "connection.ready", "data": {}, "time": 0})

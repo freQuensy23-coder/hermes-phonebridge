@@ -58,7 +58,8 @@ class AospClockAdapter : ClockUiAdapter {
         if (rows.groupBy { it.label to it.time }.values.any { it.size != 1 }) failure("UNSUPPORTED", "Duplicate alarm labels/times cannot be safely selected")
         return rows
     }
-    private fun alarmData(rows: List<AlarmRow>) = JSONArray(rows.map { JSONObject().put("label", it.label).put("time", it.time).put("enabled", it.enabled) })
+    private fun identity(label: String, time: String): String = java.security.MessageDigest.getInstance("SHA-256").digest(JSONObject().put("package", pkg).put("label", label).put("time", time).toString().toByteArray()).joinToString("") { "%02x".format(it) }
+    private fun alarmData(rows: List<AlarmRow>) = JSONArray(rows.map { JSONObject().put("id", identity(it.label, it.time)).put("label", it.label).put("time", it.time).put("enabled", it.enabled) })
     private fun selected(service: BridgeAccessibility, label: String, time: String): AlarmRow = alarms(service).singleOrNull { it.label == label && it.time == time } ?: failure("NOT_FOUND", "Exact visible alarm label/time not found")
     private fun timer(service: BridgeAccessibility): JSONObject {
         val root = service.safeRoot(pkg)
@@ -76,14 +77,27 @@ class AospClockAdapter : ClockUiAdapter {
             }
             else -> failure("UNSUPPORTED", "Timer state or locale unsupported")
         }
-        return JSONObject().put("label", label).put("time", time).put("state", state)
+        return JSONObject().put("id", identity(label, time)).put("label", label).put("time", time).put("state", state).put("identity_scope", "fresh_visible_snapshot")
     }
     override fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject {
-        args.only("package", "label", "time")
+        args.only("package", "id", "label", "time")
         if (op == "clock.alarms.list") return UiThread.call { JSONObject().put("alarms", alarmData(alarms(service))).put("scope", "visible_rows").put("complete", false) }
         if (op == "clock.timers.list") return UiThread.call { JSONObject().put("timers", JSONArray().put(timer(service))).put("scope", "visible_timer").put("complete", false) }
-        val label = args.string("label", 256)!!
-        val time = args.string("time", 128)!!
+        val targetId = args.string("id", 128, false)
+        val target = if (targetId != null) UiThread.call {
+            if (op.startsWith("clock.alarms.")) {
+                val row = alarms(service).singleOrNull { identity(it.label, it.time) == targetId } ?: failure("NOT_FOUND", "Fresh visible alarm ID not found")
+                row.label to row.time
+            } else {
+                val value = timer(service)
+                if (value.getString("id") != targetId) failure("NOT_FOUND", "Timer snapshot changed; request a fresh list")
+                value.getString("label") to value.getString("time")
+            }
+        } else args.string("label", 256)!! to args.string("time", 128)!!
+        val label = target.first
+        val time = target.second
+        args.string("label", 256, false)?.let { requireBridge(it == label, "Selected label does not match ID") }
+        args.string("time", 128, false)?.let { requireBridge(it == time, "Selected time does not match ID") }
         if (op.startsWith("clock.alarms.")) {
             val desired = when (op) {
                 "clock.alarms.enable" -> true

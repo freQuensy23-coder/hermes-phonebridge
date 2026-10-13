@@ -137,6 +137,9 @@ class ServerInstrumentationTest {
         assertEquals("succeeded", dismissal.getString("status"))
         assertFalse(dismissal.getJSONObject("data").getBoolean("verified"))
         waitUntil { BridgeNotifications.current?.activeNotifications?.none { it.key == key } == true }
+        shell("cmd notification disallow_listener $listener")
+        waitUntil { BridgeNotifications.current == null && "notifications.list" !in capabilities(id) }
+        assertFalse(http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_listener"))
         val eventId = DurableStore(context).use { it.event("ci.native_event", JSONObject().put("untrusted", true).put("value", "real durable outbox")) }
         BridgeService.refresh()
         waitUntil {

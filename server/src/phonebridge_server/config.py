@@ -1,4 +1,6 @@
 import hashlib
+import ipaddress
+import re
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,9 +54,26 @@ class Settings:
         if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("PHONEBRIDGE_PUBLIC_URL must be an absolute URL without credentials or query")
         try:
-            parsed.port
+            port = parsed.port
+            if port is not None and port == 0:
+                raise ValueError
         except ValueError as error:
             raise ValueError("PHONEBRIDGE_PUBLIC_URL has an invalid port") from error
+        if "\\" in self.public_url or any(ord(character) < 33 for character in self.public_url):
+            raise ValueError("PHONEBRIDGE_PUBLIC_URL contains invalid characters")
+        hostname = parsed.hostname
+        try:
+            ipaddress.ip_address(hostname)
+        except ValueError:
+            try:
+                hostname = hostname.rstrip(".").encode("idna").decode("ascii")
+            except UnicodeError as error:
+                raise ValueError("PHONEBRIDGE_PUBLIC_URL has an invalid hostname") from error
+            if len(hostname) > 253 or any(
+                not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                for label in hostname.split(".")
+            ):
+                raise ValueError("PHONEBRIDGE_PUBLIC_URL has an invalid hostname")
         if parsed.path not in ("", "/"):
             raise ValueError("PHONEBRIDGE_PUBLIC_URL must use the origin root")
         if any(character.isspace() for character in self.public_url):

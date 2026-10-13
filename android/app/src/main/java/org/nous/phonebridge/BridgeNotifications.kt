@@ -32,8 +32,15 @@ class BridgeNotifications : NotificationListenerService() {
     fun handle(op: String, args: Arguments): JSONObject {
         if (op == "notifications.list") {
             args.only("limit")
-            val items = activeNotifications.orEmpty().take(args.limit().coerceAtMost(8)).map { describe(it) }
-            return JSONObject().put("notifications", JSONArray(items)).put("truncated", activeNotifications.orEmpty().size > items.size).put("untrusted", true)
+            val active = activeNotifications.orEmpty()
+            val items = JSONArray()
+            for (notification in active.take(args.limit().coerceAtMost(8))) {
+                val candidate = describe(notification)
+                val next = JSONArray(items.toString()).put(candidate)
+                try { PayloadBounds.validate(JSONObject().put("notifications", next), 28000) } catch (_: BridgeFailure) { break }
+                items.put(candidate)
+            }
+            return JSONObject().put("notifications", items).put("truncated", active.size > items.length()).put("untrusted", true)
         }
         args.only("key", "action", "text", "result_key")
         ExecutionGuard.check()

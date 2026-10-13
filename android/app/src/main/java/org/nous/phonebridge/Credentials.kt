@@ -69,7 +69,7 @@ object BridgeHttp {
             val args = Arguments(obj)
             val id = args.string("device_id", 128)!!
             val token = args.string("device_token", 512)!!
-            requireBridge(token.length >= 32 && !token.any { it.isWhitespace() || it.isISOControl() }, "Invalid device token")
+            requireBridge(token.matches(Regex("[A-Za-z0-9_-]{43}")), "Invalid device token")
             val ws = args.string("ws_url", 2048)!!
             requireBridge(ws.startsWith(if (qr.server.isHttps) "wss://" else "ws://"), "WS transport must match pairing transport")
             val parsed = ws.replaceFirst("wss://", "https://").replaceFirst("ws://", "http://").toHttpUrl()

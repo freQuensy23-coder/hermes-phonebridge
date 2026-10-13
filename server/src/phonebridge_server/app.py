@@ -233,6 +233,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
         device_id = session_id = peer = None
         tasks = []
         accepted = False
+        hello_ready = False
         try:
             if websocket.url.query:
                 raise BridgeError("UNAUTHORIZED", "Query-string authorization is not accepted", 401)
@@ -257,6 +258,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
             except ValidationError as error:
                 raise BridgeError("INVALID_FRAME", "A valid hello must be the first frame", 422) from error
             await execute("hello", device_id, session_id, hello)
+            hello_ready = True
             tasks = [asyncio.create_task(sender(peer, device_id, session_id)),
                      asyncio.create_task(receiver(peer, device_id, session_id))]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -267,13 +269,14 @@ def create_app(settings: Settings | None = None, clock=time.time):
                 with suppress(RuntimeError, WebSocketDisconnect, TimeoutError, OSError, BridgeError):
                     await peer.send({"type": "error", "code": error.code, "message": error.message})
             if peer is not None:
-                await peer.close(1008)
+                code = 1013 if error.code in {"QUEUE_FULL", "RATE_LIMITED"} else 1009 if error.code == "TOO_LARGE" else 1008
+                await peer.close(code)
             else:
                 with suppress(RuntimeError, OSError):
                     await websocket.close(code=1008)
         except TimeoutError:
             if peer is not None:
-                await peer.close(1008)
+                await peer.close(1013 if hello_ready else 1008)
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         except sqlite3.Error:

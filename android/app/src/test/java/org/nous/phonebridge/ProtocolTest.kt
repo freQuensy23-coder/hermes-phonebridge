@@ -35,7 +35,7 @@ class ProtocolTest {
         rejected { PairingQr.parse(value, false, 1000) }
     }
     @Test fun typedArgumentsRejectStringsFractionsAndUnknownKeys() {
-        for (value in listOf<Any>("1", true, 1.5, 0, 61)) rejected { Arguments(JSONObject().put("minute", value)).int("minute", 1, 60) }
+        for (value in listOf<Any>("1", true, 1.0, 1.5, 0, 61)) rejected { Arguments(JSONObject().put("minute", value)).int("minute", 1, 60) }
         assertEquals(60, Arguments(JSONObject().put("minute", 60)).int("minute", 1, 60))
         rejected { Arguments(JSONObject().put("shell", "id")).only("minute") }
         rejected { Arguments(JSONObject().put("enabled", "true")).bool("enabled") }

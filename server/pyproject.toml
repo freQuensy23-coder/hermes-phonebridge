@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "phonebridge-server"
 version = "0.1.0"
 description = "Authenticated durable Android command relay"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "annotated-doc==0.0.5",
@@ -24,6 +25,7 @@ dependencies = [
   "uvicorn==0.54.0",
   "websockets==17.2",
 ]
+
 [project.optional-dependencies]
 test = ["pytest==8.3.5", "pytest-asyncio==0.26.0", "httpx==0.28.1"]
 

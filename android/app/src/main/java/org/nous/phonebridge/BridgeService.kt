@@ -52,12 +52,14 @@ object ExecutionGuard {
 
 class BridgeService : Service() {
     private val control = ScheduledThreadPoolExecutor(1).apply { removeOnCancelPolicy = true }
-    private val commands = ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(64))
+    private val commands = object : ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, ArrayBlockingQueue<Runnable>(64)) {
+        override fun terminated() { store.close() }
+    }
     private val prefs by lazy { getSharedPreferences("connection", MODE_PRIVATE) }
     private val credentials by lazy { Credentials(this) }
     private val store by lazy { DurableStore(this) }
     private val manager by lazy { getSystemService(ConnectivityManager::class.java) }
-    private val client: OkHttpClient = BridgeHttp.client.newBuilder().callTimeout(0, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS).build()
+    private val client: OkHttpClient = BridgeHttp.client.newBuilder().dispatcher(okhttp3.Dispatcher()).connectionPool(okhttp3.ConnectionPool()).callTimeout(0, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS).build()
     @Volatile private var active = true
     @Volatile private var socket: WebSocket? = null
     @Volatile private var connected = false
@@ -82,7 +84,7 @@ class BridgeService : Service() {
         startForeground(18940, notification("Starting"))
         store.recover()
         manager.registerDefaultNetworkCallback(network)
-        control.scheduleWithFixedDelay({ if (active) { advertise(); flush() } }, 3, 3, TimeUnit.SECONDS)
+        control.scheduleWithFixedDelay({ dispatch { advertise(); flush() } }, 3, 3, TimeUnit.SECONDS)
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP || intent?.action == DISCONNECT) {
@@ -93,13 +95,21 @@ class BridgeService : Service() {
             halt("Not paired or stopped", false)
             return START_NOT_STICKY
         }
-        control.execute { connect() }
+        dispatch { connect() }
         return START_STICKY
     }
     override fun onBind(intent: Intent?): IBinder? = null
+    private fun dispatch(task: () -> Unit) {
+        if (!active || control.isShutdown) return
+        try {
+            control.execute {
+                if (active) try { task() } catch (_: Exception) { halt("Connection control failed; stopped for safety", false) }
+            }
+        } catch (_: RejectedExecutionException) { }
+    }
     internal fun interruptTransport() {
         if (!active || control.isShutdown) return
-        control.execute {
+        dispatch {
             val ownEpoch = epoch
             socket?.cancel()
             lost(ownEpoch, false)
@@ -108,7 +118,7 @@ class BridgeService : Service() {
     private fun hasNetwork(): Boolean = manager.activeNetwork?.let { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } == true
     private fun scheduleNetwork() {
         if (!active || control.isShutdown) return
-        control.execute {
+        dispatch {
             if (!hasNetwork()) {
                 epoch++
                 socket?.cancel()
@@ -132,9 +142,10 @@ class BridgeService : Service() {
         state("Connecting")
         val request = Request.Builder().url(value.wsUrl).header("Authorization", "Bearer ${value.token}").build()
         socket = client.newWebSocket(request, object : WebSocketListener() {
+            private var protocolError: String? = null
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                control.execute {
-                    if (!active || ownEpoch != epoch) { webSocket.cancel(); return@execute }
+                dispatch {
+                    if (!active || ownEpoch != epoch) { webSocket.cancel(); return@dispatch }
                     socket = webSocket
                     connected = true
                     attempt = 0
@@ -154,26 +165,34 @@ class BridgeService : Service() {
                     val frame = JSONObject(text)
                     PayloadBounds.validate(frame, 65536)
                     when (frame.optString("type")) {
-                        "ack" -> control.execute {
+                        "ack" -> dispatch {
                             val id = Arguments(frame).string("id", 128)!!
                             store.ack(id)
                             sentEvents.remove(id)
                         }
                         "command" -> accept(frame, value.deviceId)
-                        "revoked" -> control.execute { halt("Revoked by server", true) }
-
+                        "revoked" -> dispatch { halt("Revoked by server", true) }
+                        "error" -> { protocolError = frame.optString("code", "INVALID_FRAME") }
                     }
                 } catch (_: Exception) { webSocket.close(1008, "Invalid frame") }
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, null)
-                control.execute { lost(ownEpoch, code in setOf(1008, 4001, 4003, 4401, 4403)) }
+                closed(ownEpoch, code)
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                control.execute { lost(ownEpoch, code in setOf(1008, 4001, 4003, 4401, 4403)) }
+                closed(ownEpoch, code)
+            }
+            private fun closed(ownEpoch: Long, code: Int) {
+                dispatch {
+                    if (ownEpoch != epoch) return@dispatch
+                    val error = protocolError
+                    if (error != null && error !in setOf("AUTH_REVOKED", "DEVICE_REVOKED", "UNAUTHORIZED")) halt("Server rejected protocol data ($error); stopped without erasing credentials", false)
+                    else lost(ownEpoch, code in setOf(1008, 4001, 4003, 4401, 4403))
+                }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (!control.isShutdown) control.execute { lost(ownEpoch, response?.code in setOf(401, 403)) }
+                if (!control.isShutdown) dispatch { lost(ownEpoch, response?.code in setOf(401, 403)) }
             }
         })
     }
@@ -187,7 +206,7 @@ class BridgeService : Service() {
         val ceiling = min(300000L, 1000L shl attempt.coerceAtMost(9))
         attempt++
         retry?.cancel(false)
-        retry = control.schedule({ retry = null; connect() }, Random.nextLong(ceiling / 2, ceiling + 1), TimeUnit.MILLISECONDS)
+        retry = control.schedule({ retry = null; dispatch { connect() } }, Random.nextLong(ceiling / 2, ceiling + 1), TimeUnit.MILLISECONDS)
     }
     private fun accept(frame: JSONObject, deviceId: String) {
         val args = Arguments(frame)
@@ -219,13 +238,16 @@ class BridgeService : Service() {
                 if (reserved && active) {
                     try { store.complete(id, result) } catch (_: Exception) { halt("Result persistence failed; connection stopped for safety", false); return@execute }
                 }
-                if (active && !control.isShutdown) control.execute {
+                if (active && !control.isShutdown) dispatch {
                     if (pendingResults.size < 2048) pendingResults.addLast(frame.getLong("expires_at") to result.toString())
                     flush()
                 }
             }
         } catch (_: RejectedExecutionException) {
-            control.execute { send(Results.error(id, "QUEUE_FULL", "Serial command queue full; no execution")) }
+            dispatch {
+                if (pendingResults.size < 2048) pendingResults.addLast(frame.getLong("expires_at") to Results.error(id, "QUEUE_FULL", "Serial command queue full; no execution").toString())
+                flush()
+            }
         }
     }
     private fun advertise() {
@@ -275,8 +297,8 @@ class BridgeService : Service() {
         prefs.edit().putBoolean("enabled", false).putString("status", message).commit()
         socket?.cancel()
         socket = null
-        commands.shutdownNow()
         if (erase) { credentials.clear(); store.clearAll() }
+        commands.shutdownNow()
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
     override fun onDestroy() {
@@ -310,13 +332,13 @@ class BridgeService : Service() {
             }
         }
         fun refresh() {
-            current?.let { service -> if (!service.control.isShutdown) service.control.execute { service.advertise() } }
+            current?.let { service -> if (!service.control.isShutdown) service.dispatch { service.advertise() } }
         }
         fun emit(context: Context, name: String, data: JSONObject) {
             if (!context.getSharedPreferences("connection", MODE_PRIVATE).getBoolean("enabled", false)) return
             try {
                 DurableStore(context).use { it.event(name, data) }
-                current?.let { service -> if (!service.control.isShutdown) service.control.execute { service.flush() } }
+                current?.let { service -> if (!service.control.isShutdown) service.dispatch { service.flush() } }
             } catch (_: Exception) { }
         }
     }

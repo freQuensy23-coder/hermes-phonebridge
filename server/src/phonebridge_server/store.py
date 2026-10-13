@@ -7,7 +7,16 @@ import threading
 from contextlib import contextmanager
 from uuid import uuid4
 
-from .protocol import BridgeError, OPERATIONS, digest, encode_json, fingerprint, validate_json
+from .protocol import (
+    NATIVE_CLOCK_OPERATIONS,
+    OPERATIONS,
+    PACKAGE_PATTERN,
+    BridgeError,
+    digest,
+    encode_json,
+    fingerprint,
+    validate_json,
+)
 
 
 SCHEMA = """
@@ -84,14 +93,17 @@ class Store:
         self.lock = threading.RLock()
         path = settings.db_path
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory = path.parent.stat()
+        if directory.st_uid != os.getuid() or directory.st_mode & 0o022:
+            raise ValueError("SQLite directory must be owned by this user and not writable by other users")
         for candidate in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
             if candidate.is_symlink():
                 raise ValueError("SQLite files must not be symbolic links")
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                raise ValueError("SQLite file must be a regular file owned by this process user")
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_nlink != 1:
+                raise ValueError("SQLite file must be an unaliased regular file owned by this process user")
             os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
@@ -338,7 +350,7 @@ class Store:
             self._expire(db)
             self._session(db, device_id, session_id)
             rows = db.execute(
-                "SELECT id FROM commands WHERE device_id=? AND status IN ('queued','sent') ORDER BY created_at,id LIMIT ?",
+                "SELECT id FROM commands WHERE device_id=? AND status IN ('queued','sent') ORDER BY rowid LIMIT ?",
                 (device_id, self.settings.max_pending_commands),
             ).fetchall()
             return [row["id"] for row in rows]
@@ -371,8 +383,6 @@ class Store:
             data["verified"] = False
         if data is not None:
             self._bounded(data)
-        result_hash = fingerprint({"ok": frame.ok, "data": data,
-                                   "error": frame.error.model_dump() if frame.error else None})
         now = int(self.clock())
         with self.transaction() as db:
             self._expire(db)
@@ -380,6 +390,15 @@ class Store:
             row = db.execute("SELECT * FROM commands WHERE id=?", (frame.id,)).fetchone()
             if row is None or row["device_id"] != device_id:
                 raise BridgeError("RESULT_OWNERSHIP", "Result has no command owned by this device", 403)
+            if frame.ok and row["op"] in NATIVE_CLOCK_OPERATIONS:
+                package = data.get("package") if data is not None else None
+                if not isinstance(package, str) or len(package) > 255 or not PACKAGE_PATTERN.fullmatch(package):
+                    raise BridgeError("INVALID_RESULT", "Native clock dispatch requires its resolved package", 422)
+                data["outcome"] = "dispatched"
+                data["verified"] = False
+                self._bounded(data)
+            result_hash = fingerprint({"ok": frame.ok, "data": data,
+                                       "error": frame.error.model_dump() if frame.error else None})
             if row["status"] in ("succeeded", "failed"):
                 if row["result_hash"] != result_hash:
                     raise BridgeError("RESULT_CONFLICT", "Terminal command result cannot be changed", 409)

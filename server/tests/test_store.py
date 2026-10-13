@@ -228,3 +228,96 @@ def test_symlink_database_and_unknown_schema_are_refused(settings, clock, tmp_pa
     connection.close()
     with pytest.raises(ValueError, match="database version"):
         Store(settings, clock)
+
+
+def test_offline_queue_preserves_insertion_order_with_identical_timestamps(store_factory):
+    store = store_factory()
+    _, _, device_id, session = provision(store)
+    commands = [store.enqueue(device_id, CommandRequest(op="device.info", args={"index": index}))
+                for index in range(20)]
+    assert store.pending(device_id, session) == [command["id"] for command in commands]
+
+
+def test_unadvertised_device_cannot_queue_commands(store_factory):
+    store = store_factory()
+    _, _, device_id, _ = provision(store, capabilities=[])
+    with pytest.raises(BridgeError) as unsupported:
+        store.enqueue(device_id, CommandRequest(op="device.info"))
+    assert unsupported.value.code == "UNSUPPORTED"
+
+
+def test_other_user_writable_database_directory_is_refused(settings, clock):
+    settings.db_path.parent.mkdir(parents=True, mode=0o777)
+    settings.db_path.parent.chmod(0o777)
+    with pytest.raises(ValueError, match="not writable"):
+        Store(settings, clock)
+
+
+def test_database_page_quota_is_configured(store_factory):
+    store = store_factory(max_database_bytes=1048576)
+    page_size = store.connection.execute("PRAGMA page_size").fetchone()[0]
+    page_count = store.connection.execute("PRAGMA max_page_count").fetchone()[0]
+    assert page_size * page_count <= 1048576
+
+
+def test_device_capacity_does_not_consume_pending_pairing(store_factory):
+    store = store_factory(max_devices=1)
+    provision(store)
+    pairing = store.create_pairing(PairingRequest(name="Second phone"))
+    with pytest.raises(BridgeError) as full:
+        store.claim(ClaimRequest(token=pairing["qr_payload"]["token"], name="Second phone", platform="android"))
+    assert full.value.code == "QUEUE_FULL"
+    assert store.pairing(pairing["id"])["status"] == "pending"
+    assert len(store.devices()["devices"]) == 1
+
+
+def test_idempotency_keys_are_scoped_to_devices_and_survive_results(store_factory):
+    store = store_factory()
+    _, _, first, session_a = provision(store)
+    _, _, second, _ = provision(store)
+    request = CommandRequest(op="device.info", idempotency_key="shared-key")
+    one = store.enqueue(first, request)
+    two = store.enqueue(second, request)
+    assert one["id"] != two["id"]
+    store.dispatch(first, session_a, one["id"])
+    store.result(first, session_a, ResultFrame(type="result", id=one["id"], ok=True, data={}))
+    assert store.enqueue(first, request) == one
+    assert store.command(one["id"])["status"] == "succeeded"
+
+
+def test_failed_result_cannot_contain_success_data(store_factory):
+    store = store_factory()
+    _, _, device_id, session = provision(store)
+    command = store.enqueue(device_id, CommandRequest(op="device.info"))
+    store.dispatch(device_id, session, command["id"])
+    bad = ResultFrame(type="result", id=command["id"], ok=False, data={"success": True},
+                      error=ResultError(code="VALIDATION_ERROR", message="Invalid"))
+    with pytest.raises(BridgeError) as invalid:
+        store.result(device_id, session, bad)
+    assert invalid.value.code == "INVALID_RESULT"
+    assert store.command(command["id"])["status"] == "sent"
+
+
+def test_native_clock_results_cannot_assert_verified_changes(store_factory):
+    store = store_factory()
+    _, _, device_id, session = provision(store)
+    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create", args={"hour": 8, "minute": 0}))
+    store.dispatch(device_id, session, command["id"])
+    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True,
+                                               data={"outcome": "changed", "verified": True, "package": "com.sec.android.app.clockpackage"}))
+    data = store.command(command["id"])["data"]
+    assert data["outcome"] == "dispatched"
+    assert data["verified"] is False
+    assert data["package"] == "com.sec.android.app.clockpackage"
+
+
+def test_native_clock_dispatch_requires_package_identity(store_factory):
+    store = store_factory()
+    _, _, device_id, session = provision(store)
+    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create", args={"hour": 8, "minute": 0}))
+    store.dispatch(device_id, session, command["id"])
+    with pytest.raises(BridgeError) as invalid:
+        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True,
+                                                   data={"outcome": "dispatched", "verified": False}))
+    assert invalid.value.code == "INVALID_RESULT"
+    assert store.command(command["id"])["status"] == "sent"

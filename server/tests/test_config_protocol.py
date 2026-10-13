@@ -27,7 +27,8 @@ def test_weak_or_invalid_admin_tokens_are_rejected(token):
 
 @pytest.mark.parametrize("url", ["http://phone.example", "https://user:secret@phone.example",
                                  "https://phone.example/path", "https://phone.example?token=x",
-                                 "https://phone.example#fragment", "https://phone.example:bad", "https://"])
+                                 "https://phone.example#fragment", "https://phone.example:bad", "https://", "https://phone.example:0",
+                                 "https://bad_host.example", "https://phone.example\\attacker", "https://.example"])
 def test_unsafe_public_urls_are_rejected(url):
     with pytest.raises(ValueError):
         Settings(admin_token=ADMIN_TOKEN, public_url=url)
