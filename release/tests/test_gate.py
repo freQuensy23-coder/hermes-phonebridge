@@ -21,7 +21,7 @@ class FakeAPI:
         self.main_artifact.update(id=180, name="phonebridge-release-input-" + MAIN)
         self.main_artifact["workflow_run"].update(id=110, head_sha=MAIN)
         self.main_jobs = [dict(job, id=job["id"] + 100, run_id=110, head_sha=MAIN) for job in self.jobs]
-        self.pulls = {1: self.pull(SOURCE), 2: self.pull(MAIN)}
+        self.pulls = {1: dict(self.pull(SOURCE), number=1), 2: dict(self.pull(MAIN), number=2)}
         self.runs = [{"id": 10}]
         self.artifacts = [self.artifact]
         self.tag_object = {"type": "commit", "sha": SOURCE}

@@ -135,6 +135,12 @@ jobs:
             sleep 1
           done
           exit 1
+      - name: Retrieve exact private vendor interoperability fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download phonebridge-ci-vendor-fixtures --repo freQuensy23-coder/hermes-phonebridge --pattern google-8.2.apk --dir "$RUNNER_TEMP/clock-fixture"
+          printf '%s  %s\n' 'cf71cbc0728bb44e37d5ad19772b6ae9b39aae07b46945e7cde3a930cbccd383' "$RUNNER_TEMP/clock-fixture/google-8.2.apk" | sha256sum --check --status
       - uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
           api-level: ${{ matrix.api }}
@@ -143,7 +149,7 @@ jobs:
           profile: pixel_6
           disk-size: 2048M
           disable-animations: true
-          script: cd android && chmod +x gradlew && ./gradlew --no-daemon connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 -Pandroid.testInstrumentationRunnerArguments.adminToken=ci-phonebridge-test-admin-token-000000000000000000
+          script: adb install -r "$RUNNER_TEMP/clock-fixture/google-8.2.apk" && cd android && chmod +x gradlew && ./gradlew --no-daemon connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 -Pandroid.testInstrumentationRunnerArguments.adminToken=ci-phonebridge-test-admin-token-000000000000000000
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
