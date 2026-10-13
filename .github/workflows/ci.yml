@@ -84,7 +84,7 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
-      - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease
+      - run: chmod +x gradlew && ./gradlew --no-daemon --refresh-dependencies testDebugUnitTest assembleDebug assembleRelease
         working-directory: android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -152,6 +152,8 @@ jobs:
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
             ${{ runner.temp }}/phonebridge-server.log
+            ${{ runner.temp }}/phonebridge-tunnel.log
+            ${{ runner.temp }}/qr-fixture-http.log
             ${{ runner.temp }}/google-clock-evidence/
           if-no-files-found: error
 

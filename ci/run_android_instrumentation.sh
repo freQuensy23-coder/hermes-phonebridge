@@ -21,14 +21,14 @@ adb install -r "$RUNNER_TEMP/clock-fixture/google-8.2.apk"
 (
   cd android
   chmod +x gradlew
-  ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest
+  ./gradlew --no-daemon --refresh-dependencies assembleDebug assembleDebugAndroidTest
 )
 curl --fail --silent --show-error --max-time 20 "$PHONEBRIDGE_CI_PUBLIC_URL/healthz"
 umask 077
 mkdir "$RUNNER_TEMP/qr-fixture"
 PHONEBRIDGE_URL=http://127.0.0.1:18940 PHONEBRIDGE_TOKEN="$admin_token" \
   phonebridge pair --name QR-CI --ttl 900 --qr "$RUNNER_TEMP/qr-fixture/pairing.png" > "$RUNNER_TEMP/qr-fixture/pairing.json"
-python3 -m http.server 18941 --bind 127.0.0.1 --directory "$RUNNER_TEMP/qr-fixture" > "$RUNNER_TEMP/qr-fixture-http.log" 2>&1 &
+python3 -m http.server 18941 --protocol HTTP/1.1 --bind 127.0.0.1 --directory "$RUNNER_TEMP/qr-fixture" > "$RUNNER_TEMP/qr-fixture-http.log" 2>&1 &
 fixture_pid=$!
 status=0
 (
