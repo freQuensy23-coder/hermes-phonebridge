@@ -284,12 +284,51 @@ class ServerInstrumentationTest {
         val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Expiry CI").put("ttl_seconds", 1))
         val payload = pairing.getJSONObject("qr_payload")
         assertEquals(expectedPublicServerUrl, payload.getString("server"))
-        Thread.sleep(1600)
-        assertEquals("expired", http("GET", "/v1/pairings/${pairing.getString("id")}").getString("status"))
+        val text = payload.toString()
+        val expiresAt = payload.getLong("expires_at")
+        assertEquals(pairing.getLong("expires_at"), expiresAt)
+        val waitStarted = SystemClock.elapsedRealtime()
+        android.util.Log.i("PairingExpiryCI", "serverIssuedAt=${expiresAt - 1} expiresAt=$expiresAt deviceNow=${System.currentTimeMillis() / 1000}")
+        val qr = PairingQr.parse(text, false, expiresAt - 1)
+        assertEquals("https", qr.server.scheme)
+        assertEquals(expectedPublicServerUrl.toHttpUrl().host, qr.server.host)
+        assertEquals(443, qr.server.port)
+        assertEquals("$expectedPublicServerUrl/", qr.server.toString())
         for (allowEmulator in listOf(true, false)) {
-            try { PairingQr.parse(payload.toString(), allowEmulator); fail("Expired QR must fail") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
+            assertEquals(qr, PairingQr.parse(text, allowEmulator, expiresAt - 1))
+            for (now in listOf(expiresAt, expiresAt + 1, expiresAt - 86401)) {
+                try {
+                    PairingQr.parse(text, allowEmulator, now)
+                    fail("The genuine QR must reject expiry boundaries and TTLs exceeding one day")
+                } catch (e: BridgeFailure) {
+                    assertEquals("VALIDATION_ERROR", e.code)
+                }
+            }
         }
+        var expired = JSONObject()
+        waitUntil {
+            expired = http("GET", "/v1/pairings/${pairing.getString("id")}")
+            expired.getString("status") == "expired"
+        }
+        assertEquals("expired", expired.getString("status"))
+        assertEquals(expiresAt, expired.getLong("expires_at"))
+        assertTrue("An expired pairing must not issue a device", expired.isNull("device_id"))
+        android.util.Log.i("PairingExpiryCI", "serverStatus=expired expiresAt=$expiresAt deviceNow=${System.currentTimeMillis() / 1000} elapsedMs=${SystemClock.elapsedRealtime() - waitStarted}")
         val claim = JSONObject().put("token", payload.getString("token")).put("name", "Expired").put("platform", "android")
-        BridgeHttp.client.newCall(Request.Builder().url("$expectedPublicServerUrl/v1/pair/claim").post(claim.toString().toRequestBody("application/json".toMediaType())).build()).execute().use { assertTrue(it.code in 400..499) }
+        BridgeHttp.client.newCall(Request.Builder().url("$expectedPublicServerUrl/v1/pair/claim").post(claim.toString().toRequestBody("application/json".toMediaType())).build()).execute().use { response ->
+            assertEquals("The real server must reject the expired credential", 401, response.code)
+            assertEquals("PAIRING_INVALID", JSONObject(response.body!!.string()).getJSONObject("error").getString("code"))
+        }
+        val refused = http("GET", "/v1/pairings/${pairing.getString("id")}")
+        assertEquals("expired", refused.getString("status"))
+        assertTrue("A refused expired claim must not create a paired device", refused.isNull("device_id"))
+        assertNull(Credentials(context).load())
+        waitUntil { System.currentTimeMillis() / 1000 >= expiresAt }
+        android.util.Log.i("PairingExpiryCI", "deviceExpired=true expiresAt=$expiresAt deviceNow=${System.currentTimeMillis() / 1000} elapsedMs=${SystemClock.elapsedRealtime() - waitStarted}")
+        assertTrue("The device clock must reach expiry before default-clock parsing", System.currentTimeMillis() / 1000 >= expiresAt)
+        for (allowEmulator in listOf(true, false)) {
+            try { PairingQr.parse(text, allowEmulator); fail("Expired QR must fail") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
+            try { BridgeHttp.claim(qr, "Expired", allowEmulator); fail("The Android client must refuse an expired QR") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
+        }
     }
 }

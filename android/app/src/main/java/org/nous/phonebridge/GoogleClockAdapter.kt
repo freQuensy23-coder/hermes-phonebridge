@@ -1,7 +1,8 @@
 package org.nous.phonebridge
 
-import android.accessibilityservice.AccessibilityService
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.graphics.Rect
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
@@ -46,13 +47,22 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         val active = windows.singleOrNull { it.id == root.windowId && it.isActive && it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         requireSchema(active != null, "Clock requires one focused application window")
         requireSchema(windows.count { it.isActive } == 1 && windows.count { it.isFocused } == 1, "Clock window focus graph is ambiguous")
-        requireSchema(windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { it.type == AccessibilityWindowInfo.TYPE_SYSTEM && !it.isActive && !it.isFocused && it.root?.packageName?.toString() == "com.android.systemui" }, "Clock is covered by an unknown overlay or input window")
         val application = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         val expectedApplications = if (detail) 2 else 1
         requireSchema(application.size == expectedApplications, "Clock window graph is not recognized: expected=$expectedApplications, actual=${application.size}, active=${root.windowId}, windows=${application.take(8).joinToString { "${it.id}:${it.root?.packageName}:${it.isActive}:${it.isFocused}" }}")
-        application.forEach { window ->
+        val trees = application.associate { window ->
             val windowRoot = window.root ?: failure("UNSUPPORTED", "Clock window root unavailable")
-            val nodes = completeNodes(windowRoot)
+            window.id to completeNodes(windowRoot)
+        }
+        val navigationBackgrounds = trees.values.flatten().filter { it.viewIdResourceName == "android:id/navigationBarBackground" }.map { node ->
+            Rect().also { node.getBoundsInScreen(it) }.let { GoogleClockBounds(it.left, it.top, it.right, it.bottom) }
+        }.distinct()
+        requireSchema(windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { window ->
+            val bounds = Rect().also { window.getBoundsInScreen(it) }
+            GoogleClockWindows.system(android.os.Build.VERSION.SDK_INT, window.type, window.isActive, window.isFocused, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), navigationBackgrounds)
+        }, "Clock is covered by an unknown overlay or input window")
+        application.forEach { window ->
+            val nodes = trees.getValue(window.id)
             requireSchema(visible(nodes, "body").isEmpty() && visible(nodes, "dismiss_button").isEmpty(), "Clock promotion popup is not a collection host")
             if (window.id != root.windowId) requireSchema(!window.isActive && !window.isFocused && window.layer < active!!.layer && nodes.count { it.viewIdResourceName == id("alarm_recycler_view") } == 1 && visible(nodes, "clock").isEmpty() && visible(nodes, "save_button").isEmpty(), "Clock inactive detail host is not recognized")
         }
@@ -175,58 +185,51 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         return UiThread.call { collection(service, alarm).let { Snapshot(it.values, it.window) } }
     }
     private fun awaitSnapshot(service: BridgeAccessibility, alarm: Boolean, expected: List<GoogleClockEntry>, deadline: Long, expectedWindow: Int): Snapshot {
-        var first: Long? = null
-        var last: Snapshot? = null
-        repeat(20) {
-            if (SystemClock.elapsedRealtime() >= deadline) failure("AMBIGUOUS_STATE", "Clock readback deadline exceeded; no effect retry")
+        val stable = GoogleClockReadback(expected, expectedWindow)
+        while (SystemClock.elapsedRealtime() < deadline) {
             val current = snapshot(service, alarm)
-            requireSchema(current.window == expectedWindow, "Clock window changed during readback")
-            if (GoogleClockCollection.same(current.values, expected)) {
-                val now = SystemClock.elapsedRealtime()
-                if (last?.window != current.window) first = now
-                if (first == null) first = now
-                if (now - first!! >= 200) return current
-                last = current
-            } else {
-                first = null
-                last = null
-            }
+            val now = SystemClock.elapsedRealtime()
+            if (now >= deadline) failure("AMBIGUOUS_STATE", "Clock readback deadline exceeded; no effect retry")
+            if (stable.observe(current.values, current.window, now)) return current
             Thread.sleep(100)
         }
         failure("AMBIGUOUS_STATE", "Clock complete readback could not prove the effect; no retry")
     }
-    private fun rebind(service: BridgeAccessibility, alarm: Boolean, expected: List<GoogleClockEntry>, window: Int, deadline: Long) {
+    private fun rebind(service: BridgeAccessibility, alarm: Boolean, expected: List<GoogleClockEntry>, window: Int) {
         gate()
+        val component = ComponentName(GoogleClockProfile.PACKAGE, GoogleClockProfile.ACTIVITY)
+        val activity = context!!.packageManager.getActivityInfo(component, 0)
+        requireSchema(activity.exported && activity.enabled && activity.packageName == GoogleClockProfile.PACKAGE && activity.name == GoogleClockProfile.ACTIVITY, "Clock model-rebind activity does not match the signed profile")
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(GoogleClockProfile.PACKAGE).setComponent(component).setFlags(GoogleClockReadback.RECREATE_FLAGS)
         UiThread.call {
             val fresh = collection(service, alarm)
             requireSchema(fresh.window == window && GoogleClockCollection.same(fresh.values, expected), "Clock changed before model rebind")
-            requireSchema(service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK), "Clock activity close refused")
+            Access.unlocked(service)
+            service.startActivity(intent)
         }
-        var left = false
-        repeat(10) {
-            if (!left && SystemClock.elapsedRealtime() < deadline) {
-                left = UiThread.call {
-                    Access.unlocked(service)
-                    service.rootInActiveWindow?.packageName?.toString()?.let { it != GoogleClockProfile.PACKAGE } == true
-                }
-                if (!left) Thread.sleep(100)
-            }
-        }
-        requireSchema(left, "Clock activity did not close for model rebind")
-        gate()
-        val intent = NativeClocks(context!!).intent(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(JSONObject().put("package", GoogleClockProfile.PACKAGE)))
-        UiThread.call { Access.unlocked(service); service.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        val deadline = SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS
         var returnedWindow: Int? = null
-        repeat(10) {
-            if (returnedWindow == null && SystemClock.elapsedRealtime() < deadline) {
-                returnedWindow = UiThread.call {
-                    Access.unlocked(service)
-                    service.rootInActiveWindow?.takeIf { it.packageName?.toString() == GoogleClockProfile.PACKAGE && it.windowId != window }?.windowId
-                }
-                if (returnedWindow == null) Thread.sleep(100)
+        while (returnedWindow == null && SystemClock.elapsedRealtime() < deadline) {
+            returnedWindow = UiThread.call {
+                Access.unlocked(service)
+                val root = service.rootInActiveWindow ?: return@call null
+                requireSchema(root.packageName?.toString() == GoogleClockProfile.PACKAGE, "Clock foreground changed during model rebind")
+                val windows = service.windows
+                val applications = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                val roots = applications.map { it.root ?: return@call null }
+                requireSchema(roots.all { it.packageName?.toString() == GoogleClockProfile.PACKAGE }, "Clock model rebind contains a foreign application")
+                if (root.windowId == window || windows.any { it.id == window }) return@call null
+                if (applications.none { it.id == root.windowId && it.isActive && it.isFocused }) return@call null
+                GoogleClockReadback.requireRecreated(window, root.windowId, windows.any { it.id == window })
+                val nodes = completeNodes(activeRoot(service))
+                val resource = if (alarm) "alarm_recycler_view" else "timer_view"
+                if (visible(nodes, "loading_indicator").isNotEmpty() || visible(nodes, resource).size != 1) return@call null
+                root.windowId
             }
+            if (returnedWindow == null) Thread.sleep(100)
         }
-        awaitSnapshot(service, alarm, expected, deadline, returnedWindow ?: failure("UNSUPPORTED", "Clock did not return in a new model-backed window"))
+        val rebound = returnedWindow ?: failure("UNSUPPORTED", "Clock did not recreate its model-backed collection window")
+        awaitSnapshot(service, alarm, expected, SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS, rebound)
     }
     private fun detail(service: BridgeAccessibility, before: Snapshot, target: GoogleClockEntry): AccessibilityNodeInfo {
         val root = activeRoot(service, true)
@@ -328,6 +331,7 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         if (alarm && desired == null) openDetail(service, before, target)
         var dispatched = false
         var effectWindow = before.window
+        var phase = "effect dispatch"
         try {
             gate()
             UiThread.call {
@@ -344,14 +348,16 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
                 dispatched = true
                 service.click(node)
             }
-            val deadline = SystemClock.elapsedRealtime() + 4000
+            val deadline = SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS
             Thread.sleep(100)
+            phase = "complete collection readback"
             if (alarm && desired == null) awaitDetailClose(service, target, before.window, effectWindow, deadline)
             val readback = awaitSnapshot(service, alarm, expected, deadline, before.window)
-            rebind(service, alarm, expected, readback.window, deadline)
+            phase = "model recreation and readback"
+            rebind(service, alarm, expected, readback.window)
             return JSONObject().put("outcome", if (desired == null) "deleted" else "changed").put("verified", true).put("scope", "complete_collection_model_rebind").put("state", desired ?: "absent").put("label", label).put("time", if (alarm) time else JSONObject.NULL).put("vendor_id", JSONObject.NULL)
         } catch (e: Exception) {
-            if (dispatched) failure("AMBIGUOUS_STATE", "Clock effect dispatched but complete model-rebind readback failed; never retry effects")
+            if (dispatched) failure("AMBIGUOUS_STATE", "Clock effect dispatched but $phase failed: ${(e as? BridgeFailure)?.code ?: e.javaClass.simpleName}: ${e.message?.take(256)}; never retry effects")
             throw e
         }
     }

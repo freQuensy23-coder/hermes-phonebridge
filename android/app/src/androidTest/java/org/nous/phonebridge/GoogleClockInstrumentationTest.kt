@@ -40,10 +40,12 @@ class GoogleClockInstrumentationTest {
     private fun shell(command: String): String = instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES).executeShellCommand(command).use { parcel ->
         android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).use { it.readBytes().toString(Charsets.UTF_8) }
     }
+    private class VendorFixtureUnavailable(message: String) : RuntimeException(message)
     private fun waitUntil(message: String, predicate: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + 15000
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (predicate()) return
+            val ready = try { predicate() } catch (_: VendorFixtureUnavailable) { false }
+            if (ready) return
             Thread.sleep(100)
         }
         fail(message)
@@ -75,9 +77,11 @@ class GoogleClockInstrumentationTest {
     private fun fixtureNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val nodes = ArrayList<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
-            check(depth <= 30 && nodes.size < 400 && node.refresh() && node.childCount <= 100 && !node.isPassword && node.packageName?.toString() == pkg)
+            check(depth <= 30 && nodes.size < 400 && node.childCount <= 100) { "Vendor fixture exceeds complete traversal bounds" }
+            if (!node.refresh()) throw VendorFixtureUnavailable("Vendor fixture node was detached during native model loading")
+            check(node.childCount <= 100 && !node.isPassword && node.packageName?.toString() == pkg) { "Vendor fixture refreshed schema or ownership is excluded" }
             nodes.add(node)
-            for (index in 0 until node.childCount) visit(node.getChild(index) ?: error("Vendor fixture child unavailable"), depth + 1)
+            for (index in 0 until node.childCount) visit(node.getChild(index) ?: throw VendorFixtureUnavailable("Vendor fixture child was detached during native model loading"), depth + 1)
         }
         visit(root, 0)
         return nodes
@@ -89,11 +93,15 @@ class GoogleClockInstrumentationTest {
             val applications = service.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
             if (applications.size != 2 || applications.count { it.id == root.windowId && it.isActive && it.isFocused } != 1) return@call null
             if (applications.any { it.root?.packageName?.toString() != pkg }) return@call null
-            applications.mapNotNull { window ->
+            val host = applications.single { it.id == root.windowId }
+            val hostBounds = android.graphics.Rect().also { host.getBoundsInScreen(it) }
+            applications.filter { !it.isActive && !it.isFocused && it.layer > host.layer }.mapNotNull { window ->
+                val popupBounds = android.graphics.Rect().also { window.getBoundsInScreen(it) }
+                if (popupBounds.isEmpty || !hostBounds.contains(popupBounds)) return@mapNotNull null
                 val popup = window.root ?: return@mapNotNull null
                 val nodes = fixtureNodes(popup)
-                val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here") } ?: return@mapNotNull null
-                val dismissal = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser && it.isEnabled && it.isClickable && it.text?.toString() == "Dismiss" } ?: return@mapNotNull null
+                val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.className?.toString() == "android.widget.TextView" && it.isVisibleToUser && it.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here") } ?: return@mapNotNull null
+                val dismissal = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.className?.toString() == "android.widget.TextView" && it.isVisibleToUser && it.isEnabled && it.isClickable && it.text?.toString() == "Dismiss" } ?: return@mapNotNull null
                 if (nodes.any { it.isPassword || it.packageName?.toString() != pkg } || nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/play_pause", "$pkg:id/delete_button", "$pkg:id/tertiary_button", "$pkg:id/save_button", "$pkg:id/alarm_recycler_view", "$pkg:id/timer_view") && it.isVisibleToUser }) return@mapNotNull null
                 body.windowId.takeIf { it == dismissal.windowId }
             }.singleOrNull()
@@ -112,22 +120,51 @@ class GoogleClockInstrumentationTest {
             assertEquals(2, applications.size)
             assertTrue(applications.all { it.root?.packageName?.toString() == pkg })
             assertEquals(1, applications.count { it.id == active.windowId && it.isActive && it.isFocused })
-            assertTrue(windows.filter { it.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }.all { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM && !it.isActive && !it.isFocused && it.root?.packageName?.toString() == "com.android.systemui" })
-            val popup = applications.single { it.id == candidate }.root ?: error("Observed vendor promotion disappeared before dismissal")
+            assertEquals(1, windows.count { it.isActive })
+            assertEquals(1, windows.count { it.isFocused })
+            val host = applications.single { it.id == active.windowId }
+            val hostNodes = fixtureNodes(host.root ?: error("Observed collection host disappeared"))
+            val navigationBackgrounds = hostNodes.filter { it.viewIdResourceName == "android:id/navigationBarBackground" }.map { node ->
+                android.graphics.Rect().also { node.getBoundsInScreen(it) }.let { GoogleClockBounds(it.left, it.top, it.right, it.bottom) }
+            }.distinct()
+            assertTrue(windows.filter { it.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }.all { window ->
+                val bounds = android.graphics.Rect().also { window.getBoundsInScreen(it) }
+                GoogleClockWindows.system(Build.VERSION.SDK_INT, window.type, window.isActive, window.isFocused, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), navigationBackgrounds)
+            })
+            val popupWindow = applications.single { it.id == candidate }
+            assertFalse(popupWindow.isActive)
+            assertFalse(popupWindow.isFocused)
+            assertTrue(popupWindow.layer > host.layer)
+            val hostBounds = android.graphics.Rect().also { host.getBoundsInScreen(it) }
+            val popupBounds = android.graphics.Rect().also { popupWindow.getBoundsInScreen(it) }
+            assertTrue(!popupBounds.isEmpty && hostBounds.contains(popupBounds))
+            val popup = popupWindow.root ?: error("Observed vendor promotion disappeared before dismissal")
             val nodes = fixtureNodes(popup)
             assertEquals(pkg, popup.packageName?.toString())
-            assertTrue(nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here"))
+            val body = nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }
+            assertEquals("android.widget.TextView", body.className?.toString())
+            assertTrue(body.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here"))
+            assertFalse(nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/play_pause", "$pkg:id/delete_button", "$pkg:id/tertiary_button", "$pkg:id/save_button", "$pkg:id/alarm_recycler_view", "$pkg:id/timer_view") && it.isVisibleToUser })
             val dismissal = nodes.single { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser }
+            assertEquals("android.widget.TextView", dismissal.className?.toString())
             assertEquals("Dismiss", dismissal.text?.toString())
+            assertEquals(candidate, body.windowId)
+            assertEquals(candidate, dismissal.windowId)
             assertTrue(dismissal.isEnabled && dismissal.isClickable && !dismissal.isPassword)
+            assertTrue(dismissal.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK })
+            val dismissalBounds = android.graphics.Rect().also { dismissal.getBoundsInScreen(it) }
+            assertTrue(!dismissalBounds.isEmpty && popupBounds.contains(dismissalBounds) && hostBounds.contains(dismissalBounds))
             service.click(dismissal)
         }
         waitUntil("Genuine vendor promotion remained after its single explicit dismissal") { UiThread.call { service.windows.none { it.id == candidate } } }
+        assertEquals("Promotion dismissal must not mutate native models", count, modelCount(alarm))
         record("vendor-promotion-dismissed")
         return true
     }
     private fun show(alarm: Boolean) {
-        clocks.execute(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(args()))
+        val dispatched = clocks.execute(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(args()))
+        assertFalse(dispatched.getBoolean("verified"))
+        assertEquals("dispatched", dispatched.getString("outcome"))
         val anchor = "$pkg:id/${if (alarm) "alarm_recycler_view" else "timer_view"}"
         waitUntil("Genuine Google Clock collection is missing") {
             UiThread.call {
@@ -185,10 +222,18 @@ class GoogleClockInstrumentationTest {
     private fun rejected(expected: Set<String>, action: () -> Unit) {
         try { action(); fail("Unsafe Clock operation must be rejected before mutation") } catch (e: BridgeFailure) { assertTrue("Unexpected refusal ${e.code}: ${e.message}", e.code in expected) }
     }
-    private fun verified(result: JSONObject, outcome: String) {
+    private fun verified(op: String, selection: JSONObject, outcome: String) {
+        val previousWindow = UiThread.call { service.safeRoot(pkg).windowId }
+        record("before-$op")
+        val result = ui(op, selection)
         assertTrue(result.toString(), result.getBoolean("verified"))
         assertEquals(outcome, result.getString("outcome"))
         assertEquals("complete_collection_model_rebind", result.getString("scope"))
+        UiThread.call {
+            val root = service.safeRoot(pkg)
+            assertNotEquals("Verified mutations must rebuild the genuine native collection", previousWindow, root.windowId)
+            assertTrue(service.windows.none { it.id == previousWindow })
+        }
         record("effect-$outcome")
     }
     private fun record(phase: String) {
@@ -300,18 +345,21 @@ class GoogleClockInstrumentationTest {
         val missingBefore = values(initial)
         rejected(setOf("NOT_FOUND")) { ui("clock.alarms.delete", args().put("label", "missing").put("time", target.getString("time"))) }
         assertEquals(missingBefore, values(list(true)))
-        verified(ui("clock.alarms.disable", selection(target, true)), "changed")
+        verified("clock.alarms.disable", selection(target, true), "changed")
         assertFalse(list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
         assertEquals(values(survivors), values(list(true).filter { it.getString("label") != target.getString("label") }))
         shell("am force-stop $pkg")
         show(true)
         assertFalse("Disabled state was not persisted across genuine vendor process restart", list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
-        assertEquals("unchanged", ui("clock.alarms.disable", selection(target, true)).getString("outcome"))
-        verified(ui("clock.alarms.enable", selection(target, true)), "changed")
+        val unchanged = ui("clock.alarms.disable", selection(target, true))
+        assertEquals("unchanged", unchanged.getString("outcome"))
+        assertTrue(unchanged.getBoolean("verified"))
+        assertEquals("complete_current_collection", unchanged.getString("scope"))
+        verified("clock.alarms.enable", selection(target, true), "changed")
         shell("am force-stop $pkg")
         show(true)
         assertTrue(list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
-        verified(ui("clock.alarms.delete", selection(target, true)), "deleted")
+        verified("clock.alarms.delete", selection(target, true), "deleted")
         assertEquals(values(survivors), values(list(true)))
         shell("am force-stop $pkg")
         show(true)
@@ -335,12 +383,12 @@ class GoogleClockInstrumentationTest {
         rejected(setOf("UNSUPPORTED")) { ui("clock.timers.cancel", args().put("id", "pretend-vendor-id")) }
         rejected(setOf("VALIDATION_ERROR")) { ui("clock.timers.cancel", args().put("label", target.getString("label")).put("time", "1:59:59")) }
         assertEquals(values(initial), values(list(false)))
-        verified(ui("clock.timers.pause", selection(target, false)), "changed")
+        verified("clock.timers.pause", selection(target, false), "changed")
         assertEquals("paused", list(false).single { it.getString("label") == target.getString("label") }.getString("state"))
         assertEquals(values(listOf(survivor)), values(list(false).filter { it.getString("label") == survivor.getString("label") }))
-        verified(ui("clock.timers.resume", selection(target, false)), "changed")
+        verified("clock.timers.resume", selection(target, false), "changed")
         Thread.sleep(1100)
-        verified(ui("clock.timers.cancel", selection(target, false)), "deleted")
+        verified("clock.timers.cancel", selection(target, false), "deleted")
         assertEquals(values(listOf(survivor)), values(list(false)))
         shell("am force-stop $pkg")
         show(false)
@@ -348,12 +396,12 @@ class GoogleClockInstrumentationTest {
         timerModels = 1
         create("clock.timers.create", JSONObject().put("seconds", 6300).put("label", "CI paused cancellation timer"))
         val pausedTarget = list(false).single { it.getString("label") == "CI paused cancellation timer" }
-        verified(ui("clock.timers.pause", selection(pausedTarget, false)), "changed")
+        verified("clock.timers.pause", selection(pausedTarget, false), "changed")
         val pausedBefore = countdown(pausedTarget.getString("label"))
         Thread.sleep(1100)
         assertEquals("Paused genuine countdown must not drift", pausedBefore, countdown(pausedTarget.getString("label")))
         assertEquals("paused", list(false).single { it.getString("label") == pausedTarget.getString("label") }.getString("state"))
-        verified(ui("clock.timers.cancel", selection(pausedTarget, false)), "deleted")
+        verified("clock.timers.cancel", selection(pausedTarget, false), "deleted")
         assertEquals(values(listOf(survivor)), values(list(false)))
         shell("am force-stop $pkg")
         show(false)

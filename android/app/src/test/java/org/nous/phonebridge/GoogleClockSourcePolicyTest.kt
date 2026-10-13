@@ -80,6 +80,53 @@ class GoogleClockSourcePolicyTest {
         rejected { classic.state("CI timer", "Pause", "Reset", "Delete Other") }
     }
 
+    @Test fun sourcePolicyAcceptsApi35LauncherNavigationOnlyAtTheObservedPlatformBackground() {
+        val bar = GoogleClockBounds(0, 2274, 1080, 2400)
+        fun accepts(sdk: Int = 35, type: Int = 3, active: Boolean = false, focused: Boolean = false, pkg: String = "com.android.launcher3", bounds: GoogleClockBounds = bar, backgrounds: List<GoogleClockBounds> = listOf(bar)) = GoogleClockWindows.system(sdk, type, active, focused, pkg, bounds, backgrounds)
+        assertTrue(accepts())
+        assertTrue(accepts(pkg = "com.android.systemui", backgrounds = emptyList()))
+        assertFalse(accepts(sdk = 31))
+        assertFalse(accepts(type = 1))
+        assertFalse(accepts(type = 4))
+        assertFalse(accepts(active = true))
+        assertFalse(accepts(focused = true))
+        assertFalse(accepts(pkg = "unknown.overlay"))
+        assertFalse(accepts(backgrounds = emptyList()))
+        assertFalse(accepts(bounds = bar.copy(top = 100)))
+        assertFalse(accepts(bounds = bar.copy(right = 900)))
+        assertFalse(accepts(bounds = GoogleClockBounds(0, 0, 0, 0), backgrounds = listOf(GoogleClockBounds(0, 0, 0, 0))))
+    }
+
+    @Test fun sourcePolicyRequiresRecreatedWindowNotBackAndShowOfRetainedSingleTask() {
+        rejected { GoogleClockReadback.requireRecreated(88, 88, false) }
+        rejected { GoogleClockReadback.requireRecreated(88, 90, true) }
+        GoogleClockReadback.requireRecreated(88, 90, false)
+        assertEquals("com.android.deskclock.DeskClock", GoogleClockProfile.ACTIVITY)
+        assertEquals(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK, GoogleClockReadback.RECREATE_FLAGS)
+    }
+
+    @Test fun sourcePolicyRequiresRepeatedFreshCompleteReadbackAndResetsOnAnyMismatch() {
+        val target = GoogleClockEntry("CI timer, Start Alarm", "", "paused", "")
+        val survivor = GoogleClockEntry("CI survivor timer", "", "running", "")
+        val expected = listOf(target, survivor)
+        val stable = GoogleClockReadback(expected, 90)
+        assertFalse(stable.observe(expected, 90, 1000))
+        assertFalse(stable.observe(expected, 90, 1100))
+        assertFalse(stable.observe(listOf(target, survivor.copy(state = "paused")), 90, 1200))
+        assertFalse(stable.observe(expected.reversed(), 90, 1300))
+        assertFalse(stable.observe(expected, 90, 1499))
+        assertTrue(stable.observe(expected, 90, 1500))
+        rejected { stable.observe(expected, 88, 1600) }
+        val incomplete = GoogleClockReadback(expected, 90)
+        assertFalse(incomplete.observe(listOf(target), 90, 1000))
+        assertFalse(incomplete.observe(listOf(target), 90, 5000))
+        val alarm = GoogleClockEntry("CI alarm, Start Alarm", "05:31", "disabled", "every day")
+        val alarmReadback = GoogleClockReadback(listOf(alarm), 91)
+        assertFalse(alarmReadback.observe(listOf(alarm.copy(state = "enabled")), 91, 1000))
+        assertFalse(alarmReadback.observe(listOf(alarm), 91, 1500))
+        assertTrue(alarmReadback.observe(listOf(alarm), 91, 1700))
+    }
+
     @Test fun sourcePolicyComparesCompleteSurvivorsWithoutCountdownOrPositionIdentity() {
         val a = GoogleClockEntry("Label, Start Alarm", "", "running", "")
         val b = GoogleClockEntry("Other", "", "paused", "")

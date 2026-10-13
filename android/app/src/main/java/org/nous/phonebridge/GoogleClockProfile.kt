@@ -8,6 +8,7 @@ import java.security.MessageDigest
 
 internal object GoogleClockProfile {
     const val PACKAGE = "com.google.android.deskclock"
+    const val ACTIVITY = "com.android.deskclock.DeskClock"
     const val VERSION = "8.2 (805685915)"
     const val CODE = 76008260L
     const val APK_SHA256 = "cf71cbc0728bb44e37d5ad19772b6ae9b39aae07b46945e7cde3a930cbccd383"
@@ -48,6 +49,36 @@ internal object GoogleClockProfile {
 
     fun requireInstalled(context: Context) {
         if (!installed(context)) failure("UNSUPPORTED", "Requires the exact signed Google Clock 8.2 artifact, English locale and API 31 or 35")
+    }
+}
+
+internal data class GoogleClockBounds(val left: Int, val top: Int, val right: Int, val bottom: Int) {
+    val nonempty get() = left < right && top < bottom
+}
+
+internal object GoogleClockWindows {
+    fun system(sdk: Int, type: Int, active: Boolean, focused: Boolean, pkg: String?, bounds: GoogleClockBounds, navigationBackgrounds: List<GoogleClockBounds>): Boolean =
+        type == 3 && !active && !focused && (pkg == "com.android.systemui" || (sdk == 35 && pkg == "com.android.launcher3" && bounds.nonempty && navigationBackgrounds.count { it == bounds } == 1))
+}
+
+internal class GoogleClockReadback(private val expected: List<GoogleClockEntry>, private val window: Int) {
+    private var since: Long? = null
+    fun observe(values: List<GoogleClockEntry>, currentWindow: Int, now: Long): Boolean {
+        if (currentWindow != window) failure("UNSUPPORTED", "Clock window changed during readback")
+        if (!GoogleClockCollection.same(values, expected)) {
+            since = null
+            return false
+        }
+        val first = since ?: now.also { since = it }
+        return now - first >= 200
+    }
+
+    companion object {
+        const val TIMEOUT_MS = 10000L
+        val RECREATE_FLAGS = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK
+        fun requireRecreated(previousWindow: Int, currentWindow: Int, previousPresent: Boolean) {
+            if (currentWindow == previousWindow || previousPresent) failure("UNSUPPORTED", "Clock retained its old collection window; model rebind is unproven")
+        }
     }
 }
 
