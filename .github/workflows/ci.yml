@@ -121,20 +121,10 @@ jobs:
           df -h "$HOME"
           sudo chmod 666 /dev/kvm
       - run: python -m pip install ./server ./cli
-      - name: Start isolated test server
+      - name: Start isolated HTTPS test server
         env:
-          PHONEBRIDGE_ADMIN_TOKEN: ci-phonebridge-test-admin-token-000000000000000000
-          PHONEBRIDGE_PUBLIC_URL: http://10.0.2.2:18940
-          PHONEBRIDGE_ALLOW_INSECURE: 'true'
-          PHONEBRIDGE_DB_PATH: ${{ runner.temp }}/phonebridge.sqlite3
           PHONEBRIDGE_REVISION: ${{ github.sha }}
-        run: |
-          python -m uvicorn phonebridge_server.app:create_app --factory --host 0.0.0.0 --port 18940 > "$RUNNER_TEMP/phonebridge-server.log" 2>&1 &
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18940/healthz; then exit 0; fi
-            sleep 1
-          done
-          exit 1
+        run: python3 ci/prepare_emulator_server.py start
       - name: Retrieve exact private vendor interoperability fixture
         env:
           GH_TOKEN: ${{ github.token }}
@@ -150,6 +140,9 @@ jobs:
           disk-size: 2048M
           disable-animations: true
           script: bash ci/run_android_instrumentation.sh
+      - name: Stop isolated server and HTTPS tunnel
+        if: always()
+        run: python3 ci/prepare_emulator_server.py stop
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

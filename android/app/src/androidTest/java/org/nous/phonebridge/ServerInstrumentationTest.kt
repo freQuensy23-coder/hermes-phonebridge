@@ -12,6 +12,7 @@ import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -35,6 +36,7 @@ class ServerInstrumentationTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
     private lateinit var server: String
+    private lateinit var expectedPublicServerUrl: String
     private lateinit var adminToken: String
     private var deviceId: String? = null
     private var scenario: ActivityScenario<MainActivity>? = null
@@ -61,6 +63,18 @@ class ServerInstrumentationTest {
         fail("Condition not met within bounded timeout")
     }
     private fun online(id: String) = http("GET", "/v1/devices/$id").let { it.optBoolean("online") && it.optString("version") == "0.1.0" }
+    private fun parsePairing(pairing: JSONObject): PairingQr {
+        val payload = pairing.getJSONObject("qr_payload")
+        assertEquals(expectedPublicServerUrl, payload.getString("server"))
+        val text = payload.toString()
+        val qr = PairingQr.parse(text, true)
+        assertEquals("https", qr.server.scheme)
+        assertEquals(expectedPublicServerUrl.toHttpUrl().host, qr.server.host)
+        assertEquals(443, qr.server.port)
+        assertEquals("$expectedPublicServerUrl/", qr.server.toString())
+        assertEquals(qr, PairingQr.parse(text, false))
+        return qr
+    }
     private fun capabilities(id: String): Set<String> {
         val array = http("GET", "/v1/devices/$id").getJSONArray("capabilities")
         return (0 until array.length()).map { array.getString(it) }.toSet()
@@ -78,9 +92,12 @@ class ServerInstrumentationTest {
     @Before fun setup() {
         val args = InstrumentationRegistry.getArguments()
         server = args.getString("serverUrl")?.trimEnd('/') ?: error("Automatic CI must supply serverUrl")
+        expectedPublicServerUrl = args.getString("expectedPublicServerUrl") ?: error("Automatic CI must supply expectedPublicServerUrl")
         adminToken = args.getString("adminToken") ?: error("Automatic CI must supply adminToken")
         assertEquals("http://10.0.2.2:18940", server)
-        assertTrue(adminToken.length >= 32)
+        assertTrue(expectedPublicServerUrl.matches(Regex("https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.trycloudflare\\.com")))
+        assertEquals("$expectedPublicServerUrl/", expectedPublicServerUrl.toHttpUrl().toString())
+        assertTrue(adminToken.matches(Regex("[A-Za-z0-9_-]{64}")))
         BridgeService.stop(context, true)
         waitUntil(5000) { BridgeService.current == null }
         shell("input keyevent KEYCODE_WAKEUP")
@@ -104,15 +121,16 @@ class ServerInstrumentationTest {
     }
     @Test fun realPairingKeystoreWebSocketPermissionsEventsReconnectExpiryAndRevocation() {
         val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Android CI").put("ttl_seconds", 300))
-        val qr = PairingQr.parse(pairing.getJSONObject("qr_payload").toString(), true)
-        assertEquals("10.0.2.2", qr.server.host)
-        val value = BridgeHttp.claim(qr, "Android CI API ${Build.VERSION.SDK_INT}", true)
+        val qr = parsePairing(pairing)
+        val value = BridgeHttp.claim(qr, "Android CI API ${Build.VERSION.SDK_INT}", false)
+        assertEquals("$expectedPublicServerUrl/", value.server)
+        assertEquals("wss://${qr.server.host}/v1/device/ws", value.wsUrl)
         deviceId = value.deviceId
         val id = value.deviceId
         val status = http("GET", "/v1/pairings/${pairing.getString("id")}")
         assertEquals("claimed", status.getString("status"))
         assertEquals(id, status.getString("device_id"))
-        try { BridgeHttp.claim(qr, "Duplicate", true); fail("One-time claim must be refused") } catch (e: BridgeFailure) { assertEquals("PAIRING_FAILED", e.code) }
+        try { BridgeHttp.claim(qr, "Duplicate", false); fail("One-time claim must be refused") } catch (e: BridgeFailure) { assertEquals("PAIRING_FAILED", e.code) }
         val credentials = Credentials(context)
         credentials.save(value)
         assertEquals(value, credentials.load())
@@ -188,8 +206,10 @@ class ServerInstrumentationTest {
     }
     private fun realServerRecovery(completed: Boolean) {
         val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Result recovery CI").put("ttl_seconds", 300))
-        val qr = PairingQr.parse(pairing.getJSONObject("qr_payload").toString(), true)
-        val credentials = BridgeHttp.claim(qr, "Result recovery API ${Build.VERSION.SDK_INT}", true)
+        val qr = parsePairing(pairing)
+        val credentials = BridgeHttp.claim(qr, "Result recovery API ${Build.VERSION.SDK_INT}", false)
+        assertEquals("$expectedPublicServerUrl/", credentials.server)
+        assertEquals("wss://${qr.server.host}/v1/device/ws", credentials.wsUrl)
         deviceId = credentials.deviceId
         Credentials(context).save(credentials)
         scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -263,10 +283,13 @@ class ServerInstrumentationTest {
     @Test fun expiredServerGeneratedQrCannotBeClaimedOrParsed() {
         val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Expiry CI").put("ttl_seconds", 1))
         val payload = pairing.getJSONObject("qr_payload")
+        assertEquals(expectedPublicServerUrl, payload.getString("server"))
         Thread.sleep(1600)
         assertEquals("expired", http("GET", "/v1/pairings/${pairing.getString("id")}").getString("status"))
-        try { PairingQr.parse(payload.toString(), true); fail("Expired QR must fail") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
+        for (allowEmulator in listOf(true, false)) {
+            try { PairingQr.parse(payload.toString(), allowEmulator); fail("Expired QR must fail") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
+        }
         val claim = JSONObject().put("token", payload.getString("token")).put("name", "Expired").put("platform", "android")
-        BridgeHttp.client.newCall(Request.Builder().url("$server/v1/pair/claim").post(claim.toString().toRequestBody("application/json".toMediaType())).build()).execute().use { assertTrue(it.code in 400..499) }
+        BridgeHttp.client.newCall(Request.Builder().url("$expectedPublicServerUrl/v1/pair/claim").post(claim.toString().toRequestBody("application/json".toMediaType())).build()).execute().use { assertTrue(it.code in 400..499) }
     }
 }

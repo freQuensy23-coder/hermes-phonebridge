@@ -11,6 +11,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.DecodeHintType
 import com.google.zxing.RGBLuminanceSource
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -27,6 +28,7 @@ class QrPipelineInstrumentationTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
     private lateinit var server: String
+    private lateinit var expectedPublicServerUrl: String
     private lateinit var adminToken: String
     private lateinit var fixtureUrl: String
     private var isolatedFixture = false
@@ -44,41 +46,40 @@ class QrPipelineInstrumentationTest {
         assertFalse("CLI metadata must not expose the QR credential", metadata.has("qr_payload") || metadata.has("token"))
 
         val decoded = decodePng(fetch(fixtureUrl, 131072, "image/png"))
+        assertEquals(expectedPublicServerUrl, JSONObject(decoded).getString("server"))
         val qr = PairingQr.parse(decoded, BuildConfig.DEBUG)
-        assertEquals("http", qr.server.scheme)
-        assertEquals("10.0.2.2", qr.server.host)
-        assertEquals(18940, qr.server.port)
-        assertEquals("$server/", qr.server.toString())
+        val expectedOrigin = expectedPublicServerUrl.toHttpUrl()
+        assertEquals("https", qr.server.scheme)
+        assertEquals(expectedOrigin.host, qr.server.host)
+        assertEquals(443, qr.server.port)
+        assertEquals("$expectedPublicServerUrl/", qr.server.toString())
         assertEquals(metadata.getLong("expires_at"), qr.expiresAt)
         val now = System.currentTimeMillis() / 1000
         assertTrue("CLI QR must still be fresh when Android consumes it", qr.expiresAt > now)
         assertTrue("CI pairing must respect the server's maximum TTL", qr.expiresAt <= now + 900)
-        try {
-            PairingQr.parse(decoded, false)
-            fail("Release validation must refuse the emulator's HTTP origin")
-        } catch (e: BridgeFailure) {
-            assertEquals("VALIDATION_ERROR", e.code)
-        }
-        try {
-            PairingQr.parse(decoded, BuildConfig.DEBUG, qr.expiresAt)
-            fail("The decoded QR must be rejected at its expiry boundary")
-        } catch (e: BridgeFailure) {
-            assertEquals("VALIDATION_ERROR", e.code)
+        assertEquals("Release validation must accept the genuine public HTTPS QR", qr, PairingQr.parse(decoded, false))
+        for (allowEmulator in listOf(true, false)) {
+            try {
+                PairingQr.parse(decoded, allowEmulator, qr.expiresAt)
+                fail("The decoded QR must be rejected at its expiry boundary")
+            } catch (e: BridgeFailure) {
+                assertEquals("VALIDATION_ERROR", e.code)
+            }
         }
 
         val pending = http("GET", "/v1/pairings/$id")
         assertEquals("pending", pending.getString("status"))
         assertEquals(qr.expiresAt, pending.getLong("expires_at"))
-        val value = BridgeHttp.claim(qr, "QR-CI API ${Build.VERSION.SDK_INT}", BuildConfig.DEBUG)
+        val value = BridgeHttp.claim(qr, "QR-CI API ${Build.VERSION.SDK_INT}", false)
         deviceId = value.deviceId
-        assertEquals("$server/", value.server)
-        assertEquals("ws://10.0.2.2:18940/v1/device/ws", value.wsUrl)
+        assertEquals("$expectedPublicServerUrl/", value.server)
+        assertEquals("wss://${expectedOrigin.host}/v1/device/ws", value.wsUrl)
         assertTrue("Claim must issue a distinct device credential", value.token != qr.token)
         val claimed = http("GET", "/v1/pairings/$id")
         assertEquals("claimed", claimed.getString("status"))
         assertEquals(value.deviceId, claimed.getString("device_id"))
         try {
-            BridgeHttp.claim(qr, "QR-CI duplicate", BuildConfig.DEBUG)
+            BridgeHttp.claim(qr, "QR-CI duplicate", false)
             fail("The real CLI QR must be one-use")
         } catch (e: BridgeFailure) {
             assertEquals("PAIRING_FAILED", e.code)
@@ -128,13 +129,19 @@ class QrPipelineInstrumentationTest {
         val args = InstrumentationRegistry.getArguments()
         assertEquals("Automatic CI must explicitly enable the isolated CLI PNG fixture", "true", args.getString("qrFixture"))
         server = args.getString("serverUrl") ?: error("Automatic CI must supply serverUrl")
+        expectedPublicServerUrl = args.getString("expectedPublicServerUrl") ?: error("Automatic CI must supply expectedPublicServerUrl")
         adminToken = args.getString("adminToken") ?: error("Automatic CI must supply adminToken")
         fixtureUrl = args.getString("qrFixtureUrl") ?: error("Automatic CI must supply qrFixtureUrl")
-        assertTrue("Only the debug APK may consume an emulator HTTP QR", BuildConfig.DEBUG)
+        assertTrue("Only the debug APK may use the isolated emulator admin endpoint", BuildConfig.DEBUG)
         assertEquals("http://10.0.2.2:18940", server)
-        assertTrue("Only the isolated CI admin token is permitted", adminToken == "ci-phonebridge-test-admin-token-000000000000000000")
+        assertTrue("CI must supply an exact public HTTPS quick-tunnel origin", expectedPublicServerUrl.matches(Regex("https://[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.trycloudflare\\.com")))
+        assertEquals("$expectedPublicServerUrl/", expectedPublicServerUrl.toHttpUrl().toString())
+        assertTrue("CI must supply a random synthetic admin token", adminToken.matches(Regex("[A-Za-z0-9_-]{64}")))
         assertEquals("http://10.0.2.2:18941/pairing.png", fixtureUrl)
         assertEquals("ok", http("GET", "/healthz", admin = false).getString("status"))
+        val publicHealth = JSONObject(fetch("$expectedPublicServerUrl/healthz", 8192).toString(Charsets.UTF_8))
+        assertEquals("ok", publicHealth.getString("status"))
+        assertEquals(BuildConfig.VERSION_NAME, publicHealth.getString("version"))
         isolatedFixture = true
         BridgeService.stop(context, true)
         waitUntil(5000) { BridgeService.current == null }
