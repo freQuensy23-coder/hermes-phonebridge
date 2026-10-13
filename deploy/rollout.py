@@ -11,7 +11,7 @@ import time
 import urllib.request
 
 REPOSITORY = "freQuensy23-coder/hermes-phonebridge"
-REQUIRED_CHECKS = {"python", "android-build", "android-e2e (31)", "android-e2e (35)"}
+REQUIRED_CHECKS = {"security", "python", "android-build", "android-e2e (31)", "android-e2e (35)"}
 BASE = Path.home() / ".local/share/phonebridge"
 SOURCE = Path.home() / "projects/hermes-phonebridge"
 
@@ -36,10 +36,10 @@ def accepted_revision(revision):
         raise RuntimeError("Required automatic checks have not succeeded")
 
 
-def healthy(revision):
+def healthy(revision, url="http://127.0.0.1:18940/healthz"):
     for _ in range(30):
         try:
-            with urllib.request.urlopen("http://127.0.0.1:18940/healthz", timeout=2) as response:
+            with urllib.request.urlopen(url, timeout=2) as response:
                 body = json.load(response)
             if body.get("status") == "ok" and body.get("revision") == revision:
                 return body
@@ -70,8 +70,9 @@ def deploy(revision):
         source_archive.seek(0)
         with tarfile.open(fileobj=source_archive, mode="r:") as source_tar:
             source_tar.extractall(release, filter="data")
-    run("uv", "venv", str(release / ".venv"), "--python", "3.11")
-    run("uv", "pip", "install", "--python", str(release / ".venv/bin/python"), str(release / "server"), str(release / "cli"))
+    uv = str(Path.home() / ".local/bin/uv")
+    run(uv, "venv", str(release / ".venv"), "--python", "3.11")
+    run(uv, "pip", "install", "--python", str(release / ".venv/bin/python"), str(release / "server"), str(release / "cli"))
     (release / "revision.env").write_text(f"PHONEBRIDGE_REVISION={revision}\n")
     os.chmod(release / "revision.env", 0o600)
     current = BASE / "current"
@@ -82,8 +83,15 @@ def deploy(revision):
         run("systemctl", "--user", "restart", "phonebridge.service")
         body = healthy(revision)
         run(str(release / ".venv/bin/python"), str(release / "deploy/provision_https.py"))
+        settings = dict(
+            line.strip().split("=", 1)
+            for line in (Path.home() / ".config/phonebridge/server.env").read_text().splitlines()
+            if "=" in line
+        )
+        public_url = settings["PHONEBRIDGE_PUBLIC_URL"].rstrip("/")
+        public_health = healthy(revision, public_url + "/healthz")
         run("systemctl", "--user", "enable", "phonebridge.service")
-        print(json.dumps({"deployed": True, "health": body}))
+        print(json.dumps({"deployed": True, "health": body, "public_health": public_health}))
     except Exception:
         if previous is not None:
             switch(previous)
