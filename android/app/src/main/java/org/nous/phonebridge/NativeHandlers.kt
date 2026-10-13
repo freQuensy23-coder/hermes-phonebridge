@@ -213,7 +213,14 @@ class NativeHandlers(private val context: Context, private val store: DurableSto
         if (!MainActivity.resumed) failure("FOREGROUND_REQUIRED", "Android clipboard requires PhoneBridge in foreground")
         return UiThread.call {
             val clipboard = context.getSystemService(ClipboardManager::class.java)
-            if (op == "clipboard.set") clipboard.setPrimaryClip(ClipData.newPlainText("PhoneBridge", args.string("text", 8192)!!))
+            if (op == "clipboard.set") {
+                val clip = ClipData.newPlainText("PhoneBridge", args.string("text", 8192)!!)
+                Access.unlocked(context)
+                if (!MainActivity.resumed) failure("FOREGROUND_REQUIRED", "Android clipboard requires PhoneBridge in foreground")
+                clipboard.setPrimaryClip(clip)
+            }
+            Access.unlocked(context)
+            if (!MainActivity.resumed) failure("FOREGROUND_REQUIRED", "Android clipboard requires PhoneBridge in foreground")
             val clip = clipboard.primaryClip
             val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).text?.toString()?.take(8192) else null
             JSONObject().put("text", text ?: JSONObject.NULL).put("verified", op != "clipboard.set" || text == args.string("text", 8192))

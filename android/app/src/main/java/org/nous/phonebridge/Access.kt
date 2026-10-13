@@ -32,6 +32,7 @@ object Access {
         put("location", has(context, Manifest.permission.ACCESS_COARSE_LOCATION) || has(context, Manifest.permission.ACCESS_FINE_LOCATION))
         put("post_notifications", Build.VERSION.SDK_INT < 33 || has(context, Manifest.permission.POST_NOTIFICATIONS))
         put("notification_listener", NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName) && BridgeNotifications.current != null)
+        put("notification_policy", context.getSystemService(android.app.NotificationManager::class.java).isNotificationPolicyAccessGranted)
         put("accessibility", BridgeAccessibility.current != null)
         put("foreground", MainActivity.resumed)
     }

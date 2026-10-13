@@ -109,6 +109,8 @@ def parser():
                     item.add_argument("--label")
                 if action in {"enable", "disable", "delete", "cancel", "pause", "resume"}:
                     item.add_argument("--id", dest="target_id")
+                    if group == "alarms":
+                        item.add_argument("--time")
             if group == "alarms":
                 if action in {"create", "dismiss"}:
                     item.add_argument("--hour", type=integer(0, 23))
@@ -136,7 +138,7 @@ def operation_args(options):
     args = dict(options.args)
     mappings = {"package": "package", "label": "label", "hour": "hour", "minute": "minute",
                 "days": "days", "minutes": "minutes", "seconds": "seconds", "uri": "uri",
-                "target_id": "id", "key": "key", "text": "text", "action_index": "action",
+                "target_id": "id", "time": "time", "key": "key", "text": "text", "action_index": "action",
                 "result_key": "result_key"}
     for attribute, key in mappings.items():
         value = getattr(options, attribute, None)

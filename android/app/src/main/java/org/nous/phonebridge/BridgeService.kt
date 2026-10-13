@@ -67,7 +67,7 @@ class BridgeService : Service() {
     @Volatile private var epoch = 0L
     private var retry: java.util.concurrent.ScheduledFuture<*>? = null
     private var helloState = ""
-    private var sentEvents = mutableMapOf<String, Long>()
+    private val sentEvents = EventSendWindow()
     private var pendingResults = ArrayDeque<Pair<Long, String>>()
     private var lastHello = 0L
     private var credits = 8.0
@@ -168,7 +168,7 @@ class BridgeService : Service() {
                         "ack" -> dispatch {
                             val id = Arguments(frame).string("id", 128)!!
                             store.ack(id)
-                            sentEvents.remove(id)
+                            sentEvents.ack(id)
                         }
                         "command" -> accept(frame, value.deviceId)
                         "revoked" -> dispatch { halt("Revoked by server", true) }
@@ -276,11 +276,7 @@ class BridgeService : Service() {
             if (!takeCredit() || socket?.send(pendingResults.first().second) != true) break
             pendingResults.removeFirst()
         }
-        for (frame in store.events()) {
-            if (budget-- <= 0) break
-            val id = frame.getString("id")
-            if (android.os.SystemClock.elapsedRealtime() - (sentEvents[id] ?: -10000L) >= 10000 && send(frame)) sentEvents[id] = android.os.SystemClock.elapsedRealtime()
-        }
+        sentEvents.flush(store.events(), budget, android.os.SystemClock.elapsedRealtime()) { send(it) }
     }
     private fun state(value: String) {
         prefs.edit().putString("status", value).apply()

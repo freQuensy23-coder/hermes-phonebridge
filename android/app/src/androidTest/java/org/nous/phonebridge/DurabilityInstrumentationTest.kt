@@ -75,6 +75,40 @@ class DurabilityInstrumentationTest {
         assertEquals(8, store.events().first().getJSONObject("data").getInt("index"))
         assertTrue(store.events().sumOf { it.toString().toByteArray().size } <= 2097152)
     }
+    @Test fun lostAcksAndCountEvictionBoundTheProductionSendWindowOnOneConnection() {
+        val window = EventSendWindow()
+        val oldest = store.event("ci.lost_ack", JSONObject().put("index", 0))
+        window.flush(store.events(), 8, 10000) { true }
+        assertEquals(setOf(oldest), window.trackedIds)
+        repeat(530) { index ->
+            store.event("ci.lost_ack", JSONObject().put("index", index + 1))
+            val retained = store.events()
+            window.flush(retained, 8, 20000L + index * 10000L) { true }
+            assertTrue(window.trackedIds.size <= 512)
+            assertTrue(retained.map { it.getString("id") }.toSet().containsAll(window.trackedIds))
+        }
+        assertEquals(512, store.events().size)
+        assertFalse(oldest in window.trackedIds)
+        assertTrue(store.events().none { it.getString("id") == oldest })
+        assertFalse(window.trackedIds.isEmpty())
+    }
+    @Test fun lostAcksAndByteOrAgeEvictionPruneWithoutAnySendBudget() {
+        val window = EventSendWindow()
+        val oldest = store.event("ci.lost_ack", JSONObject().put("value", "old"))
+        window.flush(store.events(), 8, 10000) { true }
+        repeat(150) { store.event("ci.large", JSONObject().put("value", "x".repeat(14900))) }
+        assertTrue(store.events().size < 151)
+        assertTrue(store.events().none { it.getString("id") == oldest })
+        window.flush(store.events(), 0, 10001) { fail("No send budget"); true }
+        assertFalse(oldest in window.trackedIds)
+        val aged = store.event("ci.aged", JSONObject())
+        window.flush(listOf(store.events().single { it.getString("id") == aged }), 8, 20000) { true }
+        store.writableDatabase.execSQL("UPDATE events SET created=? WHERE id=?", arrayOf<Any>(System.currentTimeMillis() / 1000 - 604801, aged))
+        store.event("ci.age_eviction", JSONObject())
+        window.flush(store.events(), 0, 20001) { fail("No send budget"); true }
+        assertFalse(aged in window.trackedIds)
+        assertTrue(store.events().none { it.getString("id") == aged })
+    }
     @Test fun resultCacheBackpressureNeverEvictsAnUnexpiredExecution() {
         val first = command(expires = System.currentTimeMillis() / 1000 + 3600)
         assertNull(store.begin(first))
@@ -109,6 +143,19 @@ class DurabilityInstrumentationTest {
         assertTrue(GoogleClockAdapter().supported("unknown", 1).isEmpty())
         assertTrue(SamsungClockAdapter().supported("unknown", 1).isEmpty())
         assertTrue(AospClockAdapter().supported("unknown", 1).isEmpty())
+    }
+    @Test fun emptyNameZeroCodeAndAllUnidentifiedClockProfilesStayUnadvertised() {
+        for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
+            for ((version, code) in listOf("" to 0L, "unknown" to 1L, "" to 1L, "unknown" to 0L)) {
+                assertTrue(adapter.supported(version, code).isEmpty())
+            }
+        }
+        assertTrue(ClockAdapters(context).capabilities().isEmpty())
+        val providers = NativeClocks(context).providers().getJSONArray("providers")
+        for (index in 0 until providers.length()) {
+            assertEquals(0, providers.getJSONObject(index).getJSONArray("ui_actions").length())
+            assertFalse(providers.getJSONObject(index).getJSONObject("validation").getBoolean("ui_implemented"))
+        }
     }
     @Test fun existingClockIntentsAreTypedAndNeverOwnClockSchedules() {
         val clocks = NativeClocks(context)

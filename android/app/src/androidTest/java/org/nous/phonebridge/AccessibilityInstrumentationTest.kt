@@ -57,6 +57,14 @@ class AccessibilityInstrumentationTest {
         shell("settings put secure accessibility_enabled 1")
         waitUntil { BridgeAccessibility.current != null }
         val service = BridgeAccessibility.current!!
+        for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
+            for (op in AospClockAdapter.operations) {
+                try { adapter.execute(service, op, Arguments(JSONObject())); fail("Unidentified clock profile must refuse every UI operation") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
+            }
+        }
+        val expectedClockOps = if (GoogleClockProfile.installed(context)) GoogleClockProfile.operations else emptySet()
+        assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
+        for (op in AospClockAdapter.operations) assertEquals(op in expectedClockOps, Access.capabilities(context).toString().contains(op))
         waitUntil { UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
         val expected = JSONObject().put("expected_package", context.packageName)
         val initial = service.handle("screen.tree", Arguments(expected))

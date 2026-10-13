@@ -14,13 +14,6 @@ interface ClockUiAdapter {
     fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject
 }
 
-class GoogleClockAdapter : ClockUiAdapter {
-    override val name = "google_deskclock"
-    override fun supported(version: String, code: Long) = emptySet<String>()
-    override fun reason(version: String, code: Long) = "No independently verified Google package/version selector profile; native typed intents remain available"
-    override fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject = failure("UNSUPPORTED", "Google Clock UI version has no verified selector profile")
-}
-
 class SamsungClockAdapter : ClockUiAdapter {
     override val name = "samsung_clock"
     override fun supported(version: String, code: Long) = emptySet<String>()
@@ -32,8 +25,8 @@ class AospClockAdapter : ClockUiAdapter {
     override val name = "aosp_deskclock_source"
     private val pkg = "com.android.deskclock"
     private fun id(value: String) = "$pkg:id/$value"
-    override fun supported(version: String, code: Long): Set<String> = if (version.isEmpty() && code == 0L) operations else emptySet()
-    override fun reason(version: String, code: Long) = if (supported(version, code).isEmpty()) "Unknown AOSP version; refusing UI control" else "Source-derived unversioned AOSP profile; runtime schema checked; not OEM tested"
+    override fun supported(version: String, code: Long) = emptySet<String>()
+    override fun reason(version: String, code: Long) = "No independently verified AOSP package/version selector profile; native typed intents remain available"
     data class AlarmRow(val label: String, val time: String, val enabled: Boolean, val row: AccessibilityNodeInfo)
     private fun alarms(service: BridgeAccessibility): List<AlarmRow> {
         val root = service.safeRoot(pkg)
@@ -80,6 +73,7 @@ class AospClockAdapter : ClockUiAdapter {
         return JSONObject().put("id", identity(label, time)).put("label", label).put("time", time).put("state", state).put("identity_scope", "fresh_visible_snapshot")
     }
     override fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject {
+        if (op !in supported("", 0)) failure("UNSUPPORTED", reason("", 0))
         args.only("package", "id", "label", "time")
         if (op == "clock.alarms.list") return UiThread.call { JSONObject().put("alarms", alarmData(alarms(service))).put("scope", "visible_rows").put("complete", false) }
         if (op == "clock.timers.list") return UiThread.call { JSONObject().put("timers", JSONArray().put(timer(service))).put("scope", "visible_timer").put("complete", false) }
@@ -110,7 +104,8 @@ class AospClockAdapter : ClockUiAdapter {
             UiThread.call {
                 val row = selected(service, label, time)
                 if (desired != null) {
-                    service.click(service.exact(row.row, id("onoff")))
+                    val toggle = service.exact(row.row, id("onoff"))
+                    if (toggle.isChecked != desired) service.click(toggle)
                 } else {
                     val deletion = service.nodes(row.row).singleOrNull { it.viewIdResourceName == id("delete") && it.isVisibleToUser }
                     if (deletion == null) service.click(service.exact(row.row, id("arrow")))
@@ -183,7 +178,7 @@ class AospClockAdapter : ClockUiAdapter {
 
 class ClockAdapters(private val context: Context) {
     fun forPackage(pkg: String): ClockUiAdapter = when (pkg) {
-        "com.google.android.deskclock" -> GoogleClockAdapter()
+        "com.google.android.deskclock" -> GoogleClockAdapter(context)
         "com.sec.android.app.clockpackage" -> SamsungClockAdapter()
         "com.android.deskclock" -> AospClockAdapter()
         else -> failure("UNSUPPORTED", "Clock package is not supported")

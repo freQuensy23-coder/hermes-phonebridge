@@ -42,14 +42,7 @@ class NativeClocks(private val context: Context) {
                 }
             }
             "clock.alarms.dismiss" -> {
-                args.only("package", "label", "hour", "minute")
-                val label = args.string("label", 256, false)
-                requireBridge(label == null || (!args.json.has("hour") && !args.json.has("minute")), "Select alarm by label or time, not both")
-                if (label != null) {
-                    intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_LABEL).putExtra(AlarmClock.EXTRA_MESSAGE, label)
-                } else if (args.json.has("hour") || args.json.has("minute")) {
-                    intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_TIME).putExtra(AlarmClock.EXTRA_HOUR, args.int("hour", 0, 23)).putExtra(AlarmClock.EXTRA_MINUTES, args.int("minute", 0, 59))
-                } else intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_ALL)
+                dismissExtras(intent, args)
             }
             "clock.alarms.snooze" -> {
                 args.only("package", "minutes")
@@ -84,6 +77,22 @@ class NativeClocks(private val context: Context) {
         }
     }
     companion object {
+        internal fun dismissExtras(intent: Intent, args: Arguments) {
+            args.only("package", "label", "hour", "minute")
+            val label = args.string("label", 256, false)
+            requireBridge(label == null || (!args.json.has("hour") && !args.json.has("minute")), "Select alarm by label or time, not both")
+            if (label != null) {
+                intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_LABEL).putExtra(AlarmClock.EXTRA_MESSAGE, label)
+            } else if (args.json.has("hour") || args.json.has("minute")) {
+                intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_TIME)
+                if (args.json.has("hour")) {
+                    val hour = args.int("hour", 0, 23)
+                    intent.putExtra(AlarmClock.EXTRA_HOUR, if (hour > 12) hour - 12 else hour)
+                    intent.putExtra(AlarmClock.EXTRA_IS_PM, hour >= 12)
+                }
+                if (args.json.has("minute")) intent.putExtra(AlarmClock.EXTRA_MINUTES, args.int("minute", 0, 59))
+            } else intent.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_ALL)
+        }
         val packages = listOf("com.google.android.deskclock", "com.sec.android.app.clockpackage", "com.android.deskclock")
         val actions = linkedMapOf("clock.alarms.create" to AlarmClock.ACTION_SET_ALARM, "clock.alarms.dismiss" to AlarmClock.ACTION_DISMISS_ALARM, "clock.alarms.snooze" to AlarmClock.ACTION_SNOOZE_ALARM, "clock.alarms.show" to AlarmClock.ACTION_SHOW_ALARMS, "clock.timers.create" to AlarmClock.ACTION_SET_TIMER, "clock.timers.dismiss" to AlarmClock.ACTION_DISMISS_TIMER, "clock.timers.show" to AlarmClock.ACTION_SHOW_TIMERS)
     }
