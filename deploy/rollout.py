@@ -36,6 +36,29 @@ def accepted_revision(revision):
         raise RuntimeError("Required automatic checks have not succeeded")
 
 
+def accepted_pr(revision):
+    discovered = github(f"repos/{REPOSITORY}/commits/{revision}/pulls")
+    for item in discovered:
+        number = item.get("number")
+        if type(number) is not int or number < 1:
+            continue
+        pull = github(f"repos/{REPOSITORY}/pulls/{number}")
+        base = pull.get("base") or {}
+        head = pull.get("head") or {}
+        if (
+            pull.get("merged") is True
+            and pull.get("state") == "closed"
+            and pull.get("merge_commit_sha") == revision
+            and base.get("ref") == "main"
+            and (base.get("repo") or {}).get("full_name") == REPOSITORY
+            and (head.get("repo") or {}).get("full_name") == REPOSITORY
+            and (pull.get("user") or {}).get("login") == "freQuensy23-coder"
+            and (pull.get("merged_by") or {}).get("login") == "freQuensy23-coder"
+        ):
+            return number
+    raise RuntimeError("Revision must come from an owner-authorized same-repository merged pull request")
+
+
 def healthy(revision, url="http://127.0.0.1:18940/healthz"):
     for _ in range(30):
         try:
@@ -58,6 +81,7 @@ def switch(target):
 
 def deploy(revision):
     accepted_revision(revision)
+    accepted_pr(revision)
     run("git", "fetch", "origin", "main", cwd=SOURCE)
     fetched = run("git", "rev-parse", "origin/main", cwd=SOURCE, capture_output=True, text=True).stdout.strip()
     if fetched != revision:
@@ -78,6 +102,7 @@ def deploy(revision):
     current = BASE / "current"
     previous = current.resolve() if current.is_symlink() else None
     accepted_revision(revision)
+    accepted_pr(revision)
     switch(release)
     try:
         run("systemctl", "--user", "restart", "phonebridge.service")

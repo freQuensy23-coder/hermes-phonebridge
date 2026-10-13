@@ -88,6 +88,7 @@ def deployment(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rollout, "run", run)
     monkeypatch.setattr(rollout, "accepted_revision", lambda value: None)
+    monkeypatch.setattr(rollout, "accepted_pr", lambda value: 1)
     return base, revision, calls
 
 
@@ -154,3 +155,45 @@ def test_deploy_publishes_local_and_public_revision_evidence(deployment, monkeyp
     assert evidence["public_health"]["revision"] == revision
     assert (base / "current").resolve() == base / "releases" / revision
     assert ("systemctl", "--user", "enable", "phonebridge.service") in calls
+
+
+def merged_pull(revision):
+    return {
+        "number": 1,
+        "merged": True,
+        "state": "closed",
+        "merge_commit_sha": revision,
+        "base": {"ref": "main", "repo": {"full_name": rollout.REPOSITORY}},
+        "head": {"repo": {"full_name": rollout.REPOSITORY}},
+        "user": {"login": "freQuensy23-coder"},
+        "merged_by": {"login": "freQuensy23-coder"},
+    }
+
+
+def test_deployment_requires_exact_merged_same_repo_owner_pull(monkeypatch):
+    revision = "a" * 40
+    pull = merged_pull(revision)
+    monkeypatch.setattr(rollout, "github", lambda path: [{"number": 1, "merged": None}] if "/commits/" in path else pull)
+    assert rollout.accepted_pr(revision) == 1
+
+
+@pytest.mark.parametrize("violation", ["unmerged", "wrong_revision", "fork", "wrong_base", "wrong_author", "wrong_merger", "missing"])
+def test_rejects_direct_push_or_untrusted_merged_pull(monkeypatch, violation):
+    revision = "a" * 40
+    pull = merged_pull(revision)
+    if violation == "unmerged":
+        pull["merged"] = False
+    if violation == "wrong_revision":
+        pull["merge_commit_sha"] = "b" * 40
+    if violation == "fork":
+        pull["head"]["repo"]["full_name"] = "outsider/phonebridge"
+    if violation == "wrong_base":
+        pull["base"]["ref"] = "develop"
+    if violation == "wrong_author":
+        pull["user"]["login"] = "outsider"
+    if violation == "wrong_merger":
+        pull["merged_by"]["login"] = "outsider"
+    discovery = [] if violation == "missing" else [{"number": 1}]
+    monkeypatch.setattr(rollout, "github", lambda path: discovery if "/commits/" in path else pull)
+    with pytest.raises(RuntimeError, match="merged pull"):
+        rollout.accepted_pr(revision)

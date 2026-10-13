@@ -130,10 +130,9 @@ jobs:
           if-no-files-found: error
   deploy:
     needs: [security, python, android-build, android-e2e]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'freQuensy23-coder/hermes-phonebridge'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'freQuensy23-coder/hermes-phonebridge' && github.actor == 'freQuensy23-coder' && github.triggering_actor == 'freQuensy23-coder'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: production
     concurrency:
       group: phonebridge-production
       cancel-in-progress: false
