@@ -145,7 +145,7 @@ jobs:
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
-          target: google_apis
+          target: default
           profile: pixel_6
           disk-size: 2048M
           disable-animations: true
