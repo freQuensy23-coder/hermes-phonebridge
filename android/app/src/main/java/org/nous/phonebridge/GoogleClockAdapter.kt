@@ -10,10 +10,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter {
-    override val name = "google_clock_8_2_exact_gastown"
+    override val name = "google_clock_8_2_exact"
     override fun supported(version: String, code: Long): Set<String> =
         if (version == GoogleClockProfile.VERSION && code == GoogleClockProfile.CODE && context != null && GoogleClockProfile.installed(context)) GoogleClockProfile.operations else emptySet()
-    override fun reason(version: String, code: Long) = "Source-derived exact signed 8.2 Gastown profile; English 24-hour UI, API31/35, complete non-scrolling collections only; current explicit display selection, no vendor IDs; CI and physical runtime unverified"
+    override fun reason(version: String, code: Long) = "Source-derived exact signed 8.2 alarm cards and classic/Gastown timer profiles; English 24-hour UI, API31/35, complete non-scrolling collections only; current explicit display selection, no vendor IDs; CI and physical runtime unverified"
 
     private data class Row(val value: GoogleClockEntry, val node: AccessibilityNodeInfo, val control: AccessibilityNodeInfo, val deletion: AccessibilityNodeInfo?)
     private data class Collection(val rows: List<Row>, val window: Int) {
@@ -45,13 +45,16 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         val windows = service.windows
         val active = windows.singleOrNull { it.id == root.windowId && it.isActive && it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         requireSchema(active != null, "Clock requires one focused application window")
+        requireSchema(windows.count { it.isActive } == 1 && windows.count { it.isFocused } == 1, "Clock window focus graph is ambiguous")
         requireSchema(windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { it.type == AccessibilityWindowInfo.TYPE_SYSTEM && !it.isActive && !it.isFocused && it.root?.packageName?.toString() == "com.android.systemui" }, "Clock is covered by an unknown overlay or input window")
         val application = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         val expectedApplications = if (detail) 2 else 1
         requireSchema(application.size == expectedApplications, "Clock window graph is not recognized: expected=$expectedApplications, actual=${application.size}, active=${root.windowId}, windows=${application.take(8).joinToString { "${it.id}:${it.root?.packageName}:${it.isActive}:${it.isFocused}" }}")
         application.forEach { window ->
             val windowRoot = window.root ?: failure("UNSUPPORTED", "Clock window root unavailable")
-            completeNodes(windowRoot)
+            val nodes = completeNodes(windowRoot)
+            requireSchema(visible(nodes, "body").isEmpty() && visible(nodes, "dismiss_button").isEmpty(), "Clock promotion popup is not a collection host")
+            if (window.id != root.windowId) requireSchema(!window.isActive && !window.isFocused && window.layer < active!!.layer && nodes.count { it.viewIdResourceName == id("alarm_recycler_view") } == 1 && visible(nodes, "clock").isEmpty() && visible(nodes, "save_button").isEmpty(), "Clock inactive detail host is not recognized")
         }
         completeNodes(root)
         return root
@@ -102,9 +105,11 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         requireSchema(visible(all, "clock").isEmpty() && visible(all, "save_button").isEmpty() && visible(all, "loading_indicator").isEmpty(), "Clock detail or loading surface is active")
         val resource = id(if (alarm) "alarm_recycler_view" else "timer_view")
         val recycler = all.filter { it.viewIdResourceName == resource }.singleOrNull() ?: failure("UNSUPPORTED", "Clock complete collection anchor is unavailable")
-        requireSchema(recycler.className?.toString() == "android.widget.GridView", "Clock collection is not the source-bound GridLayout accessibility schema")
+        val timerSurface = if (alarm) null else GoogleClockTimerSurface.fromClass(recycler.className?.toString() ?: "")
+        if (alarm) requireSchema(recycler.className?.toString() == "android.widget.GridView", "Clock alarm collection is not the source-bound GridLayout accessibility schema")
         val info = recycler.collectionInfo ?: failure("UNSUPPORTED", "Clock complete collection count is unavailable")
         val count = GoogleClockCollection.count(info.rowCount, info.columnCount, alarm)
+        if (timerSurface == GoogleClockTimerSurface.CLASSIC) requireSchema(count == 0 || info.rowCount == 1 || info.columnCount == 1, "Classic Clock timer collection must be linear")
         requireSchema(info.selectionMode == AccessibilityNodeInfo.CollectionInfo.SELECTION_MODE_NONE && !info.isHierarchical, "Unsupported Clock collection metadata")
         requireSchema(count == 0 || recycler.isVisibleToUser, "Nonempty Clock collection is hidden")
         requireSchema(recycler.actionList.none { it.id in setOf(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD, android.R.id.accessibilityActionScrollUp, android.R.id.accessibilityActionScrollDown, android.R.id.accessibilityActionScrollLeft, android.R.id.accessibilityActionScrollRight) }, "Scrollable Clock collections are excluded")
@@ -123,8 +128,7 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
                 requireSchema(visible(nodes, "label").size <= 1, "Unknown Clock alarm label")
                 val label = labelNode?.let { boundedText(it) } ?: ""
                 if (labelNode != null) requireSchema(boundedText(labelNode, true) == "Label $label", "Clock alarm full label is not corroborated")
-                requireSchema(boundedText(row, true) == "$time ${label.ifEmpty { "Alarm" }}", "Clock alarm card identity mismatch")
-                requireSchema(boundedText(anchor, true) == "$time alarm", "Clock alarm switch identity mismatch")
+                GoogleClockIdentity.alarm(time, boundedText(clock, true), label, boundedText(row, true), boundedText(anchor, true))
                 requireSchema(listOf("pause_resume_text", "watch_alarm_icon", "preemptive_dismiss", "workflow").all { visible(nodes, it).isEmpty() }, "Paused-date, watch, firing or routine alarms are excluded")
                 val days = visible(nodes, "days_of_week").singleOrNull()
                 val upcoming = visible(nodes, "upcoming_instance_label").singleOrNull()
@@ -135,25 +139,29 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
                 requireSchema(one(nodes, "timer_label") == anchor, "Unknown Clock timer row")
                 val label = boundedText(anchor)
                 requireSchema(boundedText(anchor, true) == label, "Only full named Clock timer identities are supported")
-                val action = one(nodes, "play_pause_button")
-                val reset = one(nodes, "reset_button")
-                val deletion = one(nodes, "delete_button")
+                val surface = timerSurface ?: failure("UNSUPPORTED", "Clock timer surface is missing")
+                val other = GoogleClockTimerSurface.values().single { it != surface }
+                requireSchema(listOf(other.action, other.reset, other.deletion, other.addition).all { visible(nodes, it).isEmpty() }, "Clock timer row mixes incompatible surfaces")
+                val action = one(nodes, surface.action)
+                val reset = one(nodes, surface.reset)
+                val deletion = one(nodes, surface.deletion)
                 one(nodes, "timer_text")
-                one(nodes, "add_one_min_button")
+                val addition = visible(nodes, surface.addition)
+                requireSchema(addition.size <= 1, "Clock timer addition control is ambiguous")
+                if (surface == GoogleClockTimerSurface.GASTOWN) one(nodes, surface.addition)
+                else if (addition.isNotEmpty()) requireSchema(boundedText(addition.single(), true) == "Add 1 minute", "Classic Clock timer primary control is not addition")
                 clickable(action)
                 clickable(reset)
                 clickable(deletion)
-                requireSchema(boundedText(reset, true) == "Reset $label" && boundedText(deletion, true) == "Delete $label", "Unknown Clock timer controls")
-                val state = when (boundedText(action, true)) {
-                    "Pause $label" -> "running"
-                    "Start $label" -> "paused"
-                    else -> failure("UNSUPPORTED", "Expired, missed, reset or unknown Clock timer state")
-                }
+                contained(action, row)
+                contained(reset, row)
+                contained(deletion, row)
+                val state = surface.state(label, boundedText(action, true), boundedText(reset, true), boundedText(deletion, true))
                 Row(GoogleClockEntry(label, "", state, ""), row, action, deletion)
             }
         }
         requireSchema(rows.map { it.node }.distinct().size == rows.size, "Clock rows overlap")
-        requireSchema(visible(children, if (alarm) "alarm_card" else "play_pause_button").size == rows.size, "Clock collection contains unknown rows")
+        requireSchema(visible(children, if (alarm) "alarm_card" else timerSurface!!.action).size == rows.size, "Clock collection contains unknown rows")
         if (rows.isEmpty()) {
             if (alarm) requireSchema(boundedText(one(all, "alarm_empty_view")) == "No Alarms", "Clock empty alarm state unavailable")
             else one(all, "timer_setup")

@@ -155,6 +155,7 @@ jobs:
             ${{ runner.temp }}/phonebridge-tunnel.log
             ${{ runner.temp }}/qr-fixture-http.log
             ${{ runner.temp }}/google-clock-evidence/
+            ${{ runner.temp }}/foreground-evidence/
           if-no-files-found: error
 
   release-input:

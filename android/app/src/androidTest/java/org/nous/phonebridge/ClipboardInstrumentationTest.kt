@@ -8,7 +8,6 @@ import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -24,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(AndroidJUnit4::class)
 class ClipboardInstrumentationTest {
+    @get:org.junit.Rule val testName = org.junit.rules.TestName()
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
     private class ClipboardAccessContext(base: Context) : ContextWrapper(base) {
@@ -33,20 +33,12 @@ class ClipboardInstrumentationTest {
             return super.getSystemService(name)
         }
     }
-    private fun shell(command: String) = instrumentation.uiAutomation.executeShellCommand(command).use { parcel -> android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { it.readText() } }
-    private fun waitUntil(predicate: () -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 2500
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (predicate()) return
-            Thread.sleep(10)
-        }
-        fail("Queued clipboard transition did not settle")
-    }
+    private fun shell(command: String) = ForegroundFixture.shell(command)
+    private fun waitUntil(phase: String, predicate: () -> Boolean) = ForegroundFixture.waitUntil("${testName.methodName}-$phase", 2500, predicate)
     private fun queuedTransition(op: String, locked: Boolean) {
         BridgeService.stop(context, true)
-        waitUntil { BridgeService.current == null }
-        shell("input keyevent KEYCODE_WAKEUP")
-        shell("wm dismiss-keyguard")
+        waitUntil("service-stopped") { BridgeService.current == null }
+        ForegroundFixture.prepare(testName.methodName)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         val store = DurableStore(context)
         val entered = CountDownLatch(1)
@@ -60,13 +52,14 @@ class ClipboardInstrumentationTest {
         val handler = Handler(Looper.getMainLooper())
         var worker: Thread? = null
         try {
+            waitUntil("activity-focused-before-baseline") { ForegroundFixture.focused() }
             scenario.onActivity {
                 activity = it
                 Access.unlocked(it)
                 assertTrue(MainActivity.resumed)
                 clipboard.setPrimaryClip(ClipData.newPlainText("CI", "unchanged baseline"))
             }
-            waitUntil { UiThread.call { activity!!.hasWindowFocus() && clipboard.primaryClip?.getItemAt(0)?.text?.toString() == "unchanged baseline" } }
+            waitUntil("focused-clipboard-baseline") { ForegroundFixture.focused() && UiThread.call { clipboard.primaryClip?.getItemAt(0)?.text?.toString() == "unchanged baseline" } }
             instrumentation.waitForIdleSync()
             assertEquals(0, handlerContext.clipboardRequests.get())
             handler.post { entered.countDown(); check(release.await(6, TimeUnit.SECONDS)) }
@@ -86,10 +79,10 @@ class ClipboardInstrumentationTest {
             worker = Thread(task, "clipboard-queue-regression").also { it.start() }
             assertTrue(admitted.await(2, TimeUnit.SECONDS))
             val running = worker!!
-            waitUntil { running.stackTrace.any { it.className == "java.util.concurrent.FutureTask" && it.methodName == "get" } }
+            waitUntil("effect-queued-behind-transition") { running.stackTrace.any { it.className == "java.util.concurrent.FutureTask" && it.methodName == "get" } }
             if (locked) {
                 shell("input keyevent KEYCODE_SLEEP")
-                waitUntil { !context.getSystemService(PowerManager::class.java).isInteractive }
+                waitUntil("screen-asleep") { !context.getSystemService(PowerManager::class.java).isInteractive }
             }
             release.countDown()
             try { task.get(5, TimeUnit.SECONDS); fail("Changed UI admission must refuse clipboard access") } catch (e: ExecutionException) {
@@ -100,8 +93,9 @@ class ClipboardInstrumentationTest {
             assertEquals(1, uiGuards.get())
             shell("input keyevent KEYCODE_WAKEUP")
             shell("wm dismiss-keyguard")
-            instrumentation.runOnMainSync { if (!MainActivity.resumed) instrumentation.callActivityOnResume(activity!!) }
-            waitUntil { context.getSystemService(PowerManager::class.java).isInteractive && MainActivity.resumed && UiThread.call { activity!!.hasWindowFocus() } }
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+            scenario.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+            waitUntil("activity-focused-after-refusal") { ForegroundFixture.focused() }
             instrumentation.waitForIdleSync()
             instrumentation.runOnMainSync {
                 assertEquals("unchanged baseline", clipboard.primaryClip!!.getItemAt(0).text.toString())
@@ -112,26 +106,24 @@ class ClipboardInstrumentationTest {
         } finally {
             release.countDown()
             worker?.join(5000)
-            shell("input keyevent KEYCODE_WAKEUP")
-            shell("wm dismiss-keyguard")
-            instrumentation.runOnMainSync {
-                activity?.let { if (!MainActivity.resumed) instrumentation.callActivityOnResume(it) }
+            try {
+                ForegroundFixture.wake()
+                if (worker?.isAlive != true && ForegroundFixture.focused()) instrumentation.runOnMainSync { clipboard.clearPrimaryClip() }
+            } finally {
+                try { scenario.close() } finally { store.close() }
             }
-            scenario.close()
-            store.close()
         }
     }
 
     @Test fun foregroundReadAndWriteReachTheRealClipboardAndVerifyText() {
         BridgeService.stop(context, true)
-        waitUntil { BridgeService.current == null }
-        shell("input keyevent KEYCODE_WAKEUP")
-        shell("wm dismiss-keyguard")
+        waitUntil("service-stopped") { BridgeService.current == null }
+        ForegroundFixture.prepare(testName.methodName)
         val scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
             var activity: Activity? = null
             scenario.onActivity { activity = it }
-            waitUntil { MainActivity.resumed && UiThread.call { activity!!.hasWindowFocus() } }
+            waitUntil("positive-activity-focused") { ForegroundFixture.focused() && UiThread.call { activity!!.hasWindowFocus() } }
             val clipboard = context.getSystemService(ClipboardManager::class.java)
             instrumentation.runOnMainSync { clipboard.setPrimaryClip(ClipData.newPlainText("CI", "foreground read baseline")) }
             DurableStore(context).use { store ->
@@ -148,7 +140,9 @@ class ClipboardInstrumentationTest {
                 instrumentation.runOnMainSync { assertEquals("foreground write verified", clipboard.primaryClip!!.getItemAt(0).text.toString()) }
             }
         } finally {
-            scenario.close()
+            try {
+                if (ForegroundFixture.focused()) instrumentation.runOnMainSync { context.getSystemService(ClipboardManager::class.java).clearPrimaryClip() }
+            } finally { scenario.close() }
         }
     }
 

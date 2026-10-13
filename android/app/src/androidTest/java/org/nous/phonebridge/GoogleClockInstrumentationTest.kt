@@ -52,10 +52,12 @@ class GoogleClockInstrumentationTest {
     private fun ui(op: String, selection: JSONObject = args()) = ClockAdapters(context).execute(op, Arguments(selection))
     private var alarmModels = 0
     private var timerModels = 0
+    private var defaultAlarms = emptyList<JSONObject>()
+    private val alarmHour get() = java.util.Calendar.getInstance().apply { add(java.util.Calendar.HOUR_OF_DAY, 12) }.get(java.util.Calendar.HOUR_OF_DAY)
     private fun modelCount(alarm: Boolean): Int? = UiThread.call {
         val root = service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg } ?: return@call null
         val anchor = "$pkg:id/${if (alarm) "alarm_recycler_view" else "timer_view"}"
-        val recycler = service.nodes(root).singleOrNull { it.viewIdResourceName == anchor && it.isVisibleToUser } ?: return@call null
+        val recycler = fixtureNodes(root).singleOrNull { it.viewIdResourceName == anchor } ?: return@call null
         recycler.collectionInfo?.let { it.rowCount * it.columnCount }
     }
     private fun create(op: String, value: JSONObject) {
@@ -80,7 +82,7 @@ class GoogleClockInstrumentationTest {
         visit(root, 0)
         return nodes
     }
-    private fun dismissBedtimePromotion(): Boolean {
+    private fun dismissVendorPromotion(alarm: Boolean): Boolean {
         GoogleClockProfile.requireInstalled(context)
         val candidate = UiThread.call {
             val root = service.safeRoot(pkg)
@@ -90,14 +92,17 @@ class GoogleClockInstrumentationTest {
             applications.mapNotNull { window ->
                 val popup = window.root ?: return@mapNotNull null
                 val nodes = fixtureNodes(popup)
-                val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() == "Set a consistent bedtime for better sleep" } ?: return@mapNotNull null
+                val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here") } ?: return@mapNotNull null
                 val dismissal = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser && it.isEnabled && it.isClickable && it.text?.toString() == "Dismiss" } ?: return@mapNotNull null
-                if (nodes.any { it.isPassword || it.packageName?.toString() != pkg } || nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/delete_button", "$pkg:id/save_button") && it.isVisibleToUser }) return@mapNotNull null
+                if (nodes.any { it.isPassword || it.packageName?.toString() != pkg } || nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/play_pause", "$pkg:id/delete_button", "$pkg:id/tertiary_button", "$pkg:id/save_button", "$pkg:id/alarm_recycler_view", "$pkg:id/timer_view") && it.isVisibleToUser }) return@mapNotNull null
                 body.windowId.takeIf { it == dismissal.windowId }
             }.singleOrNull()
         } ?: return false
-        record("bedtime-promotion-before-dismissal")
-        rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.list") }
+        record("vendor-promotion-before-dismissal")
+        val count = modelCount(alarm) ?: error("Vendor collection disappeared under its promotion")
+        rejected(setOf("UNSUPPORTED")) { ui(if (alarm) "clock.alarms.list" else "clock.timers.list") }
+        rejected(setOf("UNSUPPORTED")) { ui(if (alarm) "clock.alarms.delete" else "clock.timers.cancel", args().put("label", "missing-under-promotion").apply { if (alarm) put("time", "00:00") }) }
+        assertEquals(count, modelCount(alarm))
         GoogleClockProfile.requireInstalled(context)
         UiThread.call {
             Access.unlocked(service)
@@ -111,26 +116,26 @@ class GoogleClockInstrumentationTest {
             val popup = applications.single { it.id == candidate }.root ?: error("Observed vendor promotion disappeared before dismissal")
             val nodes = fixtureNodes(popup)
             assertEquals(pkg, popup.packageName?.toString())
-            assertEquals("Set a consistent bedtime for better sleep", nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }.text?.toString())
+            assertTrue(nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }.text?.toString() in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here"))
             val dismissal = nodes.single { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser }
             assertEquals("Dismiss", dismissal.text?.toString())
             assertTrue(dismissal.isEnabled && dismissal.isClickable && !dismissal.isPassword)
             service.click(dismissal)
         }
         waitUntil("Genuine vendor promotion remained after its single explicit dismissal") { UiThread.call { service.windows.none { it.id == candidate } } }
-        record("bedtime-promotion-dismissed")
+        record("vendor-promotion-dismissed")
         return true
     }
     private fun show(alarm: Boolean) {
         clocks.execute(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(args()))
         val anchor = "$pkg:id/${if (alarm) "alarm_recycler_view" else "timer_view"}"
-        waitUntil("Genuine Google Clock Gastown collection is missing") {
+        waitUntil("Genuine Google Clock collection is missing") {
             UiThread.call {
-                service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg }?.let { root -> service.nodes(root).any { it.viewIdResourceName == anchor && it.isVisibleToUser } } == true
+                service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg }?.let { root -> fixtureNodes(root).any { it.viewIdResourceName == anchor && it.isVisibleToUser } } == true
             }
         }
         Thread.sleep(300)
-        dismissBedtimePromotion()
+        repeat(2) { if (dismissVendorPromotion(alarm)) Thread.sleep(300) }
         record(if (alarm) "alarms-shown" else "timers-shown")
     }
     private fun list(alarm: Boolean): List<JSONObject> {
@@ -153,6 +158,29 @@ class GoogleClockInstrumentationTest {
         error("Real timer row traversal exceeded bound")
     }
     private fun selection(value: JSONObject, alarm: Boolean) = args().put("label", value.getString("label")).apply { if (alarm) put("time", value.getString("time")) }
+    private fun alarmRow(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+        var current = node
+        repeat(30) {
+            if (current.viewIdResourceName == "$pkg:id/alarm_card") return current
+            current = current.parent ?: error("Real alarm row is unavailable")
+        }
+        error("Real alarm row ancestry exceeded bound")
+    }
+    private fun timerAction(label: String, description: String): Boolean = UiThread.call {
+        val root = service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg } ?: return@call false
+        val nodes = fixtureNodes(root)
+        val recycler = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/timer_view" } ?: return@call false
+        val surface = GoogleClockTimerSurface.fromClass(recycler.className?.toString() ?: "")
+        var row = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/timer_label" && it.isVisibleToUser && it.text?.toString() == label } ?: return@call false
+        repeat(30) {
+            if (row.collectionItemInfo != null) {
+                val suffix = if (surface == GoogleClockTimerSurface.GASTOWN) " $label" else ""
+                return@call fixtureNodes(row).count { it.viewIdResourceName == "$pkg:id/${surface.action}" && it.isVisibleToUser && it.contentDescription?.toString() == "$description$suffix" } == 1
+            }
+            row = row.parent ?: return@call false
+        }
+        false
+    }
     private fun values(items: List<JSONObject>) = items.map { listOf(it.getString("label"), it.optString("time"), it.getString("state"), it.getString("schedule")) }.toSet()
     private fun rejected(expected: Set<String>, action: () -> Unit) {
         try { action(); fail("Unsafe Clock operation must be rejected before mutation") } catch (e: BridgeFailure) { assertTrue("Unexpected refusal ${e.code}: ${e.message}", e.code in expected) }
@@ -228,6 +256,12 @@ class GoogleClockInstrumentationTest {
         shell("settings put secure accessibility_enabled 1")
         waitUntil("Real PhoneBridge Accessibility did not connect") { BridgeAccessibility.current != null }
         assertTrue(GoogleClockProfile.operations.all { it in ClockAdapters(context).capabilities() })
+        show(true)
+        defaultAlarms = list(true)
+        assertEquals("The exact vendor database seeds two disabled alarms", 2, defaultAlarms.size)
+        assertEquals(setOf("08:30", "09:00"), defaultAlarms.map { it.getString("time") }.toSet())
+        assertTrue(defaultAlarms.all { it.getString("label").isEmpty() && !it.getBoolean("enabled") })
+        alarmModels = defaultAlarms.size
     }
 
     @After fun cleanup() {
@@ -250,20 +284,25 @@ class GoogleClockInstrumentationTest {
     }
 
     @Test fun genuineAlarmsExplicitDisableEnableDeleteAndColdRestartPreserveSurvivors() {
-        create("clock.alarms.create", JSONObject().put("hour", 17).put("minute", 31).put("label", "CI alarm, Start Alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
-        create("clock.alarms.create", JSONObject().put("hour", 19).put("minute", 43).put("label", "CI unrelated alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
+        val hour = alarmHour
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 31).put("label", "CI alarm, Start Alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 43).put("label", "CI unrelated alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
         show(true)
         val initial = list(true)
-        assertEquals(2, initial.size)
+        assertEquals(defaultAlarms.size + 2, initial.size)
         val target = initial.single { it.getString("label") == "CI alarm, Start Alarm" }
-        val survivor = initial.single { it.getString("label") == "CI unrelated alarm" }
+        assertEquals(String.format(java.util.Locale.US, "%02d:31", hour), target.getString("time"))
+        assertEquals("every day", target.getString("schedule"))
+        val survivors = initial.filter { it.getString("label") != target.getString("label") }
+        assertEquals(values(defaultAlarms), values(survivors.filter { it.getString("label").isEmpty() }))
+        assertEquals(1, survivors.count { it.getString("label") == "CI unrelated alarm" && it.getBoolean("enabled") })
         assertTrue(target.getBoolean("enabled"))
         val missingBefore = values(initial)
         rejected(setOf("NOT_FOUND")) { ui("clock.alarms.delete", args().put("label", "missing").put("time", target.getString("time"))) }
         assertEquals(missingBefore, values(list(true)))
         verified(ui("clock.alarms.disable", selection(target, true)), "changed")
         assertFalse(list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
-        assertEquals(values(listOf(survivor)), values(list(true).filter { it.getString("label") == survivor.getString("label") }))
+        assertEquals(values(survivors), values(list(true).filter { it.getString("label") != target.getString("label") }))
         shell("am force-stop $pkg")
         show(true)
         assertFalse("Disabled state was not persisted across genuine vendor process restart", list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
@@ -273,10 +312,10 @@ class GoogleClockInstrumentationTest {
         show(true)
         assertTrue(list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
         verified(ui("clock.alarms.delete", selection(target, true)), "deleted")
-        assertEquals(values(listOf(survivor)), values(list(true)))
+        assertEquals(values(survivors), values(list(true)))
         shell("am force-stop $pkg")
         show(true)
-        assertEquals(values(listOf(survivor)), values(list(true)))
+        assertEquals(values(survivors), values(list(true)))
     }
 
     @Test fun genuineRunningPausedTimerDriftAndPreciseCancellationKeepUnrelatedTimer() {
@@ -306,6 +345,19 @@ class GoogleClockInstrumentationTest {
         shell("am force-stop $pkg")
         show(false)
         assertEquals(values(listOf(survivor)), values(list(false)))
+        timerModels = 1
+        create("clock.timers.create", JSONObject().put("seconds", 6300).put("label", "CI paused cancellation timer"))
+        val pausedTarget = list(false).single { it.getString("label") == "CI paused cancellation timer" }
+        verified(ui("clock.timers.pause", selection(pausedTarget, false)), "changed")
+        val pausedBefore = countdown(pausedTarget.getString("label"))
+        Thread.sleep(1100)
+        assertEquals("Paused genuine countdown must not drift", pausedBefore, countdown(pausedTarget.getString("label")))
+        assertEquals("paused", list(false).single { it.getString("label") == pausedTarget.getString("label") }.getString("state"))
+        verified(ui("clock.timers.cancel", selection(pausedTarget, false)), "deleted")
+        assertEquals(values(listOf(survivor)), values(list(false)))
+        shell("am force-stop $pkg")
+        show(false)
+        assertEquals(values(listOf(survivor)), values(list(false)))
     }
 
     @Test fun genuineDuplicateTimerNamesAreNotSelectableAndRemainPresent() {
@@ -325,18 +377,20 @@ class GoogleClockInstrumentationTest {
     }
 
     @Test fun genuineDuplicateAlarmIdentityAndIncompleteCollectionRefuseBeforeClick() {
-        create("clock.alarms.create", JSONObject().put("hour", 17).put("minute", 31).put("label", "CI duplicate alarm").put("days", JSONArray(listOf(1, 2))))
-        create("clock.alarms.create", JSONObject().put("hour", 17).put("minute", 31).put("label", "CI duplicate alarm").put("days", JSONArray(listOf(3, 4))))
+        val hour = alarmHour
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 31).put("label", "CI duplicate alarm").put("days", JSONArray(listOf(1, 2))))
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 31).put("label", "CI duplicate alarm").put("days", JSONArray(listOf(3, 4))))
         show(true)
         val duplicates = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/label" && it.isVisibleToUser && it.text?.toString() == "CI duplicate alarm" }.size }
         assertEquals("Real vendor API must create separate models for different recurrence", 2, duplicates)
-        val schedules = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/days_of_week" && it.isVisibleToUser }.map { it.contentDescription?.toString() }.toSet() }
+        val schedules = UiThread.call { fixtureNodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/label" && it.isVisibleToUser && it.text?.toString() == "CI duplicate alarm" }.map { label -> fixtureNodes(alarmRow(label)).single { it.viewIdResourceName == "$pkg:id/days_of_week" && it.isVisibleToUser }.contentDescription?.toString() }.toSet() }
         assertEquals(setOf("Monday, Tuesday", "Wednesday, Thursday"), schedules)
-        val times = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/digital_clock" && it.isVisibleToUser }.map { it.text.toString() } }
+        val times = UiThread.call { fixtureNodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/label" && it.isVisibleToUser && it.text?.toString() == "CI duplicate alarm" }.map { label -> fixtureNodes(alarmRow(label)).single { it.viewIdResourceName == "$pkg:id/digital_clock" && it.isVisibleToUser }.text.toString() } }
         assertEquals(2, times.size)
         assertEquals(1, times.distinct().size)
         rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.disable", args().put("label", "CI duplicate alarm").put("time", times.first())) }
-        assertTrue(UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/onoff" && it.isVisibleToUser }.all { it.isChecked } })
+        val duplicateStates = UiThread.call { fixtureNodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/label" && it.isVisibleToUser && it.text?.toString() == "CI duplicate alarm" }.map { label -> fixtureNodes(alarmRow(label)).single { it.viewIdResourceName == "$pkg:id/onoff" && it.isVisibleToUser }.isChecked } }
+        assertEquals(listOf(true, true), duplicateStates)
         for (minute in 0..8) create("clock.alarms.create", JSONObject().put("hour", 21).put("minute", minute).put("label", "CI offscreen $minute").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
         show(true)
         val count = UiThread.call { service.exact(service.safeRoot(pkg), "$pkg:id/alarm_recycler_view").collectionInfo?.rowCount }
@@ -356,7 +410,7 @@ class GoogleClockInstrumentationTest {
             val deadline = SystemClock.elapsedRealtime() + 15000
             var paused = false
             while (!paused && SystemClock.elapsedRealtime() < deadline) {
-                paused = UiThread.call { service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg }?.let { root -> service.nodes(root).any { it.viewIdResourceName == "$pkg:id/play_pause_button" && it.isVisibleToUser && it.contentDescription?.toString() == "Start CI interrupted timer" } } == true }
+                paused = timerAction("CI interrupted timer", "Start")
                 if (!paused) Thread.sleep(5)
             }
             assertTrue("The genuine pause dispatch was not observed", paused)

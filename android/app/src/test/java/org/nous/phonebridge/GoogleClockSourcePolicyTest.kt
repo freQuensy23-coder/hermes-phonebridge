@@ -47,6 +47,39 @@ class GoogleClockSourcePolicyTest {
         rejected("NOT_FOUND") { GoogleClockCollection.select(listOf(a, b), "missing", "") }
     }
 
+    @Test fun sourcePolicyRequiresCorroboratedAlarmTimeDespitePreAttachCardDescription() {
+        GoogleClockIdentity.alarm("17:31", "17:31", "CI alarm", "17:31 CI alarm", "17:31 alarm")
+        GoogleClockIdentity.alarm("17:31", "17:31", "CI alarm", " CI alarm", "17:31 alarm")
+        GoogleClockIdentity.alarm("08:30", "08:30", "", " Alarm", "08:30 alarm")
+        rejected { GoogleClockIdentity.alarm("17:31", "17:31", "CI alarm", "19:43 CI alarm", "17:31 alarm") }
+        rejected { GoogleClockIdentity.alarm("17:31", "19:43", "CI alarm", " CI alarm", "17:31 alarm") }
+        rejected { GoogleClockIdentity.alarm("17:31", "17:31", "CI alarm", " CI alarm", "19:43 alarm") }
+        rejected { GoogleClockIdentity.alarm("17:31", "17:31", "CI alarm", " Other", "17:31 alarm") }
+        rejected { GoogleClockIdentity.alarm("", "", "CI alarm", " CI alarm", " alarm") }
+        rejected { GoogleClockIdentity.alarm("25:31", "25:31", "CI alarm", " CI alarm", "25:31 alarm") }
+    }
+
+    @Test fun sourcePolicyBindsClassicAndGastownTimerControlsWithoutMixingSurfaces() {
+        val classic = GoogleClockTimerSurface.fromClass("android.support.v7.widget.RecyclerView")
+        val gastown = GoogleClockTimerSurface.fromClass("android.widget.GridView")
+        assertEquals("play_pause", classic.action)
+        assertEquals("secondary_button", classic.reset)
+        assertEquals("tertiary_button", classic.deletion)
+        assertEquals("play_pause_button", gastown.action)
+        assertEquals("reset_button", gastown.reset)
+        assertEquals("delete_button", gastown.deletion)
+        assertEquals("running", classic.state("CI timer", "Pause", "Reset", "Delete CI timer"))
+        assertEquals("paused", classic.state("CI timer", "Start", "Reset", "Delete CI timer"))
+        assertEquals("running", gastown.state("CI timer", "Pause CI timer", "Reset CI timer", "Delete CI timer"))
+        assertEquals("paused", gastown.state("CI timer", "Start CI timer", "Reset CI timer", "Delete CI timer"))
+        rejected { GoogleClockTimerSurface.fromClass("android.widget.ListView") }
+        rejected { classic.state("CI timer", "Pause CI timer", "Reset", "Delete CI timer") }
+        rejected { gastown.state("CI timer", "Pause", "Reset CI timer", "Delete CI timer") }
+        rejected { classic.state("CI timer", "Stop", "Reset", "Delete CI timer") }
+        rejected { classic.state("CI timer", "Start", "", "Delete CI timer") }
+        rejected { classic.state("CI timer", "Pause", "Reset", "Delete Other") }
+    }
+
     @Test fun sourcePolicyComparesCompleteSurvivorsWithoutCountdownOrPositionIdentity() {
         val a = GoogleClockEntry("Label, Start Alarm", "", "running", "")
         val b = GoogleClockEntry("Other", "", "paused", "")

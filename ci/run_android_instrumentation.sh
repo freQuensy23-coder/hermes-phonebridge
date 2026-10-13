@@ -43,4 +43,6 @@ status=0
 ) || status=$?
 mkdir -p "$RUNNER_TEMP/google-clock-evidence"
 adb exec-out run-as org.nous.phonebridge tar -cf - -C files google-clock-ci > "$RUNNER_TEMP/google-clock-evidence/instrumentation-frames.tar" 2> "$RUNNER_TEMP/google-clock-evidence/export-status.log" || true
+mkdir -p "$RUNNER_TEMP/foreground-evidence"
+adb exec-out run-as org.nous.phonebridge tar -cf - -C files foreground-ci > "$RUNNER_TEMP/foreground-evidence/instrumentation-frames.tar" 2> "$RUNNER_TEMP/foreground-evidence/export-status.log" || true
 exit "$status"

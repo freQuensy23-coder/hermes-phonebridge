@@ -56,6 +56,32 @@ internal data class GoogleClockEntry(val label: String, val time: String, val st
     fun withState(value: String) = copy(state = value)
 }
 
+internal object GoogleClockIdentity {
+    fun alarm(time: String, clockDescription: String, label: String, cardDescription: String, switchDescription: String) {
+        val cardLabel = label.ifEmpty { "Alarm" }
+        if (!time.matches(Regex("(?:[01][0-9]|2[0-3]):[0-5][0-9]")) || clockDescription != time || switchDescription != "$time alarm" || cardDescription !in setOf("$time $cardLabel", " $cardLabel")) failure("UNSUPPORTED", "Clock alarm identity is not independently corroborated")
+    }
+}
+
+internal enum class GoogleClockTimerSurface(val nodeClass: String, val action: String, val reset: String, val deletion: String, val addition: String) {
+    CLASSIC("android.support.v7.widget.RecyclerView", "play_pause", "secondary_button", "tertiary_button", "primary_button"),
+    GASTOWN("android.widget.GridView", "play_pause_button", "reset_button", "delete_button", "add_one_min_button");
+
+    fun state(label: String, actionDescription: String, resetDescription: String, deleteDescription: String): String {
+        val suffix = if (this == GASTOWN) " $label" else ""
+        if (resetDescription != "Reset$suffix" || deleteDescription != "Delete $label") failure("UNSUPPORTED", "Unknown Clock timer controls")
+        return when (actionDescription) {
+            "Pause$suffix" -> "running"
+            "Start$suffix" -> "paused"
+            else -> failure("UNSUPPORTED", "Expired, missed, reset or unknown Clock timer state")
+        }
+    }
+
+    companion object {
+        fun fromClass(value: String): GoogleClockTimerSurface = values().singleOrNull { it.nodeClass == value } ?: failure("UNSUPPORTED", "Clock timer collection surface is unknown")
+    }
+}
+
 internal object GoogleClockCollection {
     fun count(rows: Int, columns: Int, alarm: Boolean): Int {
         val count = rows * columns
