@@ -4,4 +4,4 @@ Android companion for cloud-hosted agents. The server generates a short-lived QR
 
 Targets modern Samsung and Pixel. Existing clock applications remain in use. No own clock subsystem or mandatory root/ADB. Android permissions are granted once by the phone owner. A background connection does not bypass screen lock or Android capability restrictions.
 
-Implementation and device verification are in progress. See [current contract](docs/contract-v1.md). CI/CD and release links will be documented after real execution.
+Implementation and device verification are in progress. See [current contract](docs/contract-v1.md) and [support boundaries](docs/support-matrix.md). CI/CD and release links will be documented after real execution.
