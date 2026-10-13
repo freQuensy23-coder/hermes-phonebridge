@@ -50,11 +50,76 @@ class GoogleClockInstrumentationTest {
     }
     private fun args() = JSONObject().put("package", pkg)
     private fun ui(op: String, selection: JSONObject = args()) = ClockAdapters(context).execute(op, Arguments(selection))
+    private var alarmModels = 0
+    private var timerModels = 0
+    private fun modelCount(alarm: Boolean): Int? = UiThread.call {
+        val root = service.rootInActiveWindow?.takeIf { it.packageName?.toString() == pkg } ?: return@call null
+        val anchor = "$pkg:id/${if (alarm) "alarm_recycler_view" else "timer_view"}"
+        val recycler = service.nodes(root).singleOrNull { it.viewIdResourceName == anchor && it.isVisibleToUser } ?: return@call null
+        recycler.collectionInfo?.let { it.rowCount * it.columnCount }
+    }
     private fun create(op: String, value: JSONObject) {
+        val alarm = op == "clock.alarms.create"
+        val expected = (if (alarm) alarmModels else timerModels) + 1
         val dispatched = clocks.execute(op, Arguments(value.put("package", pkg)))
         assertFalse(dispatched.getBoolean("verified"))
         assertEquals("dispatched", dispatched.getString("outcome"))
-        Thread.sleep(800)
+        show(alarm)
+        waitUntil("Native dispatch did not create the expected genuine vendor model before the next intent") { modelCount(alarm) == expected }
+        assertEquals(expected, modelCount(alarm))
+        if (alarm) alarmModels = expected else timerModels = expected
+        record("native-model-created-$expected")
+    }
+    private fun fixtureNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val nodes = ArrayList<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+            check(depth <= 30 && nodes.size < 400 && node.refresh() && node.childCount <= 100 && !node.isPassword && node.packageName?.toString() == pkg)
+            nodes.add(node)
+            for (index in 0 until node.childCount) visit(node.getChild(index) ?: error("Vendor fixture child unavailable"), depth + 1)
+        }
+        visit(root, 0)
+        return nodes
+    }
+    private fun dismissBedtimePromotion(): Boolean {
+        GoogleClockProfile.requireInstalled(context)
+        val candidate = UiThread.call {
+            val root = service.safeRoot(pkg)
+            val applications = service.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            if (applications.size != 2 || applications.count { it.id == root.windowId && it.isActive && it.isFocused } != 1) return@call null
+            if (applications.any { it.root?.packageName?.toString() != pkg }) return@call null
+            applications.mapNotNull { window ->
+                val popup = window.root ?: return@mapNotNull null
+                val nodes = fixtureNodes(popup)
+                val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() == "Set a consistent bedtime for better sleep" } ?: return@mapNotNull null
+                val dismissal = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser && it.isEnabled && it.isClickable && it.text?.toString() == "Dismiss" } ?: return@mapNotNull null
+                if (nodes.any { it.isPassword || it.packageName?.toString() != pkg } || nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/delete_button", "$pkg:id/save_button") && it.isVisibleToUser }) return@mapNotNull null
+                body.windowId.takeIf { it == dismissal.windowId }
+            }.singleOrNull()
+        } ?: return false
+        record("bedtime-promotion-before-dismissal")
+        rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.list") }
+        GoogleClockProfile.requireInstalled(context)
+        UiThread.call {
+            Access.unlocked(service)
+            val active = service.safeRoot(pkg)
+            val windows = service.windows
+            val applications = windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            assertEquals(2, applications.size)
+            assertTrue(applications.all { it.root?.packageName?.toString() == pkg })
+            assertEquals(1, applications.count { it.id == active.windowId && it.isActive && it.isFocused })
+            assertTrue(windows.filter { it.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }.all { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM && !it.isActive && !it.isFocused && it.root?.packageName?.toString() == "com.android.systemui" })
+            val popup = applications.single { it.id == candidate }.root ?: error("Observed vendor promotion disappeared before dismissal")
+            val nodes = fixtureNodes(popup)
+            assertEquals(pkg, popup.packageName?.toString())
+            assertEquals("Set a consistent bedtime for better sleep", nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }.text?.toString())
+            val dismissal = nodes.single { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser }
+            assertEquals("Dismiss", dismissal.text?.toString())
+            assertTrue(dismissal.isEnabled && dismissal.isClickable && !dismissal.isPassword)
+            service.click(dismissal)
+        }
+        waitUntil("Genuine vendor promotion remained after its single explicit dismissal") { UiThread.call { service.windows.none { it.id == candidate } } }
+        record("bedtime-promotion-dismissed")
+        return true
     }
     private fun show(alarm: Boolean) {
         clocks.execute(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(args()))
@@ -65,6 +130,7 @@ class GoogleClockInstrumentationTest {
             }
         }
         Thread.sleep(300)
+        dismissBedtimePromotion()
         record(if (alarm) "alarms-shown" else "timers-shown")
     }
     private fun list(alarm: Boolean): List<JSONObject> {
@@ -98,30 +164,52 @@ class GoogleClockInstrumentationTest {
         record("effect-$outcome")
     }
     private fun record(phase: String) {
-        val frame = JSONObject().put("phase", phase).put("sdk", Build.VERSION.SDK_INT).put("monotonic_ms", SystemClock.elapsedRealtime())
+        val frame = JSONObject().put("phase", phase).put("sdk", Build.VERSION.SDK_INT).put("monotonic_ms", SystemClock.elapsedRealtime()).put("model", Build.MODEL).put("fingerprint", Build.FINGERPRINT)
         UiThread.call {
-            BridgeAccessibility.current?.rootInActiveWindow?.let { root ->
-                frame.put("package", root.packageName?.toString()).put("window", root.windowId)
+            val access = BridgeAccessibility.current ?: return@call
+            val active = access.rootInActiveWindow
+            frame.put("package", active?.packageName?.toString()).put("window", active?.windowId)
+            val windows = JSONArray()
+            var remainingNodes = 400
+            var remainingBytes = 200000
+            access.windows.take(8).forEach { window ->
+                val bounds = android.graphics.Rect().also { window.getBoundsInScreen(it) }
+                val root = window.root
+                val item = JSONObject().put("window", window.id).put("type", window.type).put("active", window.isActive).put("focused", window.isFocused).put("layer", window.layer).put("package", root?.packageName?.toString()).put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
                 val nodes = JSONArray()
-                BridgeAccessibility.current!!.nodes(root).forEach { node ->
-                    if (!node.isPassword) {
-                        val item = JSONObject().put("id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString()).put("text", node.text?.toString()?.take(256)).put("description", node.contentDescription?.toString()?.take(256)).put("visible", node.isVisibleToUser).put("enabled", node.isEnabled).put("clickable", node.isClickable).put("checkable", node.isCheckable).put("checked", node.isChecked).put("parent_id", node.parent?.viewIdResourceName ?: JSONObject.NULL)
-                        node.collectionInfo?.let { item.put("collection", JSONObject().put("rows", it.rowCount).put("columns", it.columnCount)) }
-                        node.collectionItemInfo?.let { item.put("item", JSONObject().put("row", it.rowIndex).put("column", it.columnIndex).put("heading", it.isHeading)) }
-                        if (nodes.length() < 400 && nodes.toString().toByteArray().size + item.toString().toByteArray().size <= 200000) nodes.put(item)
+                if (root != null && root.packageName?.toString() == pkg) access.nodes(root).forEach { node ->
+                    if (!node.isPassword && node.packageName?.toString() == pkg) {
+                        val nodeBounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+                        val entry = JSONObject().put("id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString()).put("text", node.text?.toString()?.take(256)).put("description", node.contentDescription?.toString()?.take(256)).put("visible", node.isVisibleToUser).put("enabled", node.isEnabled).put("clickable", node.isClickable).put("checkable", node.isCheckable).put("checked", node.isChecked).put("parent_id", node.parent?.viewIdResourceName ?: JSONObject.NULL).put("bounds", JSONArray(listOf(nodeBounds.left, nodeBounds.top, nodeBounds.right, nodeBounds.bottom))).put("actions", JSONArray(node.actionList.map { it.id }))
+                        node.collectionInfo?.let { entry.put("collection", JSONObject().put("rows", it.rowCount).put("columns", it.columnCount).put("hierarchical", it.isHierarchical).put("selection", it.selectionMode)) }
+                        node.collectionItemInfo?.let { entry.put("item", JSONObject().put("row", it.rowIndex).put("column", it.columnIndex).put("row_span", it.rowSpan).put("column_span", it.columnSpan).put("heading", it.isHeading).put("selected", it.isSelected)) }
+                        val size = entry.toString().toByteArray().size
+                        if (remainingNodes > 0 && size <= remainingBytes) {
+                            nodes.put(entry)
+                            remainingNodes--
+                            remainingBytes -= size
+                        } else frame.put("truncated", true)
                     }
                 }
-                frame.put("nodes", nodes).put("password_nodes_excluded", true).put("bounded", true)
+                item.put("nodes", nodes)
+                windows.put(item)
+                if (window.id == active?.windowId) frame.put("nodes", nodes)
             }
+            frame.put("windows", windows).put("password_nodes_excluded", true).put("bounded", true)
         }
-        if (evidence.length() < 24) evidence.put(frame)
+        if (evidence.length() < 24) evidence.put(frame) else evidence.put(23, frame)
+        val chunks = frame.toString().chunked(1500)
+        chunks.forEachIndexed { index, text -> android.util.Log.i("GoogleClockEvidence", JSONObject().put("test", testName.methodName).put("phase", phase).put("part", index).put("parts", chunks.size).put("json", text).toString()) }
     }
 
     @Before fun setup() {
         val arguments = InstrumentationRegistry.getArguments()
         assumeTrue("Genuine vendor runtime suite requires explicit googleClockFixture argument", arguments.containsKey("googleClockFixture"))
         assertEquals("googleClockFixture must be true when supplied", "true", arguments.getString("googleClockFixture"))
-        assertTrue("This suite is for disposable API31/35 CI emulators", Build.VERSION.SDK_INT in setOf(31, 35) && (Build.FINGERPRINT.contains("generic") || Build.FINGERPRINT.contains("emulator")))
+        val qemu = shell("getprop ro.kernel.qemu").trim()
+        val bootQemu = shell("getprop ro.boot.qemu").trim()
+        val model = shell("getprop ro.product.model").trim()
+        assertTrue("This suite is for disposable API31/35 x86_64 QEMU CI emulators: sdk=${Build.VERSION.SDK_INT}, model=$model, qemu=$qemu, bootQemu=$bootQemu", Build.VERSION.SDK_INT in setOf(31, 35) && (qemu == "1" || bootQemu == "1") && Build.SUPPORTED_ABIS.contains("x86_64") && model == Build.MODEL && model == "Android SDK built for x86_64")
         try { context.packageManager.getPackageInfo(pkg, 0) } catch (_: android.content.pm.PackageManager.NameNotFoundException) { fail("Required genuine signed google-8.2.apk is missing; parent CI must install the exact fixture before instrumentation") }
         assertEquals("CI requires English locale", "en", context.resources.configuration.locales[0].language)
         originalTimeFormat = Settings.System.getString(context.contentResolver, Settings.System.TIME_12_24)
@@ -242,6 +330,8 @@ class GoogleClockInstrumentationTest {
         show(true)
         val duplicates = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/label" && it.isVisibleToUser && it.text?.toString() == "CI duplicate alarm" }.size }
         assertEquals("Real vendor API must create separate models for different recurrence", 2, duplicates)
+        val schedules = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/days_of_week" && it.isVisibleToUser }.map { it.contentDescription?.toString() }.toSet() }
+        assertEquals(setOf("Monday, Tuesday", "Wednesday, Thursday"), schedules)
         val times = UiThread.call { service.nodes(service.safeRoot(pkg)).filter { it.viewIdResourceName == "$pkg:id/digital_clock" && it.isVisibleToUser }.map { it.text.toString() } }
         assertEquals(2, times.size)
         assertEquals(1, times.distinct().size)

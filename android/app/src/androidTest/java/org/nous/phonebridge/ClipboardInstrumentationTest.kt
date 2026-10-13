@@ -3,6 +3,8 @@ package org.nous.phonebridge
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -24,6 +26,13 @@ import java.util.concurrent.atomic.AtomicInteger
 class ClipboardInstrumentationTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
+    private class ClipboardAccessContext(base: Context) : ContextWrapper(base) {
+        val clipboardRequests = AtomicInteger()
+        override fun getSystemService(name: String): Any? {
+            if (name == Context.CLIPBOARD_SERVICE) clipboardRequests.incrementAndGet()
+            return super.getSystemService(name)
+        }
+    }
     private fun shell(command: String) = instrumentation.uiAutomation.executeShellCommand(command).use { parcel -> android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { it.readText() } }
     private fun waitUntil(predicate: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + 2500
@@ -44,10 +53,10 @@ class ClipboardInstrumentationTest {
         val release = CountDownLatch(1)
         val admitted = CountDownLatch(1)
         val guards = AtomicInteger()
-        val changes = AtomicInteger()
+        val uiGuards = AtomicInteger()
+        val handlerContext = ClipboardAccessContext(context)
         var activity: Activity? = null
         val clipboard = context.getSystemService(ClipboardManager::class.java)
-        val listener = ClipboardManager.OnPrimaryClipChangedListener { changes.incrementAndGet() }
         val handler = Handler(Looper.getMainLooper())
         var worker: Thread? = null
         try {
@@ -55,23 +64,24 @@ class ClipboardInstrumentationTest {
                 activity = it
                 Access.unlocked(it)
                 assertTrue(MainActivity.resumed)
-                clipboard.addPrimaryClipChangedListener(listener)
                 clipboard.setPrimaryClip(ClipData.newPlainText("CI", "unchanged baseline"))
             }
-            waitUntil { changes.get() > 0 }
+            waitUntil { UiThread.call { activity!!.hasWindowFocus() && clipboard.primaryClip?.getItemAt(0)?.text?.toString() == "unchanged baseline" } }
             instrumentation.waitForIdleSync()
-            changes.set(0)
+            assertEquals(0, handlerContext.clipboardRequests.get())
             handler.post { entered.countDown(); check(release.await(6, TimeUnit.SECONDS)) }
             assertTrue(entered.await(2, TimeUnit.SECONDS))
             val task = FutureTask {
                 ExecutionGuard.install(System.currentTimeMillis() / 1000 + 60) {
-                    if (Looper.myLooper() != Looper.getMainLooper() && guards.incrementAndGet() == 2) {
+                    if (Looper.myLooper() == Looper.getMainLooper()) {
+                        uiGuards.incrementAndGet()
+                    } else if (guards.incrementAndGet() == 2) {
                         if (!locked) handler.post { instrumentation.callActivityOnPause(activity!!) }
                         admitted.countDown()
                     }
                     true
                 }
-                try { NativeHandlers(context, store).execute(op, if (op == "clipboard.set") JSONObject().put("text", "must not be written") else JSONObject()) } finally { ExecutionGuard.clear() }
+                try { NativeHandlers(handlerContext, store).execute(op, if (op == "clipboard.set") JSONObject().put("text", "must not be written") else JSONObject()) } finally { ExecutionGuard.clear() }
             }
             worker = Thread(task, "clipboard-queue-regression").also { it.start() }
             assertTrue(admitted.await(2, TimeUnit.SECONDS))
@@ -86,6 +96,8 @@ class ClipboardInstrumentationTest {
                 val failure = e.cause as? BridgeFailure ?: throw e
                 assertEquals(if (locked) "PHONE_LOCKED" else "FOREGROUND_REQUIRED", failure.code)
             }
+            assertEquals(0, handlerContext.clipboardRequests.get())
+            assertEquals(1, uiGuards.get())
             shell("input keyevent KEYCODE_WAKEUP")
             shell("wm dismiss-keyguard")
             instrumentation.runOnMainSync { if (!MainActivity.resumed) instrumentation.callActivityOnResume(activity!!) }
@@ -93,8 +105,9 @@ class ClipboardInstrumentationTest {
             instrumentation.waitForIdleSync()
             instrumentation.runOnMainSync {
                 assertEquals("unchanged baseline", clipboard.primaryClip!!.getItemAt(0).text.toString())
-                assertEquals(0, changes.get())
             }
+            assertEquals(0, handlerContext.clipboardRequests.get())
+            assertEquals(1, uiGuards.get())
             assertEquals(2, guards.get())
         } finally {
             release.countDown()
@@ -102,11 +115,40 @@ class ClipboardInstrumentationTest {
             shell("input keyevent KEYCODE_WAKEUP")
             shell("wm dismiss-keyguard")
             instrumentation.runOnMainSync {
-                clipboard.removePrimaryClipChangedListener(listener)
                 activity?.let { if (!MainActivity.resumed) instrumentation.callActivityOnResume(it) }
             }
             scenario.close()
             store.close()
+        }
+    }
+
+    @Test fun foregroundReadAndWriteReachTheRealClipboardAndVerifyText() {
+        BridgeService.stop(context, true)
+        waitUntil { BridgeService.current == null }
+        shell("input keyevent KEYCODE_WAKEUP")
+        shell("wm dismiss-keyguard")
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        try {
+            var activity: Activity? = null
+            scenario.onActivity { activity = it }
+            waitUntil { MainActivity.resumed && UiThread.call { activity!!.hasWindowFocus() } }
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+            instrumentation.runOnMainSync { clipboard.setPrimaryClip(ClipData.newPlainText("CI", "foreground read baseline")) }
+            DurableStore(context).use { store ->
+                val handlerContext = ClipboardAccessContext(context)
+                val handlers = NativeHandlers(handlerContext, store)
+                val read = handlers.execute("clipboard.get", JSONObject())
+                assertEquals("foreground read baseline", read.getString("text"))
+                assertTrue(read.getBoolean("verified"))
+                assertEquals(1, handlerContext.clipboardRequests.get())
+                val written = handlers.execute("clipboard.set", JSONObject().put("text", "foreground write verified"))
+                assertEquals("foreground write verified", written.getString("text"))
+                assertTrue(written.getBoolean("verified"))
+                assertEquals(2, handlerContext.clipboardRequests.get())
+                instrumentation.runOnMainSync { assertEquals("foreground write verified", clipboard.primaryClip!!.getItemAt(0).text.toString()) }
+            }
+        } finally {
+            scenario.close()
         }
     }
 

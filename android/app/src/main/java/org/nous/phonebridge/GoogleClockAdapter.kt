@@ -47,7 +47,8 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         requireSchema(active != null, "Clock requires one focused application window")
         requireSchema(windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { it.type == AccessibilityWindowInfo.TYPE_SYSTEM && !it.isActive && !it.isFocused && it.root?.packageName?.toString() == "com.android.systemui" }, "Clock is covered by an unknown overlay or input window")
         val application = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-        requireSchema(application.size == if (detail) 2 else 1, "Clock window graph is not recognized")
+        val expectedApplications = if (detail) 2 else 1
+        requireSchema(application.size == expectedApplications, "Clock window graph is not recognized: expected=$expectedApplications, actual=${application.size}, active=${root.windowId}, windows=${application.take(8).joinToString { "${it.id}:${it.root?.packageName}:${it.isActive}:${it.isFocused}" }}")
         application.forEach { window ->
             val windowRoot = window.root ?: failure("UNSUPPORTED", "Clock window root unavailable")
             completeNodes(windowRoot)
