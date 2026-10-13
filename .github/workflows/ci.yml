@@ -8,9 +8,10 @@ permissions:
   contents: read
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   security:
+    name: security
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -21,16 +22,32 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install -e ./server -e ./cli pip-audit==2.10.1 zizmor==1.30.1
-      - run: python -m pip_audit --skip-editable --strict --format json --output security-audit.json
-      - run: zizmor --no-ignores --persona auditor .github/workflows
+      - name: Audit installed runtime dependency declarations
+        run: |
+          python -c 'import os,tomllib; from pathlib import Path; data=tomllib.loads(Path("cli/pyproject.toml").read_text()); Path(os.environ["RUNNER_TEMP"]+"/cli-runtime-requirements.txt").write_text("\n".join(data["project"]["dependencies"])+"\n")'
+          python -m pip_audit --strict --requirement server/requirements.txt --requirement "$RUNNER_TEMP/cli-runtime-requirements.txt" --format json --output security-audit.json
+      - name: Collect every workflow audit finding and classify reviewed limitations
         if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          zizmor --no-ignores --persona auditor --strict-collection --format=json-v1 .github/workflows > workflow-audit.json
+          result=$?
+          set -e
+          case "$result" in 0|11|12|13|14) ;; *) exit "$result" ;; esac
+          python ci/classify_workflow_audit.py workflow-audit.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: security-${{ github.sha }}
-          path: security-audit.json
+          path: |
+            security-audit.json
+            workflow-audit.json
+            workflow-audit-classified.json
           if-no-files-found: error
   python:
+    name: python
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -41,8 +58,8 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install './server[test]' './cli[test]' ruff==0.11.13
-      - run: python -m ruff check server cli deploy
-      - run: python -m pytest server/tests cli/tests deploy/tests -q --junitxml=python-results.xml
+      - run: python -m ruff check server cli deploy ci
+      - run: python -m pytest server/tests cli/tests deploy/tests ci/tests -q --junitxml=python-results.xml
       - run: python -m build server --outdir dist && python -m build cli --outdir dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -53,6 +70,7 @@ jobs:
             dist/
           if-no-files-found: error
   android-build:
+    name: android-build
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -75,6 +93,7 @@ jobs:
             android/app/build/test-results/
           if-no-files-found: error
   android-e2e:
+    name: android-e2e (${{ matrix.api }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -96,7 +115,7 @@ jobs:
       - name: Enable KVM
         run: |
           sudo chmod 666 /dev/kvm
-      - run: python -m pip install ./server uvicorn==0.34.2
+      - run: python -m pip install ./server
       - name: Start isolated test server
         env:
           PHONEBRIDGE_ADMIN_TOKEN: ci-phonebridge-test-admin-token-000000000000000000
@@ -128,26 +147,3 @@ jobs:
             android/app/build/outputs/androidTest-results/
             ${{ runner.temp }}/phonebridge-server.log
           if-no-files-found: error
-  deploy:
-    needs: [security, python, android-build, android-e2e]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'freQuensy23-coder/hermes-phonebridge' && github.actor == 'freQuensy23-coder' && github.triggering_actor == 'freQuensy23-coder'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    concurrency:
-      group: phonebridge-production
-      cancel-in-progress: false
-    steps:
-      - name: Deploy accepted main revision
-        env:
-          SSH_KEY: ${{ secrets.PHONEBRIDGE_DEPLOY_KEY }}
-          SSH_HOST: ${{ vars.PHONEBRIDGE_SSH_HOST }}
-          SSH_KNOWN_HOSTS: ${{ vars.PHONEBRIDGE_SSH_KNOWN_HOSTS }}
-          REVISION: ${{ github.sha }}
-        run: |
-          test -n "$SSH_KEY" && test -n "$SSH_HOST" && test -n "$SSH_KNOWN_HOSTS"
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/phonebridge"
-          chmod 600 "$HOME/.ssh/phonebridge"
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          trap 'rm -f "$HOME/.ssh/phonebridge"' EXIT
-          ssh -i "$HOME/.ssh/phonebridge" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes "private@$SSH_HOST" "deploy $REVISION"
