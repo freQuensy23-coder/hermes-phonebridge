@@ -54,7 +54,7 @@ class PhoneOemInstrumentationTest {
     private var scenario: ActivityScenario<MainActivity>? = null
     private var originalServices: String? = null
     private var originalTimeFormat: String? = null
-    private var originalAccessibility = 0
+    private var originalAccessibility: String? = null
     private var permissionsChanged = false
     private var deadline = 0L
     private val directory get() = File(context.getExternalFilesDir(null) ?: error("Test Lab external files unavailable"), "phone-oem").apply { check(mkdirs() || isDirectory) }
@@ -66,7 +66,10 @@ class PhoneOemInstrumentationTest {
     private fun waitUntil(message: String, timeout: Long = 20000, predicate: () -> Boolean) {
         val end = minOf(deadline, SystemClock.elapsedRealtime() + timeout)
         while (SystemClock.elapsedRealtime() < end) {
-            if (predicate()) return
+            if (predicate()) {
+                assertTrue("$message must complete within its bounded deadline", SystemClock.elapsedRealtime() < end)
+                return
+            }
             Thread.sleep(150)
         }
         fail(message)
@@ -86,13 +89,14 @@ class PhoneOemInstrumentationTest {
         }
     }
 
-    private fun command(op: String, args: JSONObject = JSONObject()): JSONObject {
+    private fun command(op: String, args: JSONObject = JSONObject(), freshArgs: (() -> JSONObject)? = null): JSONObject {
         val id = credentials?.deviceId ?: error("Real paired device required")
         waitUntil("Production device must advertise $op") {
             val capabilities = http("GET", "/v1/devices/$id").getJSONArray("capabilities")
             (0 until capabilities.length()).any { capabilities.getString(it) == op }
         }
-        val queued = http("POST", "/v1/devices/$id/commands", JSONObject().put("op", op).put("args", args).put("ttl_seconds", 45).put("idempotency_key", "physical-${UUID.randomUUID()}"))
+        val dispatchArgs = freshArgs?.invoke() ?: args
+        val queued = http("POST", "/v1/devices/$id/commands", JSONObject().put("op", op).put("args", dispatchArgs).put("ttl_seconds", 45).put("idempotency_key", "physical-${UUID.randomUUID()}"))
         var result = JSONObject()
         waitUntil("Production command must reach terminal state") {
             result = http("GET", "/v1/commands/${queued.getString("id")}")
@@ -132,23 +136,102 @@ class PhoneOemInstrumentationTest {
         return (0 until items.length()).map { items.getJSONObject(it) }
     }
 
-    private fun selected(value: JSONObject, alarm: Boolean) = stockArgs().put("label", value.getString("label")).apply {
+    private fun selected(packageName: String, value: JSONObject, alarm: Boolean) = JSONObject().put("package", packageName).put("label", value.getString("label")).apply {
         if (alarm) put("time", value.getString("time"))
+        if (packageName == "com.sec.android.app.clockpackage") put("state", value.getString("state"))
+    }
+
+    private fun sameIdentity(left: JSONObject, right: JSONObject, alarm: Boolean) =
+        left.getString("label") == right.getString("label") && (!alarm || left.getString("time") == right.getString("time"))
+
+    private fun currentTarget(values: List<JSONObject>, identity: JSONObject, alarm: Boolean, expectedState: String): JSONObject {
+        assertTrue("Explicit requested label is required", identity.getString("label").isNotEmpty())
+        val matches = values.filter { sameIdentity(it, identity, alarm) }
+        assertEquals("Fresh complete list must uniquely identify the requested label/time", 1, matches.size)
+        return matches.single().also {
+            assertEquals("Fresh requested state must permit the intended operation", expectedState, it.getString("state"))
+            if (alarm) assertEquals(expectedState == "enabled", it.getBoolean("enabled"))
+        }
+    }
+
+    private fun requiredState(op: String) = when (op) {
+        "clock.alarms.disable", "clock.alarms.delete" -> "enabled"
+        "clock.alarms.enable" -> "disabled"
+        "clock.timers.pause", "clock.timers.cancel" -> "running"
+        "clock.timers.resume" -> "paused"
+        else -> error("Unexpected physical mutation $op")
+    }
+
+    private fun resultingState(op: String): String? = when (op) {
+        "clock.alarms.enable" -> "enabled"
+        "clock.alarms.disable" -> "disabled"
+        "clock.timers.pause" -> "paused"
+        "clock.timers.resume" -> "running"
+        "clock.alarms.delete", "clock.timers.cancel" -> null
+        else -> error("Unexpected physical mutation $op")
+    }
+
+    private fun requireClockForeground() {
+        UiThread.call {
+            val service = BridgeAccessibility.current ?: error("Real Accessibility required")
+            Access.unlocked(service)
+            service.safeRoot(pkg)
+        }
     }
 
     private fun stableRows(values: List<JSONObject>) = values.map {
         listOf(it.getString("label"), it.optString("time"), it.getString("state"), it.optString("schedule"))
     }.sortedBy { it.toString() }
 
-    private fun mutate(op: String, value: JSONObject, alarm: Boolean, outcome: String) {
+    private fun mutate(op: String, identity: JSONObject, alarm: Boolean, outcome: String): JSONObject? {
+        assertEquals(alarm, op.startsWith("clock.alarms."))
+        val desired = resultingState(op)
+        assertEquals(if (desired == null) "deleted" else "changed", outcome)
         record("before-$op")
-        val result = command(op, selected(value, alarm))
+        lateinit var fresh: JSONObject
+        var expected = emptyList<JSONObject>()
+        val result = command(op, freshArgs = {
+            requireClockForeground()
+            val before = list(alarm)
+            fresh = currentTarget(before, identity, alarm, requiredState(op))
+            expected = before.mapNotNull { value ->
+                if (!sameIdentity(value, fresh, alarm)) value else desired?.let { state ->
+                    JSONObject(value.toString()).put("state", state).apply { if (alarm) put("enabled", state == "enabled") }
+                }
+            }
+            val args = selected(pkg, fresh, alarm)
+            requireClockForeground()
+            args
+        })
         assertEquals("ui", result.getString("backend"))
         assertEquals(pkg, result.getString("package"))
         assertTrue(result.getBoolean("verified"))
         assertTrue(result.getBoolean("screen_required"))
         assertEquals(outcome, result.getString("outcome"))
+        assertEquals(desired ?: "absent", result.getString("state"))
+        assertEquals(fresh.getString("label"), result.getString("label"))
+        if (alarm) assertEquals(fresh.getString("time"), result.getString("time")) else assertTrue(result.isNull("time"))
+        var after = emptyList<JSONObject>()
+        var matchedAt: Long? = null
+        waitUntil("One mutation must have stable fresh complete readback preserving every survivor; no mutation retry", 10000) {
+            requireClockForeground()
+            after = list(alarm)
+            if (stableRows(after) != stableRows(expected)) {
+                matchedAt = null
+                false
+            } else {
+                val now = SystemClock.elapsedRealtime()
+                if (matchedAt == null) matchedAt = now
+                now - matchedAt!! >= 300
+            }
+        }
+        assertEquals(stableRows(expected), stableRows(after))
+        val target = if (desired == null) {
+            assertFalse(after.any { sameIdentity(it, identity, alarm) })
+            null
+        } else currentTarget(after, identity, alarm, desired)
         record("after-$op")
+        return target
     }
 
     private fun create(op: String, values: JSONObject, alarm: Boolean, label: String): JSONObject {
@@ -285,7 +368,7 @@ class PhoneOemInstrumentationTest {
         BridgeService.stop(context, true)
         waitUntil("Old service must stop", 5000) { BridgeService.current == null }
         originalServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-        originalAccessibility = Settings.Secure.getInt(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
+        originalAccessibility = Settings.Secure.getString(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED)
         originalTimeFormat = Settings.System.getString(context.contentResolver, Settings.System.TIME_12_24)
         permissionsChanged = true
         shell("input keyevent KEYCODE_WAKEUP")
@@ -348,12 +431,12 @@ class PhoneOemInstrumentationTest {
         assertTrue(alarm.getBoolean("enabled"))
         assertTrue("Stock alarm time must match native future time", alarm.getString("time").matches(Regex("0?${future.get(Calendar.HOUR_OF_DAY)}:${future.get(Calendar.MINUTE).toString().padStart(2, '0')}")))
         assertEquals(stableRows(baseline), stableRows(list(true).filter { it.getString("label") != label }))
-        mutate("clock.alarms.disable", alarm, true, "changed")
+        val disabledAlarm = mutate("clock.alarms.disable", alarm, true, "changed") ?: error("Disabled alarm readback required")
         assertFalse(list(true).single { it.getString("label") == label }.getBoolean("enabled"))
         assertEquals(stableRows(baseline), stableRows(list(true).filter { it.getString("label") != label }))
-        mutate("clock.alarms.enable", alarm, true, "changed")
+        val enabledAlarm = mutate("clock.alarms.enable", disabledAlarm, true, "changed") ?: error("Enabled alarm readback required")
         assertTrue(list(true).single { it.getString("label") == label }.getBoolean("enabled"))
-        mutate("clock.alarms.delete", alarm, true, "deleted")
+        mutate("clock.alarms.delete", enabledAlarm, true, "deleted")
         assertEquals(stableRows(baseline), stableRows(list(true)))
         show(false)
         val initialTimers = list(false)
@@ -366,19 +449,19 @@ class PhoneOemInstrumentationTest {
         assertEquals("running", decoy.getString("state"))
         val survivors = stableRows(list(false).filter { it.getString("label") != targetLabel })
         assertEquals(stableRows(initialTimers), stableRows(list(false).filter { it.getString("label") !in setOf(targetLabel, decoyLabel) }))
-        mutate("clock.timers.pause", target, false, "changed")
+        val pausedTarget = mutate("clock.timers.pause", target, false, "changed") ?: error("Paused requested timer readback required")
         assertEquals("paused", list(false).single { it.getString("label") == targetLabel }.getString("state"))
         val paused = countdown(targetLabel)
         Thread.sleep(1200)
         assertEquals("Requested stock timer must stop counting while paused", paused, countdown(targetLabel))
         assertEquals(survivors, stableRows(list(false).filter { it.getString("label") != targetLabel }))
-        mutate("clock.timers.resume", target, false, "changed")
+        val runningTarget = mutate("clock.timers.resume", pausedTarget, false, "changed") ?: error("Resumed requested timer readback required")
         assertEquals("running", list(false).single { it.getString("label") == targetLabel }.getString("state"))
         val resumed = countdown(targetLabel)
         Thread.sleep(1500)
         assertTrue("Requested stock timer must count down after resume", countdown(targetLabel) < resumed)
         assertEquals(survivors, stableRows(list(false).filter { it.getString("label") != targetLabel }))
-        mutate("clock.timers.cancel", target, false, "deleted")
+        mutate("clock.timers.cancel", runningTarget, false, "deleted")
         assertEquals(survivors, stableRows(list(false)))
         assertEquals("running", list(false).single { it.getString("label") == decoyLabel }.getString("state"))
         mutate("clock.timers.cancel", decoy, false, "deleted")
@@ -411,29 +494,167 @@ class PhoneOemInstrumentationTest {
         save()
     }
 
+    private fun cleanup(primary: Throwable?, actions: List<() -> Unit>): Throwable? {
+        var problem = primary
+        for (action in actions) {
+            try { action() } catch (error: Throwable) {
+                val previous = problem
+                if (previous == null) problem = error else if (previous !== error) previous.addSuppressed(error)
+            }
+        }
+        return problem
+    }
+
+    private fun settingRestorationCommand(namespace: String, key: String, value: String?): String =
+        if (value == null) "settings delete $namespace $key"
+        else "settings put $namespace $key '${value.replace("'", "'\\''")}'"
+
+    private fun restoreSetting(namespace: String, key: String, value: String?) {
+        shell(settingRestorationCommand(namespace, key, value))
+        val restored = when (namespace) {
+            "system" -> Settings.System.getString(context.contentResolver, key)
+            "secure" -> Settings.Secure.getString(context.contentResolver, key)
+            else -> error("Unexpected settings namespace")
+        }
+        assertEquals("Original $namespace $key must be restored", value, restored)
+    }
+
+    private fun selectionControls() {
+        assertEquals("running", requiredState("clock.timers.pause"))
+        assertEquals("paused", requiredState("clock.timers.resume"))
+        assertEquals("running", requiredState("clock.timers.cancel"))
+        assertEquals("enabled", requiredState("clock.alarms.disable"))
+        assertEquals("disabled", requiredState("clock.alarms.enable"))
+        assertEquals("enabled", requiredState("clock.alarms.delete"))
+        assertEquals("paused", resultingState("clock.timers.pause"))
+        assertEquals("running", resultingState("clock.timers.resume"))
+        assertEquals("disabled", resultingState("clock.alarms.disable"))
+        assertEquals("enabled", resultingState("clock.alarms.enable"))
+        assertNull(resultingState("clock.timers.cancel"))
+        assertNull(resultingState("clock.alarms.delete"))
+        fun timer(label: String, state: String) = JSONObject().put("label", label).put("state", state).put("time", "00:04:31")
+        fun rejected(action: () -> Unit) {
+            try { action() } catch (_: AssertionError) { return }
+            fail("Invalid fresh selection must fail before any mutation")
+        }
+        fun bridgeRejected(code: String, action: () -> Unit) {
+            try { action() } catch (error: BridgeFailure) { assertEquals(code, error.code); return }
+            fail("Adapter selection contract must reject this control")
+        }
+        val original = timer("requested timer", "running")
+        val paused = timer("requested timer", "paused")
+        val decoy = timer("decoy timer", "running")
+        val fresh = currentTarget(listOf(decoy, paused), original, false, "paused")
+        assertSame(paused, fresh)
+        assertEquals("running", original.getString("state"))
+        val samsung = selected("com.sec.android.app.clockpackage", fresh, false)
+        Arguments(samsung).only("package", "id", "label", "time", "state")
+        assertEquals("paused", Arguments(samsung).string("state", 16))
+        assertFalse("Countdown must never become requested timer identity", samsung.has("time"))
+        val entries = listOf(SamsungClockEntry("requested timer", "", "paused"), SamsungClockEntry("decoy timer", "", "running"))
+        assertEquals(entries.first(), SamsungClockPolicy.select(entries, samsung.getString("label"), "", samsung.getString("state")))
+        bridgeRejected("UNSUPPORTED") {
+            val stale = selected("com.sec.android.app.clockpackage", original, false)
+            SamsungClockPolicy.select(entries, stale.getString("label"), "", stale.getString("state"))
+        }
+        bridgeRejected("VALIDATION_ERROR") { Arguments(JSONObject().put("label", original.getString("label"))).string("state", 16) }
+        val running = timer("requested timer", "running")
+        val cancelled = currentTarget(listOf(decoy, running), paused, false, "running")
+        assertSame(running, cancelled)
+        assertEquals("running", selected("com.sec.android.app.clockpackage", cancelled, false).getString("state"))
+        assertSame(decoy, currentTarget(listOf(decoy), decoy, false, "running"))
+        for (value in listOf(fresh, cancelled, decoy)) {
+            val google = selected("com.google.android.deskclock", value, false)
+            Arguments(google).only("package", "id", "label", "time")
+            assertFalse(google.has("state"))
+            assertFalse(google.has("time"))
+            assertEquals(setOf("package", "label"), google.keys().asSequence().toSet())
+            bridgeRejected("VALIDATION_ERROR") { Arguments(JSONObject(google.toString()).put("state", value.getString("state"))).only("package", "id", "label", "time") }
+        }
+        rejected { currentTarget(listOf(original, decoy), original, false, "paused") }
+        rejected { currentTarget(listOf(paused, paused, decoy), original, false, "paused") }
+        rejected { currentTarget(listOf(decoy), original, false, "paused") }
+        val alarm = JSONObject().put("label", "requested alarm").put("time", "17:31").put("state", "enabled").put("enabled", true)
+        val disabled = JSONObject(alarm.toString()).put("state", "disabled").put("enabled", false)
+        val otherTime = JSONObject(disabled.toString()).put("time", "19:43")
+        val freshAlarm = currentTarget(listOf(otherTime, disabled), alarm, true, "disabled")
+        assertSame(disabled, freshAlarm)
+        val samsungAlarm = selected("com.sec.android.app.clockpackage", freshAlarm, true)
+        assertEquals("disabled", samsungAlarm.getString("state"))
+        assertEquals("17:31", samsungAlarm.getString("time"))
+        assertEquals(SamsungClockEntry("requested alarm", "17:31", "disabled"), SamsungClockPolicy.select(listOf(SamsungClockEntry("requested alarm", "17:31", "disabled")), samsungAlarm.getString("label"), samsungAlarm.getString("time"), samsungAlarm.getString("state")))
+        val googleAlarm = selected("com.google.android.deskclock", freshAlarm, true)
+        Arguments(googleAlarm).only("package", "id", "label", "time")
+        assertFalse(googleAlarm.has("state"))
+        assertEquals("17:31", googleAlarm.getString("time"))
+        rejected { currentTarget(listOf(otherTime), alarm, true, "disabled") }
+        rejected { currentTarget(listOf(disabled, disabled), alarm, true, "disabled") }
+        rejected { currentTarget(listOf(alarm), alarm, true, "disabled") }
+    }
+
+    private fun settingRestorationControls() {
+        assertEquals("settings delete secure accessibility_enabled", settingRestorationCommand("secure", "accessibility_enabled", null))
+        assertEquals("settings put secure accessibility_enabled '0'", settingRestorationCommand("secure", "accessibility_enabled", "0"))
+        assertEquals("settings put secure accessibility_enabled ''", settingRestorationCommand("secure", "accessibility_enabled", ""))
+        assertEquals("settings put secure accessibility_enabled ' 00'\\''raw '", settingRestorationCommand("secure", "accessibility_enabled", " 00'raw "))
+    }
+
+    private fun cleanupControls() {
+        val primary = AssertionError("primary mutation failure")
+        val evidence = IllegalStateException("evidence failure")
+        val close = IllegalStateException("scenario close failure")
+        val stop = IllegalStateException("service stop failure")
+        val time = IllegalStateException("time restoration failure")
+        val services = IllegalStateException("Accessibility services restoration failure")
+        val attempted = mutableListOf<String>()
+        val actions: List<() -> Unit> = listOf(
+            { attempted.add("evidence"); throw evidence },
+            { attempted.add("close"); throw close },
+            { attempted.add("stop"); throw stop },
+            { attempted.add("time"); throw time },
+            { attempted.add("services"); throw services },
+            { attempted.add("accessibility") }
+        )
+        assertSame(primary, cleanup(primary, actions))
+        assertEquals(listOf("evidence", "close", "stop", "time", "services", "accessibility"), attempted)
+        assertEquals(listOf(evidence, close, stop, time, services), primary.suppressed.toList())
+        val first = AssertionError("first cleanup failure")
+        val second = AssertionError("second cleanup failure")
+        assertSame(first, cleanup(null, listOf({ throw first }, { throw second })))
+        assertEquals(listOf(second), first.suppressed.toList())
+        assertNull(cleanup(null, listOf({ Unit })))
+    }
+
     @Test fun physicalRoundTripNativeClockCrudAndRevocation() {
         var problem: Throwable? = null
         try {
+            selectionControls()
+            settingRestorationControls()
+            cleanupControls()
             prepare()
             connect()
             clocks()
         } catch (error: Throwable) {
             problem = error
         } finally {
-            try { revoke() } catch (error: Throwable) { if (problem == null) problem = error else problem!!.addSuppressed(error) }
-            try {
+            problem = cleanup(problem, listOf(
+                { revoke() },
+                { report.put("packages_after", packageMetadata()); Unit },
+                { record("final-stock-state") },
+                { scenario?.close(); Unit },
+                { BridgeService.stop(context, true) },
+                { if (permissionsChanged) restoreSetting("system", "time_12_24", originalTimeFormat) },
+                { if (permissionsChanged) restoreSetting("secure", "enabled_accessibility_services", originalServices) },
+                { if (permissionsChanged) restoreSetting("secure", "accessibility_enabled", originalAccessibility) }
+            ))
+            problem = cleanup(problem, listOf({
                 report.put("outcome", if (problem == null) "passed" else if ((problem as? BridgeFailure)?.code == "UNSUPPORTED") "unsupported_failure" else "failed")
-                problem?.let { report.put("failure", JSONObject().put("type", it.javaClass.name).put("code", (it as? BridgeFailure)?.code ?: "ASSERTION_OR_INFRASTRUCTURE_FAILURE").put("message", it.message?.take(1024))) }
-                report.put("packages_after", packageMetadata())
-                record("final-stock-state")
-            } catch (error: Throwable) { if (problem == null) problem = error else problem!!.addSuppressed(error) }
-            scenario?.close()
-            BridgeService.stop(context, true)
-            if (permissionsChanged) {
-                shell("settings put system time_12_24 ${originalTimeFormat ?: "null"}")
-                shell("settings put secure enabled_accessibility_services ${originalServices?.takeIf { it.isNotEmpty() } ?: "null"}")
-                shell("settings put secure accessibility_enabled $originalAccessibility")
-            }
+                problem?.let { error ->
+                    report.put("failure", JSONObject().put("type", error.javaClass.name).put("code", (error as? BridgeFailure)?.code ?: "ASSERTION_OR_INFRASTRUCTURE_FAILURE").put("message", error.message?.take(1024))
+                        .put("suppressed", JSONArray(error.suppressed.map { suppressed -> JSONObject().put("type", suppressed.javaClass.name).put("code", (suppressed as? BridgeFailure)?.code ?: "ASSERTION_OR_INFRASTRUCTURE_FAILURE").put("message", suppressed.message?.take(1024)) })))
+                }
+                save()
+            }))
         }
         problem?.let { throw it }
     }

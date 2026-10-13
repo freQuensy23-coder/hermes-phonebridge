@@ -9,12 +9,15 @@ import secrets
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from pathlib import Path
+from typing import NamedTuple
 
 PROJECT = "hermes-phonebridge-ci-6147c4"
 PROJECT_NUMBER = "606598667955"
@@ -27,6 +30,10 @@ TEST_METHOD = "physicalRoundTripNativeClockCrudAndRevocation"
 DEVICE_DIRECTORY = "/sdcard/Android/data/org.nous.phonebridge/files/phone-oem"
 FIXTURE_PATH = "/sdcard/Android/data/org.nous.phonebridge/files/phone-oem-fixture.json"
 TERMINAL = {"FINISHED", "ERROR", "INVALID", "CANCELLED", "UNSUPPORTED_ENVIRONMENT", "INCOMPATIBLE_ENVIRONMENT", "INCOMPATIBLE_ARCHITECTURE"}
+MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
+MAX_PUBLICATION_BYTES = 128 * 1024 * 1024
+MAX_PUBLICATION_FILES = 1000
+SUMMARY_RESERVE_BYTES = 64 * 1024
 HOSTS = {"cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "firebase.googleapis.com", "serviceusage.googleapis.com", "testing.googleapis.com", "toolresults.googleapis.com", "storage.googleapis.com"}
 
 
@@ -40,8 +47,16 @@ class DeadlineExceeded(Blocked):
 
 class ApiError(Blocked):
     def __init__(self, status, service, code):
+        if not isinstance(code, str) or code not in {"ABORTED", "ALREADY_EXISTS", "CANCELLED", "DATA_LOSS", "DEADLINE_EXCEEDED", "FAILED_PRECONDITION", "INTERNAL", "INVALID_ARGUMENT", "NOT_FOUND", "OUT_OF_RANGE", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "UNAUTHENTICATED", "UNAVAILABLE", "UNIMPLEMENTED", "UNKNOWN"}:
+            code = "UNSPECIFIED"
         self.status = status
         super().__init__(f"{'FREE_QUOTA_EXHAUSTED_OR_RATE_LIMITED' if status == 429 or code == 'RESOURCE_EXHAUSTED' else 'API_BLOCKED'}: {service} HTTP {status} {code}; retries=0, no billing or role fallback")
+
+
+class EvidenceConflict(Blocked):
+    def __init__(self, manifest):
+        self.manifest = manifest
+        super().__init__("CONFLICTING_OEM_EVIDENCE_REPORTS")
 
 
 def require(condition, message):
@@ -271,11 +286,19 @@ def poll_matrix(api, matrix_id, payload, deadline, sleep=time.sleep):
         sleep(min(10, deadline.remaining()))
 
 
-def redacted(value, secret):
+def redacted(value, secret, depth=0):
+    require(depth <= 100, "EVIDENCE_JSON_DEPTH_BOUND_EXCEEDED")
     if isinstance(value, dict):
-        return {key: redacted(item, secret) for key, item in value.items() if key not in {"environmentVariables", "commandLineArguments"}}
+        result = {}
+        for key, item in value.items():
+            if key in {"environmentVariables", "commandLineArguments"}:
+                continue
+            cleaned_key = redacted(key, secret, depth + 1)
+            require(cleaned_key not in result, "EVIDENCE_REDACTED_KEY_COLLISION")
+            result[cleaned_key] = redacted(item, secret, depth + 1)
+        return result
     if isinstance(value, list):
-        return [redacted(item, secret) for item in value]
+        return [redacted(item, secret, depth + 1) for item in value]
     if isinstance(value, str):
         return value.replace(secret, "[synthetic-admin-redacted]")
     return value
@@ -285,13 +308,17 @@ def tool_results(api, matrix, payload, matrix_id):
     matrix_binding(matrix, matrix_id, payload, executions=True)
     results = []
     seen = set()
+    references = []
     for execution in matrix["testExecutions"]:
         reference = execution.get("toolResultsStep", {})
-        require(reference.get("projectId") == PROJECT and all(re.fullmatch(r"[A-Za-z0-9_-]{1,128}", reference.get(key, "")) for key in ("historyId", "executionId", "stepId")), "TOOL_RESULTS_PROVENANCE_MISSING")
+        require(reference.get("projectId") == PROJECT and all(isinstance(reference.get(key), str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", reference[key]) is not None and reference[key] not in {".", ".."} for key in ("historyId", "executionId", "stepId")), "TOOL_RESULTS_PROVENANCE_MISSING")
         key = tuple(reference[key] for key in ("historyId", "executionId", "stepId"))
         require(key not in seen, "DUPLICATE_TOOL_RESULTS_STEP")
         seen.add(key)
-        path = f"https://toolresults.googleapis.com/toolresults/v1beta3/projects/{PROJECT}/histories/{key[0]}/executions/{key[1]}/steps/{key[2]}"
+        references.append((execution, reference, key))
+    for execution, reference, key in references:
+        project, history, run_id, step_id = [urllib.parse.quote(segment, safe="") for segment in (PROJECT, *key)]
+        path = f"https://toolresults.googleapis.com/toolresults/v1beta3/projects/{project}/histories/{history}/executions/{run_id}/steps/{step_id}"
         step = api.request("GET", path)
         require(step.get("stepId") == key[2] and step.get("state") == "complete", "TOOL_RESULTS_STEP_INCOMPLETE")
         cases = api.request("GET", path + "/testCases?pageSize=100")
@@ -303,30 +330,257 @@ def tool_results(api, matrix, payload, matrix_id):
     return results
 
 
-def archived_reports(data):
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "EVIDENCE_JSON_DUPLICATE_KEY")
+        result[key] = value
+    return result
+
+
+def sanitized_evidence(data, name, secret, binding=None, devices=None):
+    suffix = Path(name).suffix.lower()
+    if suffix not in {".json", ".txt", ".log", ".xml", ".csv"}:
+        return {"omission_reason": "TYPE_NOT_ALLOWLISTED_CREDENTIAL_FREEDOM_UNVERIFIED"}, None
+    try:
+        text = data.decode("utf-8")
+    except UnicodeError:
+        require(Path(name).name != "physical.json", "OEM_REPORT_NOT_UTF8_TEXT")
+        return {"omission_reason": "ALLOWLISTED_TYPE_NOT_UTF8_TEXT"}, None
+    if any(ord(char) < 32 and char not in "\t\r\n" or ord(char) == 127 for char in text):
+        require(Path(name).name != "physical.json", "OEM_REPORT_CONTAINS_BINARY_CONTROL_BYTES")
+        return {"omission_reason": "ALLOWLISTED_TYPE_CONTAINS_BINARY_CONTROL_BYTES"}, None
+    report = None
+    if suffix == ".json":
+        try:
+            value = json.loads(text, object_pairs_hook=unique_json_object)
+            source_report_sha256 = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            proof = original_proof(value, source_report_sha256, binding, devices) if Path(name).name == "physical.json" and binding is not None and devices is not None else None
+            value = redacted(value, secret)
+            cleaned = json.dumps(value, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+        except (ValueError, TypeError, RecursionError, UnicodeError):
+            raise Blocked("EVIDENCE_JSON_INVALID") from None
+        if Path(name).name == "physical.json":
+            require(isinstance(value, dict), "OEM_REPORT_JSON_OBJECT_REQUIRED")
+            report = value
+    else:
+        cleaned = text.replace(secret, "[synthetic-admin-redacted]").encode()
+    require(len(cleaned) <= 32 * 1024 * 1024, "SANITIZED_EVIDENCE_SIZE_BOUND_EXCEEDED")
+    require(secret.encode() not in cleaned, "EVIDENCE_SECRET_REDACTION_FAILED")
+    entry = {"content": cleaned, "suffix": suffix}
+    if report is not None:
+        entry["source_report_sha256"] = source_report_sha256
+        entry["original_validation"] = proof
+    return entry, report
+
+
+def archived_reports(data, secret, binding=None, devices=None):
+    require(len(data) <= 32 * 1024 * 1024, "RESULT_ARCHIVE_SIZE_BOUND_EXCEEDED")
+    inventory = []
     reports = []
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        members = archive.infolist()
-        require(len(members) <= 100, "RESULT_ARCHIVE_ENTRY_BOUND_EXCEEDED")
-        seen = set()
-        expanded = 0
-        for member in members:
-            name = member.filename
-            mode = member.external_attr >> 16
-            require(not name.startswith("/") and "\\" not in name and all(part not in ("", ".", "..") for part in name.rstrip("/").split("/")) and name not in seen and not (member.flag_bits & 1) and stat.S_IFMT(mode) in (0, stat.S_IFREG, stat.S_IFDIR), "UNSAFE_RESULT_ARCHIVE_MEMBER")
-            seen.add(name)
-            expanded += member.file_size
-            require(0 <= member.file_size <= 32 * 1024 * 1024 and expanded <= 128 * 1024 * 1024, "RESULT_ARCHIVE_EXPANSION_BOUND_EXCEEDED")
-            if name.endswith("/physical.json") or name == "physical.json":
-                require(not member.is_dir() and member.file_size <= 4 * 1024 * 1024, "OEM_REPORT_ARCHIVE_BOUND_EXCEEDED")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = archive.infolist()
+            require(len(members) <= 100, "RESULT_ARCHIVE_ENTRY_BOUND_EXCEEDED")
+            seen = {}
+            expanded = 0
+            for member in members:
+                name = member.filename
+                mode = member.external_attr >> 16
+                parts = name.rstrip("/").split("/")
+                canonical = "/".join(parts)
+                require(name == member.orig_filename and name == canonical + ("/" if member.is_dir() else "") and not name.startswith("/") and "\\" not in name and not any(ord(char) < 32 or ord(char) == 127 for char in name) and all(part not in ("", ".", "..") for part in parts) and canonical not in seen and not (member.flag_bits & 1) and stat.S_IFMT(mode) in (0, stat.S_IFREG, stat.S_IFDIR) and (stat.S_IFMT(mode) != stat.S_IFDIR or member.is_dir()), "UNSAFE_RESULT_ARCHIVE_MEMBER")
+                seen[canonical] = member.is_dir()
+                expanded += member.file_size
+                require(0 <= member.file_size <= 32 * 1024 * 1024 and expanded <= 128 * 1024 * 1024, "RESULT_ARCHIVE_EXPANSION_BOUND_EXCEEDED")
+                if parts[-1] == "physical.json":
+                    require(not member.is_dir() and member.file_size <= 4 * 1024 * 1024, "OEM_REPORT_ARCHIVE_BOUND_EXCEEDED")
+            for name in seen:
+                parts = name.split("/")
+                require(all(seen.get("/".join(parts[:index]), True) for index in range(1, len(parts))), "RESULT_ARCHIVE_PATH_COLLISION")
+            for member in members:
                 with archive.open(member) as stream:
-                    content = stream.read(4 * 1024 * 1024 + 1)
+                    content = stream.read(member.file_size + 1)
                 require(len(content) == member.file_size, "RESULT_ARCHIVE_MEMBER_SIZE_MISMATCH")
-                reports.append({"member": name, "sha256": hashlib.sha256(content).hexdigest(), "report": json.loads(content)})
-    return reports
+                entry = {"member": member.filename, "size": member.file_size, "compressed_size": member.compress_size, "crc32": f"{member.CRC:08x}", "source_sha256": hashlib.sha256(content).hexdigest()}
+                if member.is_dir():
+                    entry["omission_reason"] = "ARCHIVE_DIRECTORY_NOT_AN_ARTIFACT"
+                else:
+                    cleaned, report = sanitized_evidence(content, member.filename, secret, binding, devices)
+                    entry.update(cleaned)
+                    if report is not None:
+                        reports.append((report, entry["source_report_sha256"], entry.pop("original_validation", None)))
+                inventory.append(entry)
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError, EOFError, OSError, ValueError, zlib.error) as error:
+        if isinstance(error, Blocked):
+            raise
+        raise Blocked("RESULT_ARCHIVE_INVALID_OR_CRC_FAILED") from None
+    return redacted(inventory, secret), reports
 
 
-def evidence_objects(api, prefix, output, secret, deadline):
+def compact_sanitized(value, secret):
+    try:
+        content = json.dumps(redacted(value, secret), separators=(",", ":"), allow_nan=False).encode() + b"\n"
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        raise Blocked("SUMMARY_JSON_INVALID") from None
+    require(secret.encode() not in content, "EVIDENCE_SECRET_REDACTION_FAILED")
+    return content
+
+
+def inventory_metadata(value):
+    if isinstance(value, dict):
+        return {key: inventory_metadata(item) for key, item in value.items() if key not in {"content", "suffix", "original_validation"}}
+    if isinstance(value, list):
+        return [inventory_metadata(item) for item in value]
+    return value
+
+
+class Publication:
+    def __init__(self, output, secret):
+        self.output = output
+        self.secret = secret
+        self.count = 0
+        self.size = 0
+        self.manifest = []
+        self.inventories = []
+        self.source_digests = set()
+        self.pending_inventory = None
+        self.staging = None
+        self.pending_paths = []
+        self.staged_files = set()
+        self.pending_size = 0
+
+    def check_batch(self, contents):
+        require(all(len(content) <= MAX_ARTIFACT_BYTES and self.secret.encode() not in content for content in contents), "PUBLICATION_FILE_BOUND_OR_SECRET_CHECK_FAILED")
+        require(self.count + len(contents) <= MAX_PUBLICATION_FILES - 1 and self.size + sum(len(content) for content in contents) <= MAX_PUBLICATION_BYTES - SUMMARY_RESERVE_BYTES, "RESULT_EXPANDED_ARTIFACT_BOUND_EXCEEDED")
+
+    def write(self, filename, content, summary=False):
+        require(len(content) <= MAX_ARTIFACT_BYTES and self.secret.encode() not in content, "PUBLICATION_FILE_BOUND_OR_SECRET_CHECK_FAILED")
+        count_limit = MAX_PUBLICATION_FILES if summary else MAX_PUBLICATION_FILES - 1
+        size_limit = MAX_PUBLICATION_BYTES if summary else MAX_PUBLICATION_BYTES - SUMMARY_RESERVE_BYTES
+        require(self.count + len(self.staged_files) + 1 <= count_limit and self.size + self.pending_size + len(content) <= size_limit, "RESULT_EXPANDED_ARTIFACT_BOUND_EXCEEDED")
+        if summary:
+            require(self.staging is None and filename == "summary.json", "INVENTORY_PUBLICATION_BINDING_MISMATCH")
+            destination = self.output / filename
+            require(not destination.exists() and not destination.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
+            staging = Path(tempfile.mkdtemp(prefix=".phonebridge-publication-", dir=self.output.parent))
+            path = staging / filename
+            try:
+                with path.open("xb") as stream:
+                    require(stream.write(content) == len(content), "PUBLICATION_WRITE_INCOMPLETE")
+                path.rename(destination)
+                self.count += 1
+                self.size += len(content)
+            finally:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                try:
+                    staging.rmdir()
+                except OSError:
+                    pass
+            return
+        require(self.staging is not None and filename in self.pending_paths and filename not in self.staged_files, "INVENTORY_PUBLICATION_BINDING_MISMATCH")
+        path = self.staging / Path(filename).name
+        require(not path.exists() and not path.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
+        with path.open("xb") as stream:
+            require(stream.write(content) == len(content), "PUBLICATION_WRITE_INCOMPLETE")
+        self.staged_files.add(filename)
+        self.pending_size += len(content)
+
+    def abort_batch(self):
+        if self.staging is not None:
+            for filename in self.pending_paths:
+                try:
+                    (self.staging / Path(filename).name).unlink()
+                except OSError:
+                    pass
+            try:
+                self.staging.rmdir()
+            except OSError:
+                pass
+        self.pending_inventory = None
+        self.staging = None
+        self.pending_paths = []
+        self.staged_files = set()
+        self.pending_size = 0
+
+    def prepare_inventory(self, index, entry, pending):
+        require(self.staging is None, "INVENTORY_PUBLICATION_BINDING_MISMATCH")
+        batch = f"batch-{index:03d}"
+        destination = self.output / batch
+        require(not destination.exists() and not destination.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
+        pending = [(f"{batch}/{filename}", artifact) for filename, artifact in pending]
+        for filename, artifact in pending:
+            content = artifact["content"]
+            artifact.update({"download_sha256": hashlib.sha256(content).hexdigest(), "download_size": len(content), "local_file": filename})
+        metadata = redacted(inventory_metadata(entry), self.secret)
+        content = compact_sanitized(metadata, self.secret)
+        self.check_batch([artifact["content"] for filename, artifact in pending] + [content])
+        filename = f"{batch}/inventory-{index:03d}.json"
+        self.staging = Path(tempfile.mkdtemp(prefix=".phonebridge-publication-", dir=self.output.parent))
+        self.pending_inventory = (filename, content, metadata)
+        self.pending_paths = [name for name, artifact in pending] + [filename]
+        return pending
+
+    def retain_inventory(self, index):
+        filename, content, metadata = self.pending_inventory
+        batch = f"batch-{index:03d}"
+        require(filename == f"{batch}/inventory-{index:03d}.json" and self.staged_files == set(self.pending_paths) - {filename}, "INVENTORY_PUBLICATION_BINDING_MISMATCH")
+        self.write(filename, content)
+        manifest = [*self.manifest, metadata]
+        inventories = [*self.inventories, {"local_file": filename, "download_size": len(content), "download_sha256": hashlib.sha256(content).hexdigest()}]
+        source_digests = self.source_digests | {item["source_report_sha256"] for item in [metadata, *metadata.get("members", [])] if "source_report_sha256" in item}
+        destination = self.output / batch
+        require(not destination.exists() and not destination.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
+        self.staging.rename(destination)
+        self.count += len(self.staged_files)
+        self.size += self.pending_size
+        self.manifest = manifest
+        self.inventories = inventories
+        self.source_digests = source_digests
+        self.pending_inventory = None
+        self.staging = None
+        self.pending_paths = []
+        self.staged_files = set()
+        self.pending_size = 0
+
+    def summary(self, report):
+        report["evidence"] = self.manifest
+        report["inventories"] = self.inventories
+        reason = None
+        try:
+            content = compact_sanitized(report, self.secret)
+            if len(content) > min(MAX_ARTIFACT_BYTES, MAX_PUBLICATION_BYTES - self.size):
+                reason = "SUMMARY_PUBLICATION_BOUND_EXCEEDED"
+        except Blocked:
+            reason = "SUMMARY_SANITIZATION_OR_SERIALIZATION_FAILED"
+        if reason:
+            report["status"] = "BLOCKED"
+            report["reason"] = reason
+            fallback = {"status": "BLOCKED", "reason": reason, "inventories": self.inventories, "retained_files": self.count, "retained_bytes": self.size}
+            content = compact_sanitized(fallback, self.secret)
+            require(len(content) <= SUMMARY_RESERVE_BYTES, "BOUNDED_SUMMARY_RESERVATION_EXCEEDED")
+        self.write("summary.json", content, summary=True)
+        return reason is None
+
+
+def write_evidence(output, filename, entry, secret, publication=None):
+    content = entry.pop("content")
+    entry.pop("suffix")
+    require(secret.encode() not in content, "EVIDENCE_SECRET_REDACTION_FAILED")
+    path = output / filename
+    require(not path.exists() and not path.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
+    if publication is not None:
+        publication.write(filename, content)
+    else:
+        with path.open("xb") as stream:
+            stream.write(content)
+    entry.update({"download_sha256": hashlib.sha256(content).hexdigest(), "download_size": len(content), "local_file": filename})
+
+
+def evidence_objects(api, prefix, output, secret, deadline, binding=None, devices=None, proofs=None, publication=None):
     objects = []
     page_token = None
     for _ in range(10):
@@ -341,8 +595,13 @@ def evidence_objects(api, prefix, output, secret, deadline):
             break
     require(not page_token and bool(objects), "RESULT_LISTING_INCOMPLETE_OR_EMPTY")
     total = 0
+    expanded = 0
+    artifact_count = 0
+    emitted_bytes = 0
     manifest = []
     reports = []
+    report_sources = {}
+    conflicting = False
     seen = set()
     for index, item in enumerate(objects):
         deadline.remaining()
@@ -358,46 +617,127 @@ def evidence_objects(api, prefix, output, secret, deadline):
         private_object(api, name)
         data = api.request("GET", object_url(name) + "?" + urllib.parse.urlencode({"alt": "media", "generation": item["generation"]}), raw=True, limit=size)
         require(len(data) == size and base64.b64encode(hashlib.md5(data).digest()).decode() == item.get("md5Hash"), "RESULT_INTEGRITY_MISMATCH")
-        cleaned = data.replace(secret.encode(), b"[synthetic-admin-redacted]")
-        filename = f"object-{index:03d}" + (".json" if name.endswith("physical.json") else ".bin")
-        (output / filename).write_bytes(cleaned)
-        manifest.append({"bucket": BUCKET, "name": name, "generation": item["generation"], "size": size, "source_sha256": hashlib.sha256(data).hexdigest(), "download_sha256": hashlib.sha256(cleaned).hexdigest(), "local_file": filename})
-        if name.endswith("/physical.json"):
-            require(size <= 4 * 1024 * 1024, "OEM_REPORT_BOUND_EXCEEDED")
-            reports.append(json.loads(cleaned))
-        elif name.endswith(".zip"):
-            archived = archived_reports(cleaned)
-            manifest[-1]["archived_reports"] = [{"member": item["member"], "sha256": item["sha256"]} for item in archived]
-            reports.extend(item["report"] for item in archived)
+        entry = {"bucket": BUCKET, "name": name, "generation": item["generation"], "size": size, "md5Hash": item["md5Hash"], "source_sha256": hashlib.sha256(data).hexdigest()}
+        found = []
+        if name.lower().endswith(".zip") or zipfile.is_zipfile(io.BytesIO(data)):
+            members, found = archived_reports(data, secret, binding, devices)
+            entry.update({"omission_reason": "RAW_ARCHIVE_NEVER_PUBLISHED", "members": members})
+            expanded += sum(member["size"] for member in members)
+            pending = [(f"object-{index:03d}-member-{position:03d}" + member["suffix"], member) for position, member in enumerate(members) if "content" in member]
+        else:
+            if Path(name).name == "physical.json":
+                require(size <= 4 * 1024 * 1024, "OEM_REPORT_BOUND_EXCEEDED")
+            cleaned, report = sanitized_evidence(data, name, secret, binding, devices)
+            entry.update(cleaned)
+            expanded += size
+            pending = [(f"object-{index:03d}" + entry["suffix"], entry)] if "content" in entry else []
+            if report is not None:
+                found.append((report, entry["source_report_sha256"], entry.pop("original_validation", None)))
+        artifact_count += len(pending)
+        emitted_bytes += sum(len(artifact["content"]) for filename, artifact in pending)
+        require(expanded <= 128 * 1024 * 1024 and emitted_bytes <= 128 * 1024 * 1024 and artifact_count <= 1000, "RESULT_EXPANDED_ARTIFACT_BOUND_EXCEEDED")
+        for report, source_digest, proof in found:
+            if proofs is not None and proof is not None:
+                proofs.append(proof)
+            identity = report.get("device", {})
+            require(isinstance(identity, dict), "OEM_REPORT_DEVICE_OBJECT_REQUIRED")
+            key = json.dumps([report.get("binding"), identity.get("device"), identity.get("sdk")], sort_keys=True, separators=(",", ":"))
+            if key in report_sources:
+                conflicting = conflicting or report_sources[key] != source_digest
+            else:
+                report_sources[key] = source_digest
+                reports.append(report)
+        try:
+            if publication is not None:
+                pending = publication.prepare_inventory(index, entry, pending)
+            for filename, artifact in pending:
+                deadline.remaining()
+                write_evidence(output, filename, artifact, secret, publication)
+            if publication is not None:
+                publication.retain_inventory(index)
+        finally:
+            if publication is not None:
+                publication.abort_batch()
+        manifest.append(entry)
+    manifest = redacted(manifest, secret)
+    if conflicting:
+        raise EvidenceConflict(manifest)
     return manifest, reports
 
 
-def validate_reports(reports, binding, devices):
-    require(len(reports) == 2, "EXACT_TWO_REAL_DEVICE_EVIDENCE_REPORTS_REQUIRED")
-    actual = set()
+def validation_context(binding, devices):
+    return hashlib.sha256(json.dumps([binding, devices], sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+class OriginalProof(NamedTuple):
+    source_digest: str
+    context_digest: str
+    identity: tuple
+    positive: bool
+    reason: str
+
+
+def validate_original_report(report, binding, devices):
+    require(isinstance(report, dict) and report.get("binding") == binding and report.get("physical") is True, "OEM_EVIDENCE_RUN_PROVENANCE_MISMATCH")
+    identity = report.get("device", {})
+    require(isinstance(identity, dict) and isinstance(identity.get("device"), str) and type(identity.get("sdk")) is int, "OEM_EVIDENCE_DEVICE_MISMATCH")
+    pair = (identity["device"], identity["sdk"])
     expected = {(item["model"]["codename"], item["version"]["apiLevel"]) for item in devices}
+    require(pair in expected, "OEM_EVIDENCE_DEVICE_MISMATCH")
+    selected = next(item for item in devices if (item["model"]["codename"], item["version"]["apiLevel"]) == pair)
+    require(identity.get("manufacturer", "").casefold() == selected["model"]["manufacturer"].casefold(), "OEM_EVIDENCE_MANUFACTURER_MISMATCH")
+    stock_package = "com.sec.android.app.clockpackage" if selected["model"]["manufacturer"].casefold() == "samsung" else "com.google.android.deskclock"
+    for key in ("packages", "packages_after"):
+        metadata = [item for item in report.get(key, []) if item.get("package") == stock_package and item.get("installed") is True]
+        require(len(metadata) == 1 and isinstance(metadata[0].get("version_name"), str) and bool(metadata[0]["version_name"]) and type(metadata[0].get("version_code")) is int and metadata[0]["version_code"] > 0 and bool(metadata[0].get("current_signer_sha256")) and all(re.fullmatch(r"[0-9a-f]{64}", signer) for signer in metadata[0]["current_signer_sha256"]), "EXACT_INSTALLED_STOCK_METADATA_MISSING")
+    require(report.get("packages") == report.get("packages_after"), "STOCK_PACKAGE_OR_SOURCE_PROFILE_CHANGED_DURING_TEST")
+    frames = report.get("frames", [])
+    require(1 <= len(frames) <= 32 and any(frame.get("active_package") == stock_package and any(node.get("package") == stock_package for node in frame.get("nodes", [])) for frame in frames), "BOUNDED_NATIVE_STOCK_UI_EVIDENCE_MISSING")
+    positive = report.get("outcome") == "passed" and report.get("transport_roundtrip") is True and report.get("revocation_verified") is True and report.get("clock_crud_verified") is True
+    return pair, positive
+
+
+def original_proof(report, source_digest, binding, devices):
+    context = validation_context(binding, devices)
+    try:
+        pair, positive = validate_original_report(report, binding, devices)
+        return OriginalProof(source_digest, context, pair, positive, "")
+    except Blocked as error:
+        return OriginalProof(source_digest, context, (), False, str(error))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return OriginalProof(source_digest, context, (), False, "OEM_ORIGINAL_REPORT_INVALID")
+
+
+def validate_original_proofs(proofs, binding, devices, source_digests):
+    context = validation_context(binding, devices)
+    unique = {}
+    retained = set()
+    for proof in proofs:
+        require(isinstance(proof, OriginalProof) and proof.context_digest == context and proof.source_digest in source_digests, "OEM_ORIGINAL_VALIDATION_BINDING_MISMATCH")
+        require(not proof.reason, proof.reason)
+        require(proof.identity not in unique or unique[proof.identity].source_digest == proof.source_digest, "CONFLICTING_OEM_EVIDENCE_REPORTS")
+        unique[proof.identity] = proof
+        retained.add(proof.source_digest)
+    require(retained == set(source_digests), "OEM_ORIGINAL_VALIDATION_BINDING_MISMATCH")
+    expected = {(item["model"]["codename"], item["version"]["apiLevel"]) for item in devices}
+    require(len(unique) == 2 and set(unique) == expected, "EXACT_TWO_REAL_DEVICE_EVIDENCE_REPORTS_REQUIRED")
+    return all(proof.positive for proof in unique.values())
+
+
+def validate_reports(reports, binding, devices):
+    proofs = []
     for report in reports:
-        require(report.get("binding") == binding and report.get("physical") is True, "OEM_EVIDENCE_RUN_PROVENANCE_MISMATCH")
-        identity = report.get("device", {})
-        pair = (identity.get("device"), identity.get("sdk"))
-        require(pair in expected and pair not in actual, "OEM_EVIDENCE_DEVICE_MISMATCH")
-        selected = next(item for item in devices if (item["model"]["codename"], item["version"]["apiLevel"]) == pair)
-        require(identity.get("manufacturer", "").casefold() == selected["model"]["manufacturer"].casefold(), "OEM_EVIDENCE_MANUFACTURER_MISMATCH")
-        stock_package = "com.sec.android.app.clockpackage" if selected["model"]["manufacturer"].casefold() == "samsung" else "com.google.android.deskclock"
-        for key in ("packages", "packages_after"):
-            metadata = [item for item in report.get(key, []) if item.get("package") == stock_package and item.get("installed") is True]
-            require(len(metadata) == 1 and isinstance(metadata[0].get("version_name"), str) and bool(metadata[0]["version_name"]) and type(metadata[0].get("version_code")) is int and metadata[0]["version_code"] > 0 and bool(metadata[0].get("current_signer_sha256")) and all(re.fullmatch(r"[0-9a-f]{64}", signer) for signer in metadata[0]["current_signer_sha256"]), "EXACT_INSTALLED_STOCK_METADATA_MISSING")
-        require(report.get("packages") == report.get("packages_after"), "STOCK_PACKAGE_OR_SOURCE_PROFILE_CHANGED_DURING_TEST")
-        frames = report.get("frames", [])
-        require(1 <= len(frames) <= 32 and any(frame.get("active_package") == stock_package and any(node.get("package") == stock_package for node in frame.get("nodes", [])) for frame in frames), "BOUNDED_NATIVE_STOCK_UI_EVIDENCE_MISSING")
-        actual.add(pair)
-    return all(report.get("outcome") == "passed" and report.get("transport_roundtrip") is True and report.get("revocation_verified") is True and report.get("clock_crud_verified") is True for report in reports)
+        digest = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        proofs.append(original_proof(report, digest, binding, devices))
+    return validate_original_proofs(proofs, binding, devices, {proof.source_digest for proof in proofs})
 
 
 def run(args, api, deadline, binding, test_args, output):
     report = {"binding": binding, "project": PROJECT, "provider": PROVIDER, "bucket": BUCKET, "status": "BLOCKED", "retries": 0}
     matrix_id = None
     payload = None
+    publication = Publication(output, test_args["adminToken"])
+    proofs = []
     try:
         report["preflight"] = free_guard(api)
         catalog = api.request("GET", f"https://testing.googleapis.com/v1/testEnvironmentCatalog/ANDROID?projectId={PROJECT}")
@@ -426,24 +766,27 @@ def run(args, api, deadline, binding, test_args, output):
             raise Blocked("FREE_PHYSICAL_QUOTA_EXHAUSTED; retries=0, no charged fallback")
         if matrix.get("state") != "FINISHED":
             try:
-                manifest, reports = evidence_objects(api, prefix, output, test_args["adminToken"], deadline)
+                manifest, reports = evidence_objects(api, prefix, output, test_args["adminToken"], deadline, binding, devices, proofs, publication)
                 report["evidence"] = manifest
                 report["device_reports"] = reports
             except Blocked as error:
+                if isinstance(error, EvidenceConflict):
+                    report["evidence"] = error.manifest
                 report["partial_evidence_reason"] = str(error)
-            raise Blocked(f"MATRIX_{matrix.get('state')}: {matrix.get('invalidMatrixDetails', 'no terminal outcome')}; no retry")
-        manifest, reports = evidence_objects(api, prefix, output, test_args["adminToken"], deadline)
+            raise Blocked("MATRIX_TERMINAL_NON_SUCCESS; no retry")
+        manifest, reports = evidence_objects(api, prefix, output, test_args["adminToken"], deadline, binding, devices, proofs, publication)
         report["evidence"] = manifest
         report["device_reports"] = reports
         results = tool_results(api, matrix, payload, matrix_id)
         report["tool_results"] = redacted(results, test_args["adminToken"])
-        evidence_passed = validate_reports(reports, binding, devices)
+        evidence_passed = validate_original_proofs(proofs, binding, devices, publication.source_digests)
         passed = matrix.get("outcomeSummary") == "SUCCESS" and all(item["execution_state"] == "FINISHED" and item["step"].get("outcome", {}).get("summary") == "success" and item["case"].get("status") == "passed" for item in results) and evidence_passed
         report["status"] = "PASSED" if passed else "FAILED"
         if not passed:
             report["reason"] = "OEM_PROFILE_UNSUPPORTED; real stock metadata and UI evidence retained" if any(item.get("outcome") == "unsupported_failure" for item in reports) else "REAL_OEM_TEST_OR_POSITIVE_ASSERTIONS_FAILED; no retry"
         return 0 if passed else 1
     except DeadlineExceeded as error:
+        report["status"] = "BLOCKED"
         report["reason"] = str(error)
         if matrix_id:
             try:
@@ -453,11 +796,21 @@ def run(args, api, deadline, binding, test_args, output):
                 report["deadline_cancellation"] = "NOT_CONFIRMED; server test timeout remains bounded"
         return 2
     except (Blocked, OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
-        report["reason"] = str(error).replace(test_args["adminToken"], "[synthetic-admin-redacted]")[:2000]
+        if isinstance(error, EvidenceConflict):
+            report["evidence"] = error.manifest
+        report["status"] = "BLOCKED"
+        report["reason"] = redacted(str(error), test_args["adminToken"])[:2000] if isinstance(error, Blocked) else f"RUNNER_INPUT_OR_EVIDENCE_INVALID: {type(error).__name__}"
         return 2
     finally:
-        (output / "summary.json").write_text(json.dumps(redacted(report, test_args["adminToken"]), indent=2) + "\n")
-        print(json.dumps({"status": report["status"], "matrix_id": matrix_id, "summary": str(output / "summary.json"), "reason": report.get("reason")}))
+        summary_ok = False
+        try:
+            summary_ok = publication.summary(report)
+        except (Blocked, OSError, ValueError, TypeError):
+            report["status"] = "BLOCKED"
+            report["reason"] = "BOUNDED_SUMMARY_PUBLICATION_FAILED"
+        print(compact_sanitized({"status": report["status"], "matrix_id": matrix_id, "summary": str(output / "summary.json"), "reason": report.get("reason")}, test_args["adminToken"]).decode().strip())
+        if not summary_ok:
+            return 2
 
 
 def main():
@@ -483,7 +836,7 @@ def main():
         deadline = Deadline(args.matrix_deadline)
         return run(args, GoogleApi(deadline), deadline, binding, test_args, args.output)
     except (Blocked, OSError, ValueError, KeyError, TypeError) as error:
-        print(json.dumps({"status": "BLOCKED", "reason": str(error)[:1000]}))
+        print(json.dumps({"status": "BLOCKED", "reason": str(error)[:1000] if isinstance(error, Blocked) else f"RUNNER_INPUT_INVALID: {type(error).__name__}"}))
         return 2
 
 
