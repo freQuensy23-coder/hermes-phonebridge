@@ -149,7 +149,7 @@ jobs:
           profile: pixel_6
           disk-size: 2048M
           disable-animations: true
-          script: adb install -r "$RUNNER_TEMP/clock-fixture/google-8.2.apk" && cd android && chmod +x gradlew && ./gradlew --no-daemon connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 -Pandroid.testInstrumentationRunnerArguments.adminToken=ci-phonebridge-test-admin-token-000000000000000000
+          script: bash ci/run_android_instrumentation.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -159,6 +159,7 @@ jobs:
             android/app/build/reports/androidTests/
             android/app/build/outputs/androidTest-results/
             ${{ runner.temp }}/phonebridge-server.log
+            ${{ runner.temp }}/google-clock-evidence/
           if-no-files-found: error
 
   release-input:
