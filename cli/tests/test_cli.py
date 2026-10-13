@@ -103,27 +103,88 @@ def test_missing_conflicting_or_invalid_operation_args(arguments):
         operation_args(parser().parse_args(arguments))
 
 
-def test_recursive_secret_output_removal():
-    result = {"token": "secret-admin", "data": {"device_token": "secret-device", "echo": "secret-admin secret-device", "verified": False}, "events": [{"text": "Bearer some-other-secret"}], "idempotency_key": "ordinary-correlation"}
-    clean = sanitize(result)
-    encoded = json.dumps(clean)
-    assert "secret-admin" not in encoded
-    assert "secret-device" not in encoded
-    assert "some-other-secret" not in encoded
+def test_trusted_credentials_removed_without_filtering_phone_content():
+    admin = "actual-admin-credential-00000000000000000000"
+    device = "d" * 43
+    result = {"token": admin, "data": {"device_token": "private-phone-password", "password": "status",
+              "echo": f"{admin} {device}", "clipboard": "Bearer some-other-secret", "verified": False},
+              "events": [{"data": {"cookie": "personal-cookie"}}], "idempotency_key": "ordinary-correlation"}
+    clean = sanitize(result, {admin, device})
     assert "token" not in clean
-    assert clean["data"]["verified"] is False
+    assert clean["data"] == {"device_token": "private-phone-password", "password": "status",
+                             "echo": "[redacted] [redacted]", "clipboard": "Bearer some-other-secret", "verified": False}
+    assert clean["events"] == [{"data": {"cookie": "personal-cookie"}}]
     assert clean["idempotency_key"] == "ordinary-correlation"
+    assert admin not in json.dumps(clean)
+    assert device not in json.dumps(clean)
 
 
-def test_cli_filters_server_tokens_and_echoes(wire, environment, monkeypatch, capsys):
+def test_untrusted_metadata_token_does_not_become_a_credential(wire, environment, monkeypatch, capsys):
     monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
     monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
     wire.respond({"devices": [], "token": "another-secret", "echo": f"another-secret {wire.client.settings.token}"})
     assert main(["devices", "list"]) == 0
     output = capsys.readouterr()
-    assert "another-secret" not in output.out
+    assert json.loads(output.out) == {"devices": [], "echo": "another-secret [redacted]"}
     assert wire.client.settings.token not in output.out
-    assert json.loads(output.out)["devices"] == []
+    assert not output.err
+
+
+@pytest.mark.parametrize("target", ["status", "id", "device_id", "op", "data", "outcome", "verified", "cmd", "dev", "succeeded", "dispatched"])
+def test_phone_secrets_cannot_rewrite_metadata_or_correlation(wire, environment, monkeypatch, capsys, target):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    data = {"token": target, "password": target, "nested": [{"admin_token": "phone-only", "cookies": "private-cookie"}],
+            "clipboard": "Bearer private-clipboard-string", "outcome": "observed", "verified": True}
+    resource = {"id": "cmd", "device_id": "dev", "op": "clipboard.get", "status": "succeeded",
+                "data": data, "error": None, "expires_at": 2000}
+    wire.respond(resource)
+    assert main(["command-status", "cmd"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == resource
+    assert not output.err
+    assert wire.requests[0]["path"] == "/v1/commands/cmd"
+
+
+def test_opaque_data_cannot_poison_later_response_inventory(wire):
+    resource = {"id": "cmd", "status": "succeeded", "data": {"token": "status", "password": "cmd"}}
+    wire.respond(resource)
+    assert wire.client.get_command("cmd") == resource
+    assert wire.client.secrets == {wire.client.settings.token}
+    assert sanitize(resource, wire.client.secrets) == resource
+    wire.respond({"devices": [{"id": "cmd", "name": "status", "permissions": {"token": True, "password": False}}]})
+    later = wire.client.request("GET", "/v1/devices")
+    assert sanitize(later, wire.client.secrets) == later
+    assert wire.client.secrets == {wire.client.settings.token}
+
+
+@pytest.mark.parametrize(("path", "response", "credential"), [
+    ("/v1/pairings", {"id": "pair", "qr_payload": {"token": "p" * 43}}, "p" * 43),
+    ("/v1/pair/claim", {"device_id": "dev", "device_token": "d" * 43}, "d" * 43),
+])
+def test_actual_pairing_and_auth_envelope_credentials_are_protected(wire, path, response, credential):
+    wire.respond(response)
+    resource = wire.client.request("POST", path, {})
+    assert wire.client.secrets == {wire.client.settings.token, credential}
+    safe = sanitize({**resource, "echo": f"Bearer {credential}"}, wire.client.secrets)
+    assert credential not in json.dumps(safe)
+    assert "qr_payload" not in safe
+    assert "device_token" not in safe
+    assert safe["echo"] == "Bearer [redacted]"
+
+
+def test_actual_admin_credential_is_redacted_inside_opaque_phone_data(wire, environment, monkeypatch, capsys):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    resource = {"id": "cmd", "status": "succeeded", "data": {"password": wire.client.settings.token,
+                "clipboard": f"Bearer {wire.client.settings.token}", "token": "ordinary-phone-token"}}
+    wire.respond(resource)
+    assert main(["command-status", "cmd"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"id": "cmd", "status": "succeeded", "data": {
+        "password": "[redacted]", "clipboard": "Bearer [redacted]", "token": "ordinary-phone-token"}}
+    assert wire.client.settings.token not in output.out
+    assert not output.err
 
 
 def test_unexpected_exception_is_safe(environment, monkeypatch, capsys):
@@ -149,3 +210,15 @@ def test_interrupt_has_nonzero_safe_error(environment, monkeypatch, capsys):
     monkeypatch.setattr("phonebridge.cli.dispatch", interrupt)
     assert main(["devices", "list"]) == 130
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "INTERRUPTED"
+
+
+def test_native_outcome_and_verification_keys_survive_opaque_token_values(wire, environment, monkeypatch, capsys):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    resource = {"id": "cmd", "status": "succeeded", "data": {"token": "outcome", "password": "dispatched",
+                "outcome": "dispatched", "verified": False, "package": "com.google.android.deskclock"}}
+    wire.respond(resource)
+    assert main(["command-status", "cmd"]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == resource
+    assert not output.err

@@ -1,51 +1,85 @@
-import importlib.util
-from pathlib import Path
+import base64
+import json
+import subprocess
 
 import pytest
 
-spec = importlib.util.spec_from_file_location("bootstrap", Path(__file__).parents[1] / "bootstrap.py")
-assert spec is not None and spec.loader is not None
-bootstrap = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(bootstrap)
-
 
 @pytest.fixture
-def setup(tmp_path, monkeypatch):
+def setup(modules, tmp_path, monkeypatch):
+    bootstrap = modules["bootstrap"]
     monkeypatch.setattr(bootstrap, "HOME", tmp_path)
     credential = tmp_path / ".hermes/credentials/phonebridge"
     credential.mkdir(parents=True)
-    key = "ssh-ed25519 AAAAtest phonebridge-github-deploy"
+    blob = b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20" + b"x" * 32
+    key = "ssh-ed25519 " + base64.b64encode(blob).decode() + " phonebridge-github-deploy"
     (credential / "deploy_ed25519.pub").write_text(key)
-    ssh = tmp_path / ".ssh"
-    ssh.mkdir()
-    original = "ssh-ed25519 AAAAexisting keep-existing-access\n"
-    (ssh / "authorized_keys").write_text(original)
+    authorized = tmp_path / ".ssh/authorized_keys"
+    authorized.parent.mkdir()
+    authorized.write_text("ssh-ed25519 existing keep-access\n")
     calls = []
-    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *args, **kwargs: calls.append(args[0]))
-    return tmp_path, key, original, calls
+    monkeypatch.setattr(bootstrap, "run", lambda *args: calls.append(args))
+    return bootstrap, tmp_path, key, calls
 
 
-def test_bootstrap_preserves_other_access_and_is_idempotent(setup):
-    home, key, original, calls = setup
+def test_bootstrap_digest_and_canonical_entry_are_idempotent(setup):
+    bootstrap, home, key, calls = setup
     bootstrap.main()
     authorized = home / ".ssh/authorized_keys"
-    first = authorized.read_text()
+    first = authorized.read_bytes()
     bootstrap.main()
-    assert authorized.read_text() == first
-    assert first.startswith(original)
-    assert first.count(key) == 1
-    assert 'restrict,command="/usr/bin/python3 ' in first
+    assert authorized.read_bytes() == first
+    assert first.decode().count(key) == 1
+    entry = home / ".local/share/phonebridge/bin/deploy_entry.py"
+    assert f'command="/usr/bin/python3 {entry}"' in first.decode()
+    assert entry.read_bytes() == (bootstrap.SOURCE / "rollout.py").read_bytes()
+    trust = json.loads((home / ".local/share/phonebridge/trust.json").read_text())
+    assert set(trust["trust"]) == set(bootstrap.FILES)
     assert authorized.stat().st_mode & 0o777 == 0o600
-    assert (home / ".local/share/phonebridge/bin/deploy_entry.py").is_file()
-    assert calls == [["systemctl", "--user", "daemon-reload"]] * 2
+    assert calls == [("systemctl", "--user", "daemon-reload")] * 2
 
 
-def test_bootstrap_refuses_unrestricted_existing_deployment_key(setup):
-    home, key, original, calls = setup
+def test_rejected_key_does_not_mutate_existing_controller_or_unit(setup):
+    bootstrap, home, key, calls = setup
+    entry = home / ".local/share/phonebridge/bin/deploy_entry.py"
+    unit = home / ".config/systemd/user/phonebridge.service"
+    entry.parent.mkdir(parents=True)
+    unit.parent.mkdir(parents=True)
+    entry.write_text("previous controller")
+    unit.write_text("previous unit")
     authorized = home / ".ssh/authorized_keys"
-    authorized.write_text(original + key + "\n")
-    before = authorized.read_text()
+    authorized.write_text(key + "\n")
+    before = {path: path.read_bytes() for path in (entry, unit, authorized)}
     with pytest.raises(RuntimeError, match="different restrictions"):
         bootstrap.main()
-    assert authorized.read_text() == before
-    assert calls == []
+    assert {path: path.read_bytes() for path in before} == before
+    assert not (home / ".local/share/phonebridge/trust.json").exists()
+    assert not calls
+
+
+def test_malformed_key_rejected_before_creating_runtime(setup):
+    bootstrap, home, key, calls = setup
+    (home / ".hermes/credentials/phonebridge/deploy_ed25519.pub").write_text("ssh-ed25519 AAAAtest phonebridge-github-deploy")
+    with pytest.raises(RuntimeError, match="encoding"):
+        bootstrap.main()
+    assert not (home / ".local/share/phonebridge").exists()
+    assert not calls
+
+
+def test_reload_failure_restores_all_bootstrap_files(setup, monkeypatch):
+    bootstrap, home, key, calls = setup
+    bootstrap.main()
+    targets = [home / ".ssh/authorized_keys", home / ".local/share/phonebridge/trust.json", home / ".local/share/phonebridge/bin/deploy_entry.py", home / ".config/systemd/user/phonebridge.service"]
+    before = {path: path.read_bytes() for path in targets}
+    failed = False
+
+    def run(*args):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(bootstrap, "run", run)
+    with pytest.raises(subprocess.CalledProcessError):
+        bootstrap.main()
+    assert {path: path.read_bytes() for path in targets} == before

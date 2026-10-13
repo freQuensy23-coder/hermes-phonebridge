@@ -8,7 +8,7 @@ Install when authorized: `python -m pip install ./cli` or the built phonebridge-
 
 Optional `phonebridge --config /private/config.json ...` reads a current-user-owned, regular, nonsymlink mode-0600 JSON file containing only url and token. Environment overrides config; --url overrides both. No configuration or credential is created automatically. Global flags precede the subcommand. --request-timeout defaults to 10 seconds, bounded 0.1..120.
 
-Success JSON goes to stdout. Safe JSON errors go to stderr with nonzero exit; failed/expired command resources remain JSON on stdout with nonzero exit. Upstream HTTP bodies and command failure messages are not echoed. Known token values and secret fields are sanitized recursively. Native data is preserved; outcome:dispatched is conservatively emitted with verified:false even if an inconsistent server claims verification.
+Success JSON goes to stdout. Safe JSON errors go to stderr with nonzero exit; failed/expired command resources remain JSON on stdout with nonzero exit. Upstream HTTP bodies and command failure messages are not echoed. Only configured admin and known pairing/authentication-envelope credentials enter the redaction inventory. Credential fields are omitted from metadata; opaque phone data, private token/password fields and ordinary Bearer-shaped clipboard text remain exact unless they contain an actual bridge credential. Native data is preserved; outcome:dispatched is conservatively emitted with verified:false even if an inconsistent server claims verification.
 
 ## Commands
 
@@ -27,9 +27,9 @@ Success JSON goes to stdout. Safe JSON errors go to stderr with nonzero exit; fa
 
 Pair TTL is 1..900 seconds, matching the current server validator. Pair creates a real local PNG, mode 0600, without overwriting any file or symlink. Parent directory must exist. Its one-use token is in the PNG only, not stdout. Public QR server must be HTTPS. Output contains id, expires_at, status and qr_path. If file creation fails after POST, the safe error includes pairing_id so it can be inspected/revoked. install-skill uses HERMES_HOME, is independent of server credentials, reads an installed package resource, refuses symlink directories and conflicting content, and never changes Hermes core/config. No installation was performed during implementation.
 
-All command/convenience operations accept --args JSON object, --ttl (default 60), --wait, --timeout (default 60), --poll-interval (default 0.5) and --idempotency-key. Raw args reject duplicate JSON keys, nonfinite values, nonobjects and oversized input. Convenience flags cannot collide with --args members. --wait submits exactly once and only polls GET /v1/commands/ID. Without --wait, output is the queued acknowledgement, not proof of execution. The generated idempotency key is sent to the server and returned in uncertain submission errors. No retry occurs for POST, DELETE, GET, rate limits, transport failures or ambiguous effects. Timeout/expiry errors contain command_id; inspect it without resubmission. A local expiry is not synthesized into a server expired result. Keyboard interruption also leaves effects uncertain.
+All command/convenience operations accept --args JSON object, --ttl (default 60), --wait, --timeout (default 60), --poll-interval (default 0.5) and --idempotency-key. Raw args reject duplicate JSON keys, nonfinite values, nonobjects and oversized input. Convenience flags cannot collide with --args members. --wait submits exactly once and only polls GET /v1/commands/ID. Without --wait, output is the queued acknowledgement, not proof of execution. The generated idempotency key is sent to the server and returned in uncertain submission errors. A single monotonic request deadline covers DNS, up to 16 address attempts, verified TLS, headers and body. DNS runs in a bounded, killed/reaped subprocess; late resolution cannot submit HTTP. Wait polls share the original absolute wait deadline. No retry occurs for POST, DELETE, GET, rate limits, transport failures or ambiguous effects. Timeout/expiry errors contain command_id; inspect it without resubmission. A local expiry is not synthesized into a server expired result. Keyboard interruption also leaves effects uncertain.
 
-Events sends after and limit (default 50) and returns next_cursor unchanged. Device/pairing revoke performs DELETE then GET; verified true requires not-found or explicit revoked state. Online false does not establish revocation. capabilities reads the advertised capabilities and permissions from GET /v1/devices/DEVICE, not a speculative phone command.
+Events sends after and limit (1..100, default 50) and returns next_cursor unchanged. Collection byte ceilings cover the server's 100 events with 16 KiB data each and 1000 devices with bounded names/capabilities/permissions; no records are dropped and no pagination is invented. DEVICE_REVOKED remains a structured server-revocation failure. Device/pairing revoke performs DELETE then GET; verified true requires not-found or explicit revoked state. Online false does not establish revocation. capabilities reads the advertised capabilities and permissions from GET /v1/devices/DEVICE, not a speculative phone command.
 
 ## Operation arguments
 
@@ -54,9 +54,9 @@ Generic `command DEVICE OP --args JSON` forwards the contract's other permission
 
 ## Automatic GitHub CI only
 
-Do not run tests, linters, scanners, builds or packaging verification manually. The parent owns .github/ and must install `./cli[test]`, because the QR decode tests require pinned zxing-cpp. Commands for automatic CI jobs only:
+Do not run tests, linters, scanners, builds or packaging verification manually. The parent owns .github/ and must install `./server[test]` and `./cli[test]`; CLI/server integration uses the real server and QR decode tests require pinned zxing-cpp. Commands for automatic CI jobs only:
 
-    python -m pip install './cli[test]' setuptools==80.9.0 wheel==0.45.1
+    python -m pip install './server[test]' './cli[test]' setuptools==80.9.0 wheel==0.45.1
     python -m pytest cli/tests -q
     python -m build cli --outdir dist
 

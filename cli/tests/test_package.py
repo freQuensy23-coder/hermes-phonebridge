@@ -28,7 +28,7 @@ def test_package_metadata_and_direct_dependency_pins():
     assert all("==" in dependency and "*" not in dependency for dependency in dependencies)
 
 
-def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path):
+def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path, wire):
     artifacts = tmp_path / "artifacts"
     run([sys.executable, "-m", "build", str(CLI_ROOT), "--outdir", str(artifacts)], cwd=tmp_path)
     wheel = next(artifacts.glob("phonebridge_cli-0.1.0-*.whl"))
@@ -38,6 +38,8 @@ def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path):
         assert archive.read("phonebridge/resources/SKILL.md") == canonical.read_bytes()
         entries = archive.read("phonebridge_cli-0.1.0.dist-info/entry_points.txt").decode()
         assert "phonebridge = phonebridge.cli:main" in entries
+        assert archive.read("phonebridge/_resolve.py")
+        assert archive.read("phonebridge/transport.py")
     extracted = tmp_path / "sdist"
     extracted.mkdir()
     with tarfile.open(sdist) as archive:
@@ -64,3 +66,11 @@ def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path):
     assert Path(metadata["path"]).read_bytes() == canonical.read_bytes()
     assert not (Path(env["HERMES_HOME"]) / "config.yaml").exists()
     assert not (Path(env["HERMES_HOME"]) / ".env").exists()
+
+    env["PHONEBRIDGE_URL"] = wire.url.replace("127.0.0.1", "localhost")
+    env["PHONEBRIDGE_TOKEN"] = wire.client.settings.token
+    wire.respond({"devices": []})
+    response = run([str(installed / "bin" / "phonebridge"), "devices", "list"], cwd=tmp_path, env=env)
+    assert json.loads(response.stdout) == {"devices": []}
+    assert response.stderr == ""
+    assert [request["method"] for request in wire.requests] == ["GET"]

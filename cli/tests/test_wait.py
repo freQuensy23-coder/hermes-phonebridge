@@ -162,3 +162,17 @@ def test_native_dispatch_cannot_claim_verification(wire, environment, monkeypatc
     wire.respond(command("succeeded", data={"outcome": "dispatched", "verified": True, "package": "com.google.android.deskclock"}))
     assert main(["command-status", "cmd"]) == 0
     assert json.loads(capsys.readouterr().out)["data"]["verified"] is False
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_device_revoked_code_is_preserved_with_server_message(wire, environment, monkeypatch, capsys, wait):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    wire.respond(command("failed", error={"code": "DEVICE_REVOKED", "message": wire.client.settings.token}))
+    assert main(["command-status", "cmd"] + (["--wait"] if wait else [])) == 1
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert result == command("failed", error={"code": "DEVICE_REVOKED", "message": "Device authorization was revoked."})
+    assert wire.client.settings.token not in output.out
+    assert not output.err
+    assert [request["method"] for request in wire.requests] == ["GET"]

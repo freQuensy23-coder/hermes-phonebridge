@@ -1,8 +1,11 @@
+import hashlib
 import json
 from pathlib import Path
 import sys
 
 
+REVIEWED_DEPLOY_WORKFLOW_SHA256 = "df3e0b60a11f537754eb7e543a33f114043b813bed80d44967aa65d9eec1b2e4"
+TRIGGER_REASON = "The reviewed workflow_run job never checks out or executes upstream code/artifacts. It authenticates the exact repository, CI workflow path, successful push/main run, owner actors and current main before passing a SHA to a separately restricted host gate. The complete workflow bytes are pinned here; any change requires re-review. The generic high-severity trigger finding remains visible."
 EXCEPTIONS = {
     (".github/workflows/deploy.yml", "deploy"): "Private environment protection is unavailable. Only owner-originated completed main CI is accepted; the restricted host command independently verifies the merged PR and coherent CI producer.",
     (".github/workflows/release.yml", "sign"): "Private environment protection is unavailable. Signing is isolated from build execution on a fresh runner, gated by owner-merged source and accepted CI provenance.",
@@ -26,6 +29,19 @@ def scopes(finding):
     return found
 
 
+def reviewed_trigger(finding):
+    if finding["ident"] != "dangerous-triggers" or finding["determinations"]["severity"] != "High":
+        return False
+    paths = set()
+    for location in finding.get("locations", []):
+        path = location.get("symbolic", {}).get("key", {}).get("Local", {}).get("verbatim_path", "")
+        paths.add(path[2:] if path.startswith("./") else path)
+    if paths != {".github/workflows/deploy.yml"}:
+        return False
+    source = Path(__file__).resolve().parents[1] / ".github/workflows/deploy.yml"
+    return not source.is_symlink() and hashlib.sha256(source.read_bytes()).hexdigest() == REVIEWED_DEPLOY_WORKFLOW_SHA256
+
+
 def classify(findings):
     if not isinstance(findings, list):
         raise ValueError("Workflow audit must be a complete JSON-v1 findings array")
@@ -38,6 +54,9 @@ def classify(findings):
             raise ValueError("Unknown workflow audit schema or severity")
         if severity in {"Informational", "Low"}:
             result["non_blocking"].append(finding)
+            continue
+        if reviewed_trigger(finding):
+            result["documented_exceptions"].append({"finding": finding, "reasons": [TRIGGER_REASON]})
             continue
         locations = scopes(finding)
         if (

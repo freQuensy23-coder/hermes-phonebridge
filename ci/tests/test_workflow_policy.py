@@ -61,3 +61,22 @@ def test_mixed_trusted_and_untrusted_locations_are_not_excepted():
     item = finding("secrets-outside-env", "Medium")
     item["locations"] += finding("secrets-outside-env", "Medium", job="untrusted")["locations"]
     assert policy.classify([item])["blocking"] == [item]
+
+
+def test_reviewed_nonexecuting_trigger_is_retained_with_explicit_reason():
+    item = finding("dangerous-triggers", "High")
+    result = policy.classify([item])
+    assert result["blocking"] == []
+    assert result["documented_exceptions"][0]["finding"] == item
+    assert "remains visible" in result["documented_exceptions"][0]["reasons"][0]
+
+
+def test_changed_deploy_workflow_is_not_covered_by_trigger_review(monkeypatch):
+    item = finding("dangerous-triggers", "High")
+    monkeypatch.setattr(policy, "REVIEWED_DEPLOY_WORKFLOW_SHA256", "0" * 64)
+    assert policy.classify([item])["blocking"] == [item]
+
+
+def test_other_workflow_trigger_is_not_excepted():
+    item = finding("dangerous-triggers", "High", ".github/workflows/release.yml", "sign")
+    assert policy.classify([item])["blocking"] == [item]

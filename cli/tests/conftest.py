@@ -23,7 +23,7 @@ def wire():
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
             requests.append({"method": self.command, "path": self.path,
-                             "headers": dict(self.headers), "body": json.loads(body) if body else None})
+                             "headers": dict(self.headers), "body": json.loads(body) if body else None, "raw_body": body})
             if not responses:
                 self.send_response(500)
                 self.end_headers()
@@ -35,16 +35,21 @@ def wire():
                 return
             if "test_delay" in headers:
                 time.sleep(float(headers["test_delay"]))
-            encoded = content if isinstance(content, bytes) else json.dumps(content).encode()
+            encoded = content if isinstance(content, bytes) else json.dumps(content, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", headers.get("Content-Type", "application/json"))
             self.send_header("Content-Length", headers.get("Content-Length", str(len(encoded))))
             for key, value in headers.items():
-                if key not in {"Content-Type", "Content-Length", "test_delay"}:
+                if key not in {"Content-Type", "Content-Length", "test_delay", "test_chunk_delay"}:
                     self.send_header(key, value)
             self.end_headers()
             try:
-                self.wfile.write(encoded)
+                if "test_chunk_delay" in headers:
+                    for offset in range(0, len(encoded), 1024):
+                        time.sleep(float(headers["test_chunk_delay"]))
+                        self.wfile.write(encoded[offset:offset + 1024])
+                else:
+                    self.wfile.write(encoded)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

@@ -1,5 +1,4 @@
 import json
-import re
 
 from .errors import BridgeError
 
@@ -36,33 +35,31 @@ def object_args(value):
         raise BridgeError("VALIDATION_ERROR", "Arguments must be a bounded, valid JSON object.") from None
 
 
-def secret_values(value):
-    result = set()
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key.casefold().replace("-", "_") in SECRET_KEYS and isinstance(item, str) and item:
-                result.add(item)
-            result.update(secret_values(item))
-    elif isinstance(value, list):
-        for item in value:
-            result.update(secret_values(item))
-    return result
+def bridge_credentials(value, method, path):
+    candidates = []
+    if method == "POST" and path == "/v1/pairings":
+        payload = value.get("qr_payload")
+        if isinstance(payload, dict):
+            candidates.append(payload.get("token"))
+    if method == "POST" and path == "/v1/pair/claim":
+        candidates.append(value.get("device_token"))
+    return {item for item in candidates if isinstance(item, str) and len(item) == 43
+            and all(char.isascii() and (char.isalnum() or char in "_-") for char in item)}
 
 
 def sanitize(value, secrets=()):
-    known = sorted(set(secrets) | secret_values(value), key=len, reverse=True)
+    known = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
 
-    def clean(item):
+    def clean(item, opaque=False):
         if isinstance(item, dict):
-            return {clean(key): clean(data) for key, data in item.items()
-                    if key.casefold().replace("-", "_") not in SECRET_KEYS}
+            return {(clean(key, True) if opaque else key): clean(data, opaque or key in {"data", "args", "permissions"})
+                    for key, data in item.items()
+                    if opaque or key.casefold().replace("-", "_") not in SECRET_KEYS}
         if isinstance(item, list):
-            return [clean(data) for data in item]
+            return [clean(data, opaque) for data in item]
         if isinstance(item, str):
             for secret in known:
-                if secret:
-                    item = item.replace(secret, "[redacted]")
-            return re.sub(r"(?i)bearer\s+[^\s\"<>]+", "Bearer [redacted]", item)
+                item = item.replace(secret, "[redacted]")
         return item
 
     return clean(value)

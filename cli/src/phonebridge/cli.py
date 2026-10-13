@@ -87,7 +87,7 @@ def parser():
     events = commands.add_parser("events")
     events.add_argument("device")
     events.add_argument("--after", type=integer(0, 9223372036854775807), default=0)
-    events.add_argument("--limit", type=integer(1, 200), default=50)
+    events.add_argument("--limit", type=integer(1, 100), default=50)
     clock = commands.add_parser("clock").add_subparsers(dest="action", required=True)
     providers = clock.add_parser("providers")
     providers.add_argument("device")
@@ -239,7 +239,8 @@ def main(argv=None):
             result = dict(result)
             upstream_error = result.get("error")
             code = upstream_error.get("code") if isinstance(upstream_error, dict) else None
-            result["error"] = {"code": code if isinstance(code, str) and code in PHONE_ERRORS else "COMMAND_FAILED", "message": "Phone reported a command failure."}
+            message = "Device authorization was revoked." if code == "DEVICE_REVOKED" else "Phone reported a command failure."
+            result["error"] = {"code": code if isinstance(code, str) and code in PHONE_ERRORS else "COMMAND_FAILED", "message": message}
         if isinstance(result.get("data"), dict) and result["data"].get("outcome") == "dispatched":
             result = {**result, "data": {**result["data"], "verified": False}}
         safe = sanitize(result, secrets)

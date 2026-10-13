@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Permission-aware PhoneBridge command line client for Hermes"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["qrcode==8.2", "Pillow==11.3.0", "colorama==0.4.6; platform_system == 'Windows'"]
+dependencies = ["qrcode==8.2", "Pillow==12.3.0", "colorama==0.4.6; platform_system == 'Windows'"]
 
 [project.optional-dependencies]
 test = ["pytest==8.3.5", "zxing-cpp==2.3.0", "build==1.2.2.post1", "packaging==25.0", "pyproject-hooks==1.2.0", "pluggy==1.6.0", "iniconfig==2.1.0"]

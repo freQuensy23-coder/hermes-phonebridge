@@ -1,42 +1,97 @@
 import os
 from pathlib import Path
-import re
-import subprocess
+import signal
+import stat
 import tempfile
-from urllib.parse import urlparse
+import uuid
 
+try:
+    from rollout import deployment_lock, origin, run
+except ModuleNotFoundError as error:
+    if error.name != "rollout":
+        raise
+    from deploy_entry import deployment_lock, origin, run
 
 CONFIG = Path.home() / ".config/phonebridge/server.env"
 SITE = Path("/etc/nginx/sites-available/phonebridge")
 ENABLED = Path("/etc/nginx/sites-enabled/phonebridge")
+SCRATCH = Path.home() / ".hermes/cache/scratch"
 
 
-def run(*args):
-    return subprocess.run(args, check=True)
+def snapshot():
+    if SITE.is_symlink() or (SITE.exists() and not stat.S_ISREG(SITE.stat().st_mode)):
+        raise RuntimeError("Refusing nonregular PhoneBridge nginx site")
+    if ENABLED.is_symlink():
+        link = os.readlink(ENABLED)
+        if link != str(SITE):
+            raise RuntimeError("Enabled site points to another origin configuration")
+    elif ENABLED.exists():
+        raise RuntimeError("Refusing existing non-symlink enabled site")
+    else:
+        link = None
+    data = SITE.read_bytes() if SITE.exists() else None
+    if data is not None and len(data) > 65536:
+        raise RuntimeError("Existing nginx site exceeds size limit")
+    return {"data": data, "mode": stat.S_IMODE(SITE.stat().st_mode) if data is not None else 0o644, "link": link}
+
+
+def write_site(data, mode=0o644):
+    SCRATCH.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(dir=SCRATCH, delete=False) as handle:
+        filename = Path(handle.name)
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(data)
+    temporary = SITE.with_name(SITE.name + ".phonebridge-staged-" + uuid.uuid4().hex)
+    try:
+        run("sudo", "-n", "install", "-m", f"{mode:o}", str(filename), str(temporary))
+        run("sudo", "-n", "mv", "-T", str(temporary), str(SITE))
+    finally:
+        filename.unlink(missing_ok=True)
+        run("sudo", "-n", "rm", "-f", str(temporary))
+
+
+def restore(before):
+    if before["data"] is None:
+        run("sudo", "-n", "rm", "-f", str(SITE))
+    else:
+        write_site(before["data"], before["mode"])
+    if before["link"] is None:
+        run("sudo", "-n", "rm", "-f", str(ENABLED))
+    elif not ENABLED.is_symlink():
+        run("sudo", "-n", "ln", "-s", before["link"], str(ENABLED))
+    run("sudo", "-n", "nginx", "-t")
+    run("sudo", "-n", "systemctl", "reload", "nginx")
+
+
+def promote(content):
+    write_site(content.encode())
+    if not ENABLED.is_symlink():
+        run("sudo", "-n", "ln", "-s", str(SITE), str(ENABLED))
+    run("sudo", "-n", "nginx", "-t")
+    run("sudo", "-n", "systemctl", "reload", "nginx")
+
+
+def transaction(operation):
+    before = snapshot()
+    saved = {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)}
+    try:
+        operation()
+    except BaseException as original:
+        try:
+            restore(before)
+        except BaseException as failure:
+            raise RuntimeError(f"HTTPS provisioning failed {type(original).__name__}; config restore failed {type(failure).__name__}") from None
+        raise
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
 
 
 def install_config(content):
-    scratch = Path.home() / ".hermes/cache/scratch"
-    scratch.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=scratch, delete=False) as handle:
-        handle.write(content)
-        filename = handle.name
-    try:
-        run("sudo", "-n", "install", "-m", "644", filename, str(SITE))
-        if not ENABLED.exists():
-            run("sudo", "-n", "ln", "-s", str(SITE), str(ENABLED))
-        run("sudo", "-n", "nginx", "-t")
-        run("sudo", "-n", "systemctl", "reload", "nginx")
-    finally:
-        os.unlink(filename)
+    transaction(lambda: promote(content))
 
 
-def main():
-    settings = dict(line.strip().split("=", 1) for line in CONFIG.read_text().splitlines() if "=" in line)
-    address = urlparse(settings["PHONEBRIDGE_PUBLIC_URL"])
-    domain = address.hostname
-    if address.scheme != "https" or not domain or not re.fullmatch(r"[a-z0-9.-]+", domain) or address.path not in ("", "/") or address.port not in (None, 443):
-        raise RuntimeError("Invalid public HTTPS origin")
+def provision(domain):
     certificate = Path("/etc/letsencrypt/live") / domain / "fullchain.pem"
     http = f"""server {{
     listen 80;
@@ -47,8 +102,8 @@ def main():
 }}
 """
     if not certificate.exists():
-        install_config(http)
-        run("sudo", "-n", "certbot", "certonly", "--webroot", "-w", "/var/www/letsencrypt", "-d", domain, "--non-interactive", "--agree-tos", "--register-unsafely-without-email")
+        promote(http)
+        run("sudo", "-n", "certbot", "certonly", "--webroot", "-w", "/var/www/letsencrypt", "-d", domain, "--non-interactive", "--agree-tos", "--register-unsafely-without-email", timeout=120)
     https = f"""server {{
     listen 443 ssl;
     listen [::]:443 ssl;
@@ -79,7 +134,18 @@ def main():
     location / {{ return 403; }}
 }}
 """
-    install_config(http + https)
+    promote(http + https)
+
+
+def main():
+    os.umask(0o077)
+    settings = dict(line.strip().split("=", 1) for line in CONFIG.read_text().splitlines() if "=" in line and not line.lstrip().startswith("#"))
+    public = origin(settings["PHONEBRIDGE_PUBLIC_URL"])
+    domain = public.removeprefix("https://").removesuffix(":443")
+    SCRATCH.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with deployment_lock(SCRATCH / "phonebridge-https.lock"):
+        transaction(lambda: provision(domain))
+    print("Stable PhoneBridge HTTPS origin provisioned")
 
 
 if __name__ == "__main__":

@@ -1,199 +1,451 @@
-import importlib.util
-from pathlib import Path
+import copy
+import json
+import signal
+import subprocess
+from types import SimpleNamespace
 
 import pytest
 
-spec = importlib.util.spec_from_file_location("rollout", Path(__file__).parents[1] / "rollout.py")
-assert spec is not None and spec.loader is not None
-rollout = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rollout)
+SHA = "a" * 40
+OLD = "b" * 40
 
 
-def test_rejects_stale_revision(monkeypatch):
-    monkeypatch.setattr(rollout, "github", lambda path: {"sha": "b" * 40})
-    with pytest.raises(RuntimeError, match="current main"):
-        rollout.accepted_revision("a" * 40)
-
-
-def test_checks_latest_result_not_older_success(monkeypatch):
-    revision = "a" * 40
-    checks = [{"id": index, "name": name, "conclusion": "success"} for index, name in enumerate(rollout.REQUIRED_CHECKS)]
-    checks.append({"id": 100, "name": "python", "conclusion": "failure"})
-    monkeypatch.setattr(rollout, "github", lambda path: {"check_runs": checks} if "check-runs" in path else {"sha": revision})
-    with pytest.raises(RuntimeError, match="checks"):
-        rollout.accepted_revision(revision)
-
-
-def test_requires_all_checks(monkeypatch):
-    revision = "a" * 40
-    monkeypatch.setattr(rollout, "github", lambda path: {"check_runs": []} if "check-runs" in path else {"sha": revision})
-    with pytest.raises(RuntimeError, match="checks"):
-        rollout.accepted_revision(revision)
-
-
-def test_accepts_current_successful_main(monkeypatch):
-    revision = "a" * 40
-    checks = [{"id": index, "name": name, "conclusion": "success"} for index, name in enumerate(rollout.REQUIRED_CHECKS)]
-    monkeypatch.setattr(rollout, "github", lambda path: {"check_runs": checks} if "check-runs" in path else {"sha": revision})
-    rollout.accepted_revision(revision)
-
-
-@pytest.mark.parametrize("command", ["", "bash", "deploy main", "deploy " + "a" * 40 + " extra", "deploy $(id)", "deploy ../other"])
-def test_forced_command_rejects_unsafe_input(monkeypatch, command):
-    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", command)
-    with pytest.raises(SystemExit):
-        rollout.main()
-
-
-def test_switch_atomic_symlink(tmp_path, monkeypatch):
-    monkeypatch.setattr(rollout, "BASE", tmp_path)
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
-    rollout.switch(first)
-    assert (tmp_path / "current").resolve() == first
-    rollout.switch(second)
-    assert (tmp_path / "current").resolve() == second
-    assert not (tmp_path / "current.next").exists()
+def pull(rollout):
+    return {"id": 7, "number": 1, "merged": True, "state": "closed", "merge_commit_sha": SHA,
+            "base": {"ref": "main", "repo": {"full_name": rollout.REPOSITORY}},
+            "head": {"repo": {"full_name": rollout.REPOSITORY}},
+            "user": {"login": rollout.OWNER}, "merged_by": {"login": rollout.OWNER}}
 
 
 @pytest.fixture
-def deployment(tmp_path, monkeypatch):
-    import io
-    import tarfile
-    from types import SimpleNamespace
+def producer(modules, monkeypatch):
+    rollout = modules["rollout"]
+    repository = {"id": 3, "full_name": rollout.REPOSITORY, "default_branch": "main"}
+    identity = {"id": 3, "full_name": rollout.REPOSITORY}
+    run = {"id": 10, "workflow_id": 4, "path": rollout.WORKFLOW, "head_sha": SHA,
+           "head_branch": "main", "event": "push", "status": "completed", "conclusion": "success",
+           "repository": identity, "head_repository": identity, "run_attempt": 2,
+           "run_started_at": "2026-10-13T10:00:00Z", "updated_at": "2026-10-13T11:00:00Z"}
+    jobs = [{"id": index + 1, "name": name, "run_id": 10, "run_attempt": 2,
+             "head_sha": SHA, "status": "completed", "conclusion": "success"}
+            for index, name in enumerate(sorted(rollout.REQUIRED_JOBS))]
+    artifact = {"id": 20, "name": "phonebridge-deployment-" + SHA, "created_at": "2026-10-13T10:10:00Z",
+                "expired": False, "size_in_bytes": 1000, "digest": "sha256:" + "c" * 64,
+                "workflow_run": {"id": 10, "repository_id": 3, "head_repository_id": 3, "head_sha": SHA, "head_branch": "main"}}
+    state = {"main": SHA, "runs": [run], "latest": run, "attempt": copy.deepcopy(run),
+             "jobs": jobs, "artifacts": [artifact], "pull": pull(rollout)}
+    paths = []
 
+    def github(path):
+        paths.append(path)
+        suffix = path.split(rollout.REPOSITORY, 1)[1]
+        if suffix == "":
+            return repository
+        if suffix == "/commits/main":
+            return {"sha": state["main"]}
+        if suffix == "/actions/workflows/ci.yml":
+            return {"id": 4, "path": rollout.WORKFLOW, "state": "active"}
+        if suffix == "/actions/runs/10":
+            return state["latest"]
+        if suffix == "/actions/runs/10/attempts/2":
+            return state["attempt"]
+        if suffix == "/pulls/1":
+            return state["pull"]
+        page = int(path.rsplit("page=", 1)[1])
+        if "/commits/" in suffix:
+            return [{"id": 7, "number": 1}] if page == 1 else []
+        key = "runs" if "/workflows/4/runs?" in suffix else "jobs" if "/jobs?" in suffix else "artifacts"
+        api_key = "workflow_runs" if key == "runs" else key
+        items = state[key]
+        return {"total_count": len(items), api_key: items[(page - 1) * 100:page * 100]}
+
+    monkeypatch.setattr(rollout, "github", github)
+    return rollout, state, paths
+
+
+def test_exact_successful_ci_attempt(producer):
+    rollout, state, paths = producer
+    accepted = rollout.accepted_revision(SHA)
+    assert accepted["run_id"] == 10
+    assert accepted["run_attempt"] == 2
+    assert accepted["artifact_id"] == 20
+    assert any("attempts/2/jobs?" in path for path in paths)
+    assert not any("check-runs" in path for path in paths)
+    assert state["main"] == SHA
+
+
+@pytest.mark.parametrize("field,value", [("event", "pull_request"), ("event", "workflow_dispatch"), ("head_branch", "v0.1.0"), ("head_branch", None), ("path", ".github/workflows/impostor.yml"), ("workflow_id", 5), ("head_sha", OLD), ("conclusion", "failure"), ("status", "in_progress")])
+def test_rejects_name_only_tag_or_nonproducer_runs(producer, field, value):
+    rollout, state, paths = producer
+    state["latest"][field] = value
+    with pytest.raises(RuntimeError, match="producer"):
+        rollout.accepted_revision(SHA)
+    assert not any("check-runs" in path for path in paths)
+
+
+def test_stale_main_rejected_before_artifact(producer):
+    rollout, state, paths = producer
+    state["main"] = OLD
+    with pytest.raises(RuntimeError, match="current main"):
+        rollout.accepted_revision(SHA)
+    assert len(paths) == 1
+
+
+@pytest.mark.parametrize("target", ["latest", "attempt"])
+def test_rejects_fork_run_identity(producer, target):
+    rollout, state, paths = producer
+    state[target] = copy.deepcopy(state[target])
+    state[target]["head_repository"]["id"] = 99
+    with pytest.raises(RuntimeError, match="producer"):
+        rollout.accepted_revision(SHA)
+
+
+def test_latest_failed_attempt_cannot_reuse_success(producer):
+    rollout, state, paths = producer
+    state["latest"]["run_attempt"] = 3
+    state["latest"]["conclusion"] = "failure"
+    with pytest.raises(RuntimeError, match="producer"):
+        rollout.accepted_revision(SHA)
+
+
+def test_newer_incomplete_run_blocks_historical_success(producer):
+    rollout, state, paths = producer
+    state["runs"].append({"id": 11})
+    prior = rollout.github
+    def replacement(path):
+        if path.endswith("/runs/11"):
+            return {**state["latest"], "id": 11, "status": "in_progress"}
+        return prior(path)
+
+    rollout.github = replacement
+    with pytest.raises(RuntimeError, match="producer"):
+        rollout.accepted_revision(SHA)
+
+
+@pytest.mark.parametrize("field,value", [("run_attempt", 1), ("run_id", 9), ("head_sha", OLD), ("conclusion", "failure"), ("status", "queued")])
+def test_cannot_mix_job_attempts(producer, field, value):
+    rollout, state, paths = producer
+    state["jobs"][0][field] = value
+    with pytest.raises(RuntimeError, match="incoherent"):
+        rollout.accepted_revision(SHA)
+
+
+def test_attempt_scoped_endpoint_supports_documented_jobs_without_attempt_field(producer):
+    rollout, state, paths = producer
+    for job in state["jobs"]:
+        job.pop("run_attempt")
+    assert rollout.accepted_revision(SHA)["run_attempt"] == 2
+
+
+def test_paginates_jobs_and_artifacts(producer):
+    rollout, state, paths = producer
+    state["jobs"] = [{**state["jobs"][0], "id": 1000 + index, "name": f"additional-{index}"} for index in range(100)] + state["jobs"]
+    state["artifacts"] = [{**state["artifacts"][0], "id": 1000 + index, "name": f"other-{index}"} for index in range(100)] + state["artifacts"]
+    assert rollout.accepted_revision(SHA)["artifact_id"] == 20
+    assert any("jobs?per_page=100&page=2" in path for path in paths)
+    assert any("artifacts?per_page=100&page=2" in path for path in paths)
+
+
+def test_paginates_producer_run_selection(producer):
+    rollout, state, paths = producer
+    state["latest"]["id"] = 101
+    state["attempt"]["id"] = 101
+    state["runs"] = [{"id": index + 1} for index in range(100)] + [state["latest"]]
+    for job in state["jobs"]:
+        job["run_id"] = 101
+    state["artifacts"][0]["workflow_run"]["id"] = 101
+    prior = rollout.github
+    def replacement(path):
+        return prior(path.replace("/runs/101", "/runs/10"))
+
+    rollout.github = replacement
+    assert rollout.accepted_revision(SHA)["run_id"] == 101
+    assert any("page=2" in path for path in paths)
+
+
+def test_prior_attempt_artifact_rejected(producer):
+    rollout, state, paths = producer
+    state["artifacts"][0]["created_at"] = "2026-10-13T09:00:00Z"
+    with pytest.raises(RuntimeError, match="latest-attempt"):
+        rollout.accepted_revision(SHA)
+
+
+def test_duplicate_artifact_rejected(producer):
+    rollout, state, paths = producer
+    state["artifacts"].append({**state["artifacts"][0], "id": 21})
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        rollout.accepted_revision(SHA)
+
+
+@pytest.mark.parametrize("field,value", [("merged", False), ("merge_commit_sha", OLD), ("state", "open")])
+def test_owner_merge_is_required(producer, field, value):
+    rollout, state, paths = producer
+    state["pull"][field] = value
+    with pytest.raises(RuntimeError, match="owner-merged"):
+        rollout.accepted_revision(SHA)
+
+
+@pytest.mark.parametrize("target", ["user", "merged_by"])
+def test_exact_owner_identity_required(producer, target):
+    rollout, state, paths = producer
+    state["pull"][target]["login"] = "outsider"
+    with pytest.raises(RuntimeError, match="owner-merged"):
+        rollout.accepted_revision(SHA)
+
+
+def test_fork_pull_rejected(producer):
+    rollout, state, paths = producer
+    state["pull"]["head"]["repo"]["full_name"] = "outsider/fork"
+    with pytest.raises(RuntimeError, match="owner-merged"):
+        rollout.accepted_revision(SHA)
+
+
+@pytest.mark.parametrize("command", ["", "bash", "deploy main", "deploy v0.1.0", "deploy " + "A" * 40, "deploy " + SHA + " extra", "deploy $(id)", "deploy ../other"])
+def test_entry_preserves_exact_sha_only(modules, monkeypatch, command):
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", command)
+    with pytest.raises(SystemExit):
+        modules["rollout"].main()
+
+
+@pytest.fixture
+def transaction(modules, tmp_path, monkeypatch):
+    rollout = modules["rollout"]
     base = tmp_path / "runtime"
     base.mkdir()
     monkeypatch.setattr(rollout, "BASE", base)
-    monkeypatch.setattr(rollout, "SOURCE", tmp_path / "source")
-    monkeypatch.setattr(rollout.Path, "home", staticmethod(lambda: tmp_path))
-    settings = tmp_path / ".config/phonebridge/server.env"
-    settings.parent.mkdir(parents=True)
-    settings.write_text("PHONEBRIDGE_PUBLIC_URL=https://bridge.example\n")
-    revision = "a" * 40
-    archive = io.BytesIO()
-    with tarfile.open(fileobj=archive, mode="w"):
-        pass
+    monkeypatch.setattr(rollout, "DEADLINE", None)
+    monkeypatch.setattr(rollout, "public_origin", lambda: "https://bridge.example")
+    provenance = {"source_sha": SHA, "run_id": 10, "run_attempt": 2}
+    monkeypatch.setattr(rollout, "accepted_revision", lambda revision: provenance)
+    monkeypatch.setattr(rollout, "revalidate", lambda accepted: None)
+    monkeypatch.setattr(rollout, "download_artifact", lambda accepted, target: target.write_bytes(b"zip"))
+    monkeypatch.setattr(rollout, "extract_archive", lambda archive, root: None)
+    monkeypatch.setattr(rollout, "validate_manifest", lambda root, accepted: {"wheels": {}})
+    monkeypatch.setattr(rollout, "validate_installed_trust", lambda manifest: None)
     calls = []
+    monkeypatch.setattr(rollout, "run", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(rollout, "healthy", lambda revision, url="http://127.0.0.1:18940/healthz", **kwargs: {"status": "ok", "version": "0.1.0", "revision": revision})
 
-    def run(*args, **kwargs):
-        calls.append(args)
-        if args[:3] == ("git", "rev-parse", "origin/main"):
-            return SimpleNamespace(stdout=revision)
-        if args[:2] == ("git", "archive"):
-            return SimpleNamespace(stdout=archive.getvalue())
-        return SimpleNamespace(stdout="")
+    def create(revision):
+        path = base / "releases" / (revision + "-" + "1" * 32)
+        path.mkdir(parents=True)
+        (path / ".venv/bin").mkdir(parents=True)
+        (path / ".venv/bin/python").write_text("previous interpreter")
+        (path / "revision.env").write_text(f"PHONEBRIDGE_REVISION={revision}\n")
+        (path / "release.json").write_text(json.dumps({"source_sha": revision, "version": "0.1.0", "schema_generation": 1}))
+        return path
 
-    monkeypatch.setattr(rollout, "run", run)
-    monkeypatch.setattr(rollout, "accepted_revision", lambda value: None)
-    monkeypatch.setattr(rollout, "accepted_pr", lambda value: 1)
-    return base, revision, calls
+    monkeypatch.setattr(rollout, "prepare_release", lambda root, manifest, accepted: create(SHA))
+    return rollout, base, create, calls
 
 
-def test_failed_health_restores_previous_release(deployment, monkeypatch):
-    base, revision, calls = deployment
-    previous = base / "releases/previous"
-    previous.mkdir(parents=True)
+def test_same_sha_preparation_never_mutates_active_release(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(SHA)
     rollout.switch(previous)
+    sentinel = previous / "unique.txt"
+    sentinel.write_text("active contents")
+    original = {str(path.relative_to(previous)): path.read_bytes() for path in previous.rglob("*") if path.is_file()}
 
-    def unhealthy(value, url="http://127.0.0.1:18940/healthz"):
-        raise RuntimeError("Deployed revision health check failed")
+    def prepare(root, manifest, accepted):
+        assert (base / "current").resolve() == previous
+        raise RuntimeError("Preparation failed")
 
-    monkeypatch.setattr(rollout, "healthy", unhealthy)
-    with pytest.raises(RuntimeError, match="health check failed"):
-        rollout.deploy(revision)
+    monkeypatch.setattr(rollout, "prepare_release", prepare)
+    with pytest.raises(RuntimeError, match="Preparation"):
+        rollout.deploy(SHA)
     assert (base / "current").resolve() == previous
+    assert {str(path.relative_to(previous)): path.read_bytes() for path in previous.rglob("*") if path.is_file()} == original
+    assert not calls
+
+
+def test_healthy_candidate_publishes_evidence_without_provisioning(transaction, capsys):
+    rollout, base, create, calls = transaction
+    rollout.deploy(SHA)
+    result = json.loads(capsys.readouterr().out)
+    assert result["health"]["version"] == "0.1.0"
+    assert result["public_health"]["revision"] == SHA
+    assert not (base / "transaction.json").exists()
+    assert not any("provision" in " ".join(call) or "sudo" in call for call in calls)
+
+
+def test_candidate_failure_verifies_previous_local_and_public_health(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    reads = []
+
+    def health(revision, url="http://127.0.0.1:18940/healthz", **kwargs):
+        reads.append((revision, url))
+        if revision == SHA:
+            raise RuntimeError("Candidate unhealthy")
+        return {"status": "ok", "version": "0.1.0", "revision": revision}
+
+    monkeypatch.setattr(rollout, "healthy", health)
+    with pytest.raises(RuntimeError, match="Candidate unhealthy"):
+        rollout.deploy(SHA)
+    assert (base / "current").resolve() == previous
+    assert reads[-2:] == [(OLD, "http://127.0.0.1:18940/healthz"), (OLD, "https://bridge.example/healthz")]
     assert calls.count(("systemctl", "--user", "restart", "phonebridge.service")) == 2
-    assert ("systemctl", "--user", "enable", "phonebridge.service") not in calls
+    assert json.loads((base / "last-result.json").read_text())["rollback"]["public_health"]["revision"] == OLD
 
 
-def test_first_deployment_failure_stops_service_and_removes_current(deployment, monkeypatch):
-    base, revision, calls = deployment
+def test_both_original_and_rollback_health_failures_preserved(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    switched = False
 
-    def unhealthy(value, url="http://127.0.0.1:18940/healthz"):
-        raise RuntimeError("Unhealthy first deployment")
+    def health(revision, url="http://127.0.0.1:18940/healthz", **kwargs):
+        nonlocal switched
+        if revision == SHA:
+            switched = True
+            raise RuntimeError("Candidate unhealthy")
+        if switched:
+            raise RuntimeError("Rollback unhealthy")
+        return {"status": "ok", "version": "0.1.0", "revision": revision}
 
-    monkeypatch.setattr(rollout, "healthy", unhealthy)
-    with pytest.raises(RuntimeError, match="Unhealthy first"):
-        rollout.deploy(revision)
+    monkeypatch.setattr(rollout, "healthy", health)
+    with pytest.raises(RuntimeError, match="rollback_failure"):
+        rollout.deploy(SHA)
+    result = json.loads((base / "last-result.json").read_text())
+    assert "Candidate unhealthy" in result["original_failure"]
+    assert "Rollback unhealthy" in result["rollback_failure"]
+    assert (base / "transaction.json").exists()
+
+
+def test_first_deployment_failure_stops_and_clears_link(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    monkeypatch.setattr(rollout, "healthy", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("unhealthy")))
+    with pytest.raises(RuntimeError, match="unhealthy"):
+        rollout.deploy(SHA)
     assert not (base / "current").is_symlink()
     assert ("systemctl", "--user", "stop", "phonebridge.service") in calls
 
 
-def test_public_health_failure_rolls_back_previous_release(deployment, monkeypatch):
-    base, revision, calls = deployment
-    previous = base / "releases/previous"
-    previous.mkdir(parents=True)
-    rollout.switch(previous)
-    urls = []
-
-    def health(value, url="http://127.0.0.1:18940/healthz"):
-        urls.append(url)
-        if url.startswith("https:"):
-            raise RuntimeError("Public TLS health failed")
-        return {"status": "ok", "revision": value}
-
-    monkeypatch.setattr(rollout, "healthy", health)
-    with pytest.raises(RuntimeError, match="Public TLS"):
-        rollout.deploy(revision)
+def test_pending_interrupted_transaction_recovered_before_new_gate(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous, candidate = create(OLD), create(SHA)
+    rollout.switch(candidate)
+    rollout.atomic_json(base / "transaction.json", {"phase": "switching", "candidate": str(candidate), "previous": str(previous)})
+    rollout.recover("https://bridge.example")
     assert (base / "current").resolve() == previous
-    assert urls == ["http://127.0.0.1:18940/healthz", "https://bridge.example/healthz"]
-    assert ("systemctl", "--user", "enable", "phonebridge.service") not in calls
+    assert not (base / "transaction.json").exists()
 
 
-def test_deploy_publishes_local_and_public_revision_evidence(deployment, monkeypatch, capsys):
-    import json
+def test_signal_after_switch_rolls_back(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    normal = rollout.run
 
-    base, revision, calls = deployment
-    monkeypatch.setattr(rollout, "healthy", lambda value, url="http://127.0.0.1:18940/healthz": {"status": "ok", "revision": value})
-    rollout.deploy(revision)
-    evidence = json.loads(capsys.readouterr().out)
-    assert evidence["deployed"] is True
-    assert evidence["health"]["revision"] == revision
-    assert evidence["public_health"]["revision"] == revision
-    assert (base / "current").resolve() == base / "releases" / revision
-    assert ("systemctl", "--user", "enable", "phonebridge.service") in calls
+    def interrupted(*args, **kwargs):
+        if (base / "current").resolve() != previous:
+            rollout.interrupted(signal.SIGTERM, None)
+        return normal(*args, **kwargs)
 
-
-def merged_pull(revision):
-    return {
-        "number": 1,
-        "merged": True,
-        "state": "closed",
-        "merge_commit_sha": revision,
-        "base": {"ref": "main", "repo": {"full_name": rollout.REPOSITORY}},
-        "head": {"repo": {"full_name": rollout.REPOSITORY}},
-        "user": {"login": "freQuensy23-coder"},
-        "merged_by": {"login": "freQuensy23-coder"},
-    }
+    monkeypatch.setattr(rollout, "run", interrupted)
+    with pytest.raises(RuntimeError, match="signal"):
+        rollout.deploy(SHA)
+    assert (base / "current").resolve() == previous
 
 
-def test_deployment_requires_exact_merged_same_repo_owner_pull(monkeypatch):
-    revision = "a" * 40
-    pull = merged_pull(revision)
-    monkeypatch.setattr(rollout, "github", lambda path: [{"number": 1, "merged": None}] if "/commits/" in path else pull)
-    assert rollout.accepted_pr(revision) == 1
+def test_external_rollback_target_rejected(transaction, tmp_path):
+    rollout, base, create, calls = transaction
+    outside = tmp_path / "other"
+    outside.mkdir()
+    with pytest.raises(RuntimeError, match="containment"):
+        rollout.rollback(outside, "https://bridge.example")
+    assert not calls
 
 
-@pytest.mark.parametrize("violation", ["unmerged", "wrong_revision", "fork", "wrong_base", "wrong_author", "wrong_merger", "missing"])
-def test_rejects_direct_push_or_untrusted_merged_pull(monkeypatch, violation):
-    revision = "a" * 40
-    pull = merged_pull(revision)
-    if violation == "unmerged":
-        pull["merged"] = False
-    if violation == "wrong_revision":
-        pull["merge_commit_sha"] = "b" * 40
-    if violation == "fork":
-        pull["head"]["repo"]["full_name"] = "outsider/phonebridge"
-    if violation == "wrong_base":
-        pull["base"]["ref"] = "develop"
-    if violation == "wrong_author":
-        pull["user"]["login"] = "outsider"
-    if violation == "wrong_merger":
-        pull["merged_by"]["login"] = "outsider"
-    discovery = [] if violation == "missing" else [{"number": 1}]
-    monkeypatch.setattr(rollout, "github", lambda path: discovery if "/commits/" in path else pull)
-    with pytest.raises(RuntimeError, match="merged pull"):
-        rollout.accepted_pr(revision)
+def test_hung_subprocess_kills_process_group(modules, monkeypatch):
+    rollout = modules["rollout"]
+    kills = []
+    process = SimpleNamespace(pid=123, wait=lambda timeout: (_ for _ in ()).throw(subprocess.TimeoutExpired("gh", timeout)) if timeout != 5 else 0)
+    monkeypatch.setattr(rollout.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(rollout.os, "killpg", lambda *args: kills.append(args))
+    with pytest.raises(TimeoutError, match="subprocess deadline"):
+        rollout.run("gh", timeout=1)
+    assert kills == [(123, signal.SIGKILL)]
+
+
+def test_bounded_lock_wait(modules, tmp_path, monkeypatch):
+    rollout = modules["rollout"]
+    monkeypatch.setattr(rollout.fcntl, "flock", lambda *args: (_ for _ in ()).throw(BlockingIOError()))
+    with pytest.raises(TimeoutError, match="lock"):
+        with rollout.deployment_lock(tmp_path / "lock", timeout=0):
+            pytest.fail("Lock must not be acquired")
+
+
+@pytest.mark.parametrize("violation", ["wrong_total", "duplicate", "changing_total"])
+def test_incomplete_or_changing_pagination_fails(modules, monkeypatch, violation):
+    rollout = modules["rollout"]
+    first = [{"id": index + 1} for index in range(100)]
+
+    def github(path):
+        if violation == "wrong_total":
+            return {"total_count": 2, "jobs": [{"id": 1}]}
+        if path.endswith("page=1"):
+            return {"total_count": 101, "jobs": first}
+        return {"total_count": 102 if violation == "changing_total" else 101, "jobs": [{"id": 1 if violation == "duplicate" else 101}]}
+
+    monkeypatch.setattr(rollout, "github", github)
+    with pytest.raises(RuntimeError, match="paginated|pagination"):
+        rollout.pages("jobs", "jobs")
+
+
+def test_stale_main_after_preparation_never_switches(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    monkeypatch.setattr(rollout, "revalidate", lambda accepted: (_ for _ in ()).throw(RuntimeError("Revision is not current main")))
+    with pytest.raises(RuntimeError, match="current main"):
+        rollout.deploy(SHA)
+    assert (base / "current").resolve() == previous
+    assert not calls
+
+
+@pytest.mark.parametrize("damage", ["missing", "metadata", "schema", "interpreter"])
+def test_damaged_previous_release_blocks_promotion(transaction, damage):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    if damage == "missing":
+        (previous / "release.json").unlink()
+    elif damage == "metadata":
+        (previous / "revision.env").write_text("wrong revision")
+    elif damage == "schema":
+        data = json.loads((previous / "release.json").read_text())
+        data["schema_generation"] = 2
+        (previous / "release.json").write_text(json.dumps(data))
+    else:
+        (previous / ".venv/bin/python").unlink()
+    with pytest.raises((RuntimeError, OSError)):
+        rollout.deploy(SHA)
+    assert (base / "current").resolve() == previous
+    assert not calls
+
+
+def test_rollback_restart_failure_preserves_candidate_failure(transaction, monkeypatch):
+    rollout, base, create, calls = transaction
+    previous = create(OLD)
+    rollout.switch(previous)
+    normal = rollout.run
+    candidate_started = False
+
+    def run(*args, **kwargs):
+        nonlocal candidate_started
+        if (base / "current").resolve() != previous:
+            candidate_started = True
+            raise RuntimeError("Candidate restart failed")
+        if candidate_started:
+            raise RuntimeError("Rollback restart failed")
+        return normal(*args, **kwargs)
+
+    monkeypatch.setattr(rollout, "run", run)
+    with pytest.raises(RuntimeError, match="rollback_failure"):
+        rollout.deploy(SHA)
+    result = json.loads((base / "last-result.json").read_text())
+    assert "Candidate restart failed" in result["original_failure"]
+    assert "Rollback restart failed" in result["rollback_failure"]
