@@ -14,12 +14,7 @@ interface ClockUiAdapter {
     fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject
 }
 
-class SamsungClockAdapter : ClockUiAdapter {
-    override val name = "samsung_clock"
-    override fun supported(version: String, code: Long) = emptySet<String>()
-    override fun reason(version: String, code: Long) = "No independently verified Samsung package/version selector profile; native typed intents remain available"
-    override fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject = failure("UNSUPPORTED", "Samsung Clock UI version has no verified selector profile")
-}
+class SamsungClockAdapter : ClockUiAdapter by SamsungClockUiAdapter()
 
 class AospClockAdapter : ClockUiAdapter {
     override val name = "aosp_deskclock_source"

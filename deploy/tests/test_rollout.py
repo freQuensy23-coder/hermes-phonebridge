@@ -83,6 +83,16 @@ def test_rejects_name_only_tag_or_nonproducer_runs(producer, field, value):
     assert not any("check-runs" in path for path in paths)
 
 
+@pytest.mark.parametrize("conclusion", [None, "skipped", "failure"])
+def test_deployment_requires_positive_physical_oem_job(producer, conclusion):
+    rollout, state, paths = producer
+    state["jobs"] = [job for job in state["jobs"] if job["name"] != "android-physical"]
+    if conclusion is not None:
+        state["jobs"].append(dict(state["jobs"][0], id=900, name="android-physical", conclusion=conclusion))
+    with pytest.raises(RuntimeError):
+        rollout.accepted_revision(SHA)
+
+
 def test_stale_main_rejected_before_artifact(producer):
     rollout, state, paths = producer
     state["main"] = OLD

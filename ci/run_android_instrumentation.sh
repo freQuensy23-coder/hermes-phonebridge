@@ -38,6 +38,7 @@ status=0
     "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
     "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \
     -Pandroid.testInstrumentationRunnerArguments.googleClockFixture=true \
+    -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.ClipboardInstrumentationTest,org.nous.phonebridge.ClockIntentInstrumentationTest,org.nous.phonebridge.DndInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.GoogleClockInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.SamsungClockUnsupportedInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest \
     -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
     -Pandroid.testInstrumentationRunnerArguments.qrFixtureUrl=http://10.0.2.2:18941/pairing.png
 ) || status=$?

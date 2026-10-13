@@ -103,6 +103,15 @@ def test_wrong_head_repository(api):
         run_gate(api)
 
 
+@pytest.mark.parametrize("conclusion", [None, "skipped", "failure"])
+def test_release_requires_positive_physical_oem_job(api, conclusion):
+    api.jobs = [job for job in api.jobs if job["name"] != "android-physical"]
+    if conclusion is not None:
+        api.jobs.append(dict(api.jobs[0], id=900, name="android-physical", conclusion=conclusion))
+    with pytest.raises(ValueError):
+        run_gate(api)
+
+
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "failed", "old-time", "old-attempt", "wrong-sha"])
 def test_required_jobs_one_coherent_attempt(api, mutation):
     job = api.jobs[0]
