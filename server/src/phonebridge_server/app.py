@@ -128,9 +128,9 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @application.delete("/v1/pairings/{pairing_id}", dependencies=[Depends(admin)], status_code=204)
     async def revoke_pairing(pairing_id: str):
-        device_id = await execute("revoke_pairing", pairing_id)
+        device_id = await execute("revoke_pending_pairing", pairing_id)
         if device_id:
-            await hub.revoke(device_id)
+            await hub.revoke(device_id, lambda: execute("revoke_pairing", pairing_id))
         return Response(status_code=204)
 
     @application.post("/v1/pair/claim")
@@ -147,8 +147,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
 
     @application.delete("/v1/devices/{device_id}", dependencies=[Depends(admin)], status_code=204)
     async def revoke_device(device_id: str):
-        await execute("revoke_device", device_id)
-        await hub.revoke(device_id)
+        await hub.revoke(device_id, lambda: execute("revoke_device", device_id))
         return Response(status_code=204)
 
     @application.post("/v1/devices/{device_id}/commands", dependencies=[Depends(admin)])
@@ -247,11 +246,14 @@ def create_app(settings: Settings | None = None, clock=time.time):
             address = websocket.client.host if websocket.client else "unknown"
             if not limiter.take(("connect", address), settings.claim_rate):
                 raise BridgeError("RATE_LIMITED", "Connection attempt rate limit exceeded", 429)
-            device_id, session_id = await execute("connect", token)
-            await websocket.accept()
-            accepted = True
             peer = Peer.create(websocket, settings)
-            await hub.add(device_id, peer)
+            device_id, session_id = await hub.connect(token, peer, execute)
+            if peer.closed:
+                raise BridgeError("AUTH_REVOKED", "Connection is closed", 401)
+            await asyncio.wait_for(websocket.accept(), settings.send_timeout)
+            accepted = True
+            await hub.add(device_id, session_id, peer, execute)
+            await hub.check_current(device_id, session_id, peer, execute)
             first = await read_frame(websocket, settings.hello_timeout)
             try:
                 hello = HelloFrame.model_validate(first)
@@ -289,7 +291,10 @@ def create_app(settings: Settings | None = None, clock=time.time):
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
                 if peer is not None:
-                    await hub.remove(device_id, peer)
+                    if peer.device_id is not None:
+                        device_id, session_id = peer.device_id, peer.session_id
+                    if device_id is not None:
+                        await hub.remove(device_id, session_id, peer)
                     await peer.close(1000)
                 if device_id is not None:
                     await execute("disconnect", device_id, session_id)

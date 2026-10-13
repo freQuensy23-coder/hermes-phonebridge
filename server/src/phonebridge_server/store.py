@@ -243,6 +243,15 @@ class Store:
             (now, encode_json({"code": "DEVICE_REVOKED", "message": "Device authorization revoked"}), device_id),
         )
 
+    def revoke_pending_pairing(self, pairing_id):
+        with self.transaction() as db:
+            row = db.execute("SELECT device_id FROM pairings WHERE id=?", (pairing_id,)).fetchone()
+            if row is None:
+                raise BridgeError("NOT_FOUND", "Pairing not found", 404)
+            if row["device_id"] is None:
+                db.execute("UPDATE pairings SET status='revoked' WHERE id=?", (pairing_id,))
+            return row["device_id"]
+
     def revoke_pairing(self, pairing_id):
         with self.transaction() as db:
             row = db.execute("SELECT device_id FROM pairings WHERE id=?", (pairing_id,)).fetchone()
@@ -272,6 +281,19 @@ class Store:
     def device(self, device_id):
         with self.lock:
             return self._device_view(self._device(self.connection, device_id))
+
+    def authorize(self, token):
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT id FROM devices WHERE token_hash=? AND revoked_at IS NULL", (digest(token),),
+            ).fetchone()
+            if row is None:
+                raise BridgeError("UNAUTHORIZED", "Device authorization required", 401)
+            return row["id"]
+
+    def check_session(self, device_id, session_id):
+        with self.lock:
+            self._session(self.connection, device_id, session_id)
 
     def connect(self, token):
         with self.transaction() as db:

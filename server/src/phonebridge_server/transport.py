@@ -1,7 +1,8 @@
 import asyncio
 import threading
 import time
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 from starlette.responses import JSONResponse
 
@@ -159,6 +160,9 @@ class Peer:
     queue: asyncio.Queue
     lock: asyncio.Lock
     closed: bool = False
+    close_sent: bool = False
+    device_id: str | None = None
+    session_id: str | None = None
 
     @classmethod
     def create(cls, websocket, settings):
@@ -176,6 +180,9 @@ class Peer:
     async def close(self, code=1008):
         self.closed = True
         async with self.lock:
+            if self.close_sent:
+                return
+            self.close_sent = True
             try:
                 await asyncio.wait_for(self.websocket.close(code=code), self.settings.send_timeout)
             except (RuntimeError, TimeoutError, OSError):
@@ -188,33 +195,110 @@ class Peer:
             raise BridgeError("QUEUE_FULL", "Outgoing frame queue limit reached", 429) from error
 
 
+@dataclass
+class DeviceConnections:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    sessions: dict = field(default_factory=dict)
+    current_session: str | None = None
+    users: int = 0
+
+
 class Hub:
     def __init__(self, settings):
         self.settings = settings
         self.peers = {}
+        self.devices = {}
         self.lock = asyncio.Lock()
+        self.closing = False
 
-    async def add(self, device_id, peer):
+    @asynccontextmanager
+    async def coordinate(self, device_id):
         async with self.lock:
+            state = self.devices.get(device_id)
+            if state is None:
+                limit = self.settings.max_connections + self.settings.max_http_requests + 16
+                if len(self.devices) >= limit:
+                    raise BridgeError("QUEUE_FULL", "Connection coordination limit reached", 429)
+                state = DeviceConnections()
+                self.devices[device_id] = state
+            state.users += 1
+        try:
+            async with state.lock:
+                yield state
+        finally:
+            async with self.lock:
+                state.users -= 1
+                if not state.users and not state.sessions:
+                    self.devices.pop(device_id)
+
+    def _current(self, state, session_id, peer):
+        if (self.closing or peer.closed or peer.session_id != session_id
+                or state.current_session != session_id
+                or state.sessions.get(session_id) is not peer):
+            raise BridgeError("AUTH_REVOKED", "Device session is no longer authorized", 401)
+
+    async def connect(self, token, peer, execute):
+        device_id = await execute("authorize", token)
+        async with self.coordinate(device_id) as state:
+            if self.closing:
+                raise BridgeError("AUTH_REVOKED", "Connection is closed", 401)
+            connecting = asyncio.create_task(execute("connect", token))
+            try:
+                device_id, session_id = await asyncio.shield(connecting)
+            except asyncio.CancelledError:
+                device_id, session_id = await connecting
+                await execute("disconnect", device_id, session_id)
+                raise
+            peer.device_id = device_id
+            peer.session_id = session_id
+            state.current_session = session_id
+            state.sessions[session_id] = peer
+        return device_id, session_id
+
+    async def add(self, device_id, session_id, peer, execute):
+        async with self.coordinate(device_id) as state:
+            self._current(state, session_id, peer)
+            await execute("check_session", device_id, session_id)
+            self._current(state, session_id, peer)
             old = self.peers.get(device_id)
             if old is None and len(self.peers) >= self.settings.max_connections:
                 raise BridgeError("QUEUE_FULL", "Connection limit reached", 429)
             self.peers[device_id] = peer
-        if old is not None:
+            if old is not None and old is not peer:
+                old.closed = True
+        if old is not None and old is not peer:
             await old.close(1012)
 
-    async def remove(self, device_id, peer):
-        async with self.lock:
+    async def check_current(self, device_id, session_id, peer, execute):
+        async with self.coordinate(device_id) as state:
+            self._current(state, session_id, peer)
+            await execute("check_session", device_id, session_id)
+            self._current(state, session_id, peer)
+
+    async def remove(self, device_id, session_id, peer):
+        async with self.coordinate(device_id) as state:
+            if state.sessions.get(session_id) is not peer:
+                return
+            state.sessions.pop(session_id)
             if self.peers.get(device_id) is peer:
                 self.peers.pop(device_id)
+            if state.current_session == session_id:
+                state.current_session = None
 
-    async def revoke(self, device_id):
-        async with self.lock:
-            peer = self.peers.get(device_id)
-        if peer:
-            await peer.close(1008)
+    async def revoke(self, device_id, revoke):
+        async with self.coordinate(device_id) as state:
+            await revoke()
+            state.current_session = None
+            peers = list(state.sessions.values())
+            self.peers.pop(device_id, None)
+            for peer in peers:
+                peer.closed = True
+        await asyncio.gather(*(peer.close(1008) for peer in peers))
 
     async def close(self):
         async with self.lock:
-            peers = list(self.peers.values())
+            self.closing = True
+            peers = [peer for state in self.devices.values() for peer in state.sessions.values()]
+            for peer in peers:
+                peer.closed = True
         await asyncio.gather(*(peer.close(1001) for peer in peers), return_exceptions=True)
