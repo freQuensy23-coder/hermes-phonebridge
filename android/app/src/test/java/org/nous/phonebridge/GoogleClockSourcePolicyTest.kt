@@ -97,6 +97,170 @@ class GoogleClockSourcePolicyTest {
         assertFalse(accepts(bounds = GoogleClockBounds(0, 0, 0, 0), backgrounds = listOf(GoogleClockBounds(0, 0, 0, 0))))
     }
 
+    @Test fun sourcePolicyAcceptsOnlyCompleteAlarmDetailWithoutPromotionOrCollectionControls() {
+        val detail = listOf("clock", "alarm_label", "repeat_days", "save_button", "delete_button")
+        GoogleClockAlarmDetail.requireSurface(detail)
+        GoogleClockAlarmDetail.requireSurface(detail + listOf("clock_container", "label_setting", "vibrate"))
+        for (resource in detail) {
+            rejected { GoogleClockAlarmDetail.requireSurface(detail - resource) }
+            rejected { GoogleClockAlarmDetail.requireSurface(detail + resource) }
+        }
+        for (resource in listOf("body", "dismiss_button", "alarm_label_edit", "loading_indicator", "pause_alarm_cancel_button", "alarm_recycler_view", "timer_view", "onoff", "play_pause", "play_pause_button", "timer_label", "reset_button", "workflow", "watch_alarm_sound", "unknown")) {
+            rejected { GoogleClockAlarmDetail.requireSurface(detail + resource) }
+        }
+        rejected { GoogleClockAlarmDetail.requireSurface(listOf("header", "body", "dismiss_button")) }
+        rejected { GoogleClockAlarmDetail.requireSurface(listOf("alarm_recycler_view", "onoff", "digital_clock")) }
+        rejected { GoogleClockAlarmDetail.requireSurface(listOf("timer_view", "timer_label", "delete_button")) }
+    }
+
+    private val modalTarget = GoogleClockEntry("CI alarm, Start Alarm", "05:31", "enabled", "every day")
+    private val modalSurvivor = GoogleClockEntry("CI survivor", "05:43", "enabled", "Monday, Tuesday")
+    private val modalBaseline get() = listOf(modalTarget, modalSurvivor)
+    private val modalDays get() = GoogleClockAlarmDetail.weekdays.map { it to true }
+    private fun modalDetail(transaction: GoogleClockAlarmDelete, window: Int = 91, label: String = modalTarget.label, time: String = modalTarget.time, description: String = time, days: List<Pair<String, Boolean>> = modalDays, now: Long = 2000) = transaction.detail(window, label, time, description, days, now)
+    private fun modalTransaction(phase: GoogleClockAlarmDelete.Phase = GoogleClockAlarmDelete.Phase.BASELINE): GoogleClockAlarmDelete {
+        val transaction = GoogleClockAlarmDelete(modalBaseline, 90, modalTarget, 1000)
+        if (phase == GoogleClockAlarmDelete.Phase.BASELINE) return transaction
+        assertFalse(transaction.baseline(modalBaseline, 90, 1000))
+        transaction.select(modalBaseline.reversed(), 90, 1200)
+        if (phase == GoogleClockAlarmDelete.Phase.SELECTED) return transaction
+        assertFalse(modalDetail(transaction, now = 1300))
+        assertTrue(modalDetail(transaction, now = 2000))
+        if (phase == GoogleClockAlarmDelete.Phase.DETAIL) return transaction
+        transaction.dispatch(91, 2000)
+        if (phase == GoogleClockAlarmDelete.Phase.DISPATCHED) return transaction
+        assertFalse(transaction.returned(listOf(modalSurvivor), 90, false, 2100))
+        assertTrue(transaction.returned(listOf(modalSurvivor), 90, false, 2300))
+        if (phase == GoogleClockAlarmDelete.Phase.RETURNED) return transaction
+        transaction.recreate(2300)
+        if (phase == GoogleClockAlarmDelete.Phase.RECREATED) return transaction
+        assertFalse(transaction.complete(listOf(modalSurvivor), 92, false, false, 2400))
+        assertTrue(transaction.complete(listOf(modalSurvivor), 92, false, false, 2600))
+        return transaction
+    }
+
+    @Test fun modalSafeGraphAcceptsOnlyOneFreshFocusedGoogleApplicationWithoutHiddenHost() {
+        val detail = GoogleClockApplication(91, GoogleClockProfile.PACKAGE, true, true)
+        GoogleClockModalGraph.requireSingle(listOf(detail), 91, 1, 1, true)
+        for (applications in listOf(emptyList(), listOf(detail, detail), listOf(detail, GoogleClockApplication(90, GoogleClockProfile.PACKAGE, false, false)), listOf(detail, GoogleClockApplication(93, GoogleClockProfile.PACKAGE, false, false)), listOf(detail.copy(pkg = "foreign.app")), listOf(detail.copy(active = false)), listOf(detail.copy(focused = false)), listOf(detail.copy(window = 90)))) {
+            rejected { GoogleClockModalGraph.requireSingle(applications, 91, 1, 1, true) }
+        }
+        rejected { GoogleClockModalGraph.requireSingle(listOf(detail), 91, 2, 1, true) }
+        rejected { GoogleClockModalGraph.requireSingle(listOf(detail), 91, 1, 2, true) }
+        rejected { GoogleClockModalGraph.requireSingle(listOf(detail), 91, 0, 0, true) }
+        rejected { GoogleClockModalGraph.requireSingle(listOf(detail), 91, 1, 1, false) }
+        rejected { GoogleClockModalGraph.requireSingle(listOf(detail.copy(visible = false)), 91, 1, 1, true) }
+    }
+
+    @Test fun modalSafeProtocolRequiresEveryFreshPhaseBeforeSuccessAndOneDispatch() {
+        for (phase in listOf(GoogleClockAlarmDelete.Phase.BASELINE, GoogleClockAlarmDelete.Phase.SELECTED, GoogleClockAlarmDelete.Phase.DETAIL, GoogleClockAlarmDelete.Phase.DISPATCHED, GoogleClockAlarmDelete.Phase.RETURNED, GoogleClockAlarmDelete.Phase.RECREATED, GoogleClockAlarmDelete.Phase.COMPLETE)) assertEquals(phase, modalTransaction(phase).phase)
+        val complete = modalTransaction(GoogleClockAlarmDelete.Phase.COMPLETE)
+        assertEquals(listOf(modalSurvivor), complete.expected)
+        rejected("AMBIGUOUS_STATE") { complete.dispatch(91, 2700) }
+        assertEquals(GoogleClockAlarmDelete.Phase.ABORTED, complete.phase)
+        rejected("AMBIGUOUS_STATE") { complete.complete(listOf(modalSurvivor), 92, false, false, 2800) }
+        rejected { modalTransaction().dispatch(91, 2000) }
+        rejected { modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED).dispatch(91, 2000) }
+        rejected { modalTransaction().returned(listOf(modalSurvivor), 90, false, 2000) }
+        rejected { modalTransaction().recreate(2000) }
+        rejected { modalTransaction().complete(listOf(modalSurvivor), 92, false, false, 2000) }
+        rejected { modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL).complete(listOf(modalSurvivor), 92, false, false, 2100) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).dispatch(91, 2100) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).recreate(2100) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RETURNED).complete(listOf(modalSurvivor), 92, false, false, 2400) }
+        rejected("AMBIGUOUS_STATE") { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.RETURNED), now = 2400) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).returned(listOf(modalSurvivor), 90, false, 2400) }
+    }
+
+    @Test fun modalSafeBaselineIsCompleteUniqueStableFreshAndBoundedBeforeCardClick() {
+        rejected { GoogleClockAlarmDelete(listOf(modalTarget, modalTarget), 90, modalTarget, 1000) }
+        rejected { GoogleClockAlarmDelete(modalBaseline, 90, modalTarget.copy(schedule = ""), 1000) }
+        rejected { GoogleClockAlarmDelete(listOf(modalSurvivor), 90, modalTarget, 1000) }
+        rejected { modalTransaction().select(modalBaseline, 90, 1000) }
+        val unstable = modalTransaction()
+        assertFalse(unstable.baseline(modalBaseline, 90, 1000))
+        rejected { unstable.select(modalBaseline, 90, 1199) }
+        for (values in listOf(listOf(modalTarget), modalBaseline + modalSurvivor, listOf(modalTarget, modalSurvivor.copy(state = "disabled")), listOf(modalTarget, modalSurvivor.copy(schedule = "Wednesday")))) rejected { modalTransaction().baseline(values, 90, 1200) }
+        rejected { modalTransaction().baseline(modalBaseline, 91, 1200) }
+        rejected { modalTransaction().baseline(modalBaseline, 90, 11000) }
+        rejected { modalTransaction().baseline(modalBaseline, 90, 999) }
+        rejected { modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED).select(modalBaseline, 90, 1300) }
+    }
+
+    @Test fun modalSafeDetailRejectsChangedLabelTimeRecurrenceWindowAndStaleOrLateProof() {
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), window = 90) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), label = "Other") }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), time = "05:43") }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), description = "05:43") }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), days = modalDays.dropLast(1)) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), days = modalDays.dropLast(1) + modalDays.first()) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), days = modalDays.map { it.first to false }) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), days = modalDays.dropLast(1) + ("unknown" to true)) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL), window = 93, now = 2100) }
+        rejected { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED), now = 3200) }
+        rejected { modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL).dispatch(91, 2101) }
+        rejected { modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL).dispatch(93, 2000) }
+        val notStable = modalTransaction(GoogleClockAlarmDelete.Phase.SELECTED)
+        assertFalse(modalDetail(notStable, now = 1300))
+        assertFalse(modalDetail(notStable, now = 1999))
+        rejected { notStable.dispatch(91, 1999) }
+        val ready = modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL)
+        assertTrue(modalDetail(ready, now = 2200))
+        ready.dispatch(91, 2200)
+        rejected("AMBIGUOUS_STATE") { ready.dispatch(91, 2201) }
+    }
+
+    @Test fun modalSafeRecurrenceBindsSevenIndependentNamedCheckboxesToTheSelectedSchedule() {
+        GoogleClockAlarmDetail.requireIdentity(modalTarget, modalTarget.label, modalTarget.time, modalTarget.time, modalDays.reversed())
+        val once = modalTarget.copy(schedule = "")
+        GoogleClockAlarmDetail.requireIdentity(once, once.label, once.time, once.time, modalDays.map { it.first to false })
+        val selectedDays = modalDays.map { it.first to (it.first in setOf("Monday", "Tuesday")) }
+        GoogleClockAlarmDetail.requireIdentity(modalSurvivor, modalSurvivor.label, modalSurvivor.time, modalSurvivor.time, selectedDays)
+        rejected { GoogleClockAlarmDetail.requireIdentity(modalTarget.copy(schedule = "Monday, Monday"), modalTarget.label, modalTarget.time, modalTarget.time, selectedDays) }
+        rejected { GoogleClockAlarmDetail.requireIdentity(modalTarget.copy(schedule = "unknown"), modalTarget.label, modalTarget.time, modalTarget.time, selectedDays) }
+        rejected { GoogleClockAlarmDetail.requireIdentity(modalTarget.copy(schedule = "Monday, Tuesday, "), modalTarget.label, modalTarget.time, modalTarget.time, selectedDays) }
+        rejected { GoogleClockAlarmDetail.requireIdentity(modalSurvivor, modalSurvivor.label, modalSurvivor.time, modalSurvivor.time, modalDays) }
+    }
+
+    @Test fun modalSafeReturnedStabilityCannotBorrowPostDispatchModalTime() {
+        for (observations in listOf(emptyList<Long>(), listOf(2100L), listOf(2100L, 2400L))) {
+            val transaction = modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED)
+            for (now in observations) assertFalse(modalDetail(transaction, now = now))
+            assertFalse(transaction.returned(listOf(modalSurvivor), 90, false, 2600))
+            assertFalse(transaction.returned(listOf(modalSurvivor), 90, false, 2799))
+            assertTrue(transaction.returned(listOf(modalSurvivor), 90, false, 2800))
+            transaction.recreate(2800)
+            assertEquals(GoogleClockAlarmDelete.Phase.RECREATED, transaction.phase)
+        }
+        val premature = modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED)
+        assertFalse(modalDetail(premature, now = 2100))
+        assertFalse(modalDetail(premature, now = 2400))
+        assertFalse(premature.returned(listOf(modalSurvivor), 90, false, 2600))
+        rejected("AMBIGUOUS_STATE") { premature.recreate(2799) }
+    }
+
+    @Test fun modalSafeReturnedCollectionAndRecreationCannotSkipStableSurvivorOrWindowProof() {
+        val unexpected = listOf(modalBaseline, emptyList(), listOf(modalSurvivor.copy(state = "disabled")), listOf(modalSurvivor.copy(schedule = "Wednesday")), listOf(modalSurvivor, modalSurvivor), listOf(modalSurvivor, modalTarget.copy(label = "concurrent")))
+        for (values in unexpected) {
+            rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).returned(values, 90, false, 2100) }
+            rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).complete(values, 92, false, false, 2400) }
+        }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).returned(listOf(modalSurvivor), 93, false, 2100) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).returned(listOf(modalSurvivor), 90, true, 2100) }
+        val unstable = modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED)
+        assertFalse(unstable.returned(listOf(modalSurvivor), 90, false, 2100))
+        rejected("AMBIGUOUS_STATE") { unstable.recreate(2299) }
+        for (window in listOf(90, 91)) rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).complete(listOf(modalSurvivor), window, false, false, 2400) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).complete(listOf(modalSurvivor), 92, true, false, 2400) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).complete(listOf(modalSurvivor), 92, false, true, 2400) }
+        val changed = modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED)
+        assertFalse(changed.complete(listOf(modalSurvivor), 92, false, false, 2400))
+        rejected("AMBIGUOUS_STATE") { changed.complete(listOf(modalSurvivor), 93, false, false, 2600) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED).returned(listOf(modalSurvivor), 90, false, 12000) }
+        rejected("AMBIGUOUS_STATE") { modalTransaction(GoogleClockAlarmDelete.Phase.RECREATED).complete(listOf(modalSurvivor), 92, false, false, 12300) }
+        rejected("AMBIGUOUS_STATE") { modalDetail(modalTransaction(GoogleClockAlarmDelete.Phase.DISPATCHED), label = "Other", now = 2100) }
+    }
+
     @Test fun sourcePolicyRequiresRecreatedWindowNotBackAndShowOfRetainedSingleTask() {
         rejected { GoogleClockReadback.requireRecreated(88, 88, false) }
         rejected { GoogleClockReadback.requireRecreated(88, 90, true) }

@@ -161,6 +161,97 @@ class GoogleClockInstrumentationTest {
         record("vendor-promotion-dismissed")
         return true
     }
+    private fun prepareAlarmDeleteAfterMusicPromotionRefusal(target: JSONObject, before: List<JSONObject>) {
+        val originalWindow = UiThread.call { service.safeRoot(pkg).windowId }
+        try {
+            ui("clock.alarms.delete", selection(target, true))
+            fail("Genuine native music promotion must refuse deletion before an alarm effect")
+        } catch (e: BridgeFailure) {
+            assertEquals("UNSUPPORTED", e.code)
+            assertEquals("Clock promotion popup is not a collection host", e.message)
+        }
+        val promotionBodies = setOf("You can now choose music from Calm, Spotify, Pandora, & YouTube Music", "You can now choose music from Pandora, Spotify, YouTube Music, & Calm")
+        waitUntil("Genuine alarm detail music promotion was not exposed after refusal") {
+            UiThread.call {
+                service.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && !it.isActive && !it.isFocused }.any { window ->
+                    window.root?.let { root -> fixtureNodes(root).any { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() in promotionBodies } } == true
+                }
+            }
+        }
+        record("alarm-detail-music-promotion-refused")
+        rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.list") }
+        rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.delete", selection(target, true)) }
+        GoogleClockProfile.requireInstalled(context)
+        val candidate = UiThread.call {
+            val root = service.safeRoot(pkg)
+            val windows = service.windows
+            val applications = windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            assertEquals(2, applications.size)
+            assertTrue(applications.all { it.root?.packageName?.toString() == pkg })
+            assertEquals(1, windows.count { it.isActive })
+            assertEquals(1, windows.count { it.isFocused })
+            val host = applications.single { it.id == root.windowId && it.isActive && it.isFocused }
+            val hostBounds = android.graphics.Rect().also { host.getBoundsInScreen(it) }
+            val hostNodes = fixtureNodes(root)
+            GoogleClockAlarmDetail.requireSurface(hostNodes.filter { it.isVisibleToUser }.mapNotNull { it.viewIdResourceName?.takeIf { resource -> resource.startsWith("$pkg:id/") }?.substringAfter(":id/") })
+            assertEquals(target.getString("time"), hostNodes.single { it.viewIdResourceName == "$pkg:id/clock" && it.isVisibleToUser }.text.toString())
+            assertEquals(target.getString("label"), hostNodes.single { it.viewIdResourceName == "$pkg:id/alarm_label" && it.isVisibleToUser }.text.toString())
+            val navigationBackgrounds = hostNodes.filter { it.viewIdResourceName == "android:id/navigationBarBackground" }.map { node ->
+                android.graphics.Rect().also { node.getBoundsInScreen(it) }.let { GoogleClockBounds(it.left, it.top, it.right, it.bottom) }
+            }.distinct()
+            assertTrue(windows.filter { it.type != android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }.all { window ->
+                val bounds = android.graphics.Rect().also { window.getBoundsInScreen(it) }
+                GoogleClockWindows.system(Build.VERSION.SDK_INT, window.type, window.isActive, window.isFocused, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), navigationBackgrounds)
+            })
+            val popup = applications.single { it.id != root.windowId }
+            assertFalse(popup.isActive)
+            assertFalse(popup.isFocused)
+            assertTrue(popup.layer > host.layer)
+            val popupBounds = android.graphics.Rect().also { popup.getBoundsInScreen(it) }
+            assertTrue(!popupBounds.isEmpty && hostBounds.contains(popupBounds))
+            val nodes = fixtureNodes(popup.root ?: error("Genuine music promotion disappeared before explicit fixture dismissal"))
+            assertFalse(nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/play_pause", "$pkg:id/delete_button", "$pkg:id/tertiary_button", "$pkg:id/save_button", "$pkg:id/alarm_recycler_view", "$pkg:id/timer_view", "$pkg:id/clock", "$pkg:id/alarm_label", "$pkg:id/repeat_days") && it.isVisibleToUser })
+            val body = nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }
+            assertEquals("android.widget.TextView", body.className?.toString())
+            assertTrue(body.text?.toString() in promotionBodies)
+            val dismissal = nodes.single { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser }
+            assertEquals("android.widget.TextView", dismissal.className?.toString())
+            assertEquals("Dismiss", dismissal.text?.toString())
+            assertEquals(popup.id, body.windowId)
+            assertEquals(popup.id, dismissal.windowId)
+            assertTrue(dismissal.isEnabled && dismissal.isClickable && !dismissal.isPassword)
+            assertTrue(dismissal.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK })
+            val dismissalBounds = android.graphics.Rect().also { dismissal.getBoundsInScreen(it) }
+            assertTrue(!dismissalBounds.isEmpty && popupBounds.contains(dismissalBounds) && hostBounds.contains(dismissalBounds))
+            Access.unlocked(service)
+            service.click(dismissal)
+            popup.id
+        }
+        waitUntil("Genuine music promotion remained after one explicit fixture dismissal") { UiThread.call { service.windows.none { it.id == candidate } } }
+        record("alarm-detail-music-promotion-dismissed")
+        UiThread.call {
+            val root = service.safeRoot(pkg)
+            val nodes = fixtureNodes(root)
+            GoogleClockAlarmDetail.requireSurface(nodes.filter { it.isVisibleToUser }.mapNotNull { it.viewIdResourceName?.takeIf { resource -> resource.startsWith("$pkg:id/") }?.substringAfter(":id/") })
+            assertEquals(target.getString("time"), nodes.single { it.viewIdResourceName == "$pkg:id/clock" && it.isVisibleToUser }.text.toString())
+            assertEquals(target.getString("label"), nodes.single { it.viewIdResourceName == "$pkg:id/alarm_label" && it.isVisibleToUser }.text.toString())
+            assertNotEquals(originalWindow, root.windowId)
+            assertEquals(1, service.windows.count { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION })
+            Access.unlocked(service)
+            assertTrue(service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
+        }
+        waitUntil("Unmutated genuine collection did not return after closing alarm detail") {
+            UiThread.call { service.rootInActiveWindow?.let { it.windowId == originalWindow && it.packageName?.toString() == pkg && fixtureNodes(it).count { node -> node.viewIdResourceName == "$pkg:id/alarm_recycler_view" && node.isVisibleToUser } == 1 } == true }
+        }
+        assertEquals("Popup refusal and explicit fixture dismissal must preserve every native alarm", values(before), values(list(true)))
+        Thread.sleep(200)
+        assertEquals("Fresh complete native readback must remain unchanged after fixture dismissal and Back", values(before), values(list(true)))
+        UiThread.call {
+            assertEquals(originalWindow, service.safeRoot(pkg).windowId)
+            assertEquals(1, service.windows.count { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION })
+        }
+        record("alarm-detail-promotion-refused-without-alarm-mutation")
+    }
     private fun show(alarm: Boolean) {
         val dispatched = clocks.execute(if (alarm) "clock.alarms.show" else "clock.timers.show", Arguments(args()))
         assertFalse(dispatched.getBoolean("verified"))
@@ -359,11 +450,25 @@ class GoogleClockInstrumentationTest {
         shell("am force-stop $pkg")
         show(true)
         assertTrue(list(true).single { it.getString("label") == target.getString("label") }.getBoolean("enabled"))
+        prepareAlarmDeleteAfterMusicPromotionRefusal(target, list(true))
         verified("clock.alarms.delete", selection(target, true), "deleted")
         assertEquals(values(survivors), values(list(true)))
         shell("am force-stop $pkg")
         show(true)
         assertEquals(values(survivors), values(list(true)))
+    }
+
+    @Test fun genuineAlarmDetailMusicPromotionRejectsDeletionAndPreservesEveryAlarm() {
+        val hour = alarmHour
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 31).put("label", "CI popup target alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
+        create("clock.alarms.create", JSONObject().put("hour", hour).put("minute", 43).put("label", "CI popup survivor alarm").put("days", JSONArray(listOf(1, 2, 3, 4, 5, 6, 7))))
+        show(true)
+        val before = list(true)
+        assertEquals(defaultAlarms.size + 2, before.size)
+        prepareAlarmDeleteAfterMusicPromotionRefusal(before.single { it.getString("label") == "CI popup target alarm" }, before)
+        shell("am force-stop $pkg")
+        show(true)
+        assertEquals(values(before), values(list(true)))
     }
 
     @Test fun genuineRunningPausedTimerDriftAndPreciseCancellationKeepUnrelatedTimer() {

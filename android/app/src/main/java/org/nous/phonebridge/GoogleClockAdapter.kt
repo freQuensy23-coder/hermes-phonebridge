@@ -34,6 +34,7 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             requireSchema(current.refresh(), "Clock node cannot be freshly reacquired")
             requireSchema(current.childCount <= 100, "Clock refreshed child bound exceeded")
             requireSchema(!current.isPassword && current.packageName?.toString() == GoogleClockProfile.PACKAGE, "Clock tree contains excluded or foreign nodes")
+            requireSchema(current.windowId == node.windowId, "Clock tree contains stale-window nodes")
             result.add(current)
             for (index in 0 until current.childCount) visit(current.getChild(index) ?: failure("UNSUPPORTED", "Clock tree child unavailable"), depth + 1)
         }
@@ -41,32 +42,42 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         return result
     }
 
-    private fun activeRoot(service: BridgeAccessibility, detail: Boolean = false): AccessibilityNodeInfo {
+    private fun windowState(windows: List<AccessibilityWindowInfo>) = windows.sortedBy { it.id }.map { window ->
+        val bounds = Rect().also { window.getBoundsInScreen(it) }
+        listOf(window.id, window.type, window.isActive, window.isFocused, window.layer, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom))
+    }
+    private fun activeRoot(service: BridgeAccessibility): AccessibilityNodeInfo {
         val root = service.safeRoot(GoogleClockProfile.PACKAGE)
         val windows = service.windows
-        val active = windows.singleOrNull { it.id == root.windowId && it.isActive && it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-        requireSchema(active != null, "Clock requires one focused application window")
-        requireSchema(windows.count { it.isActive } == 1 && windows.count { it.isFocused } == 1, "Clock window focus graph is ambiguous")
+        val graph = windowState(windows)
         val application = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-        val expectedApplications = if (detail) 2 else 1
-        requireSchema(application.size == expectedApplications, "Clock window graph is not recognized: expected=$expectedApplications, actual=${application.size}, active=${root.windowId}, windows=${application.take(8).joinToString { "${it.id}:${it.root?.packageName}:${it.isActive}:${it.isFocused}" }}")
+        requireSchema(windows.size <= 8 && application.isNotEmpty(), "Clock window graph exceeds profile bounds")
         val trees = application.associate { window ->
             val windowRoot = window.root ?: failure("UNSUPPORTED", "Clock window root unavailable")
+            requireSchema(windowRoot.windowId == window.id, "Clock window root identity changed")
             window.id to completeNodes(windowRoot)
+        }
+        trees.values.forEach { nodes ->
+            requireSchema(visible(nodes, "body").isEmpty() && visible(nodes, "dismiss_button").isEmpty(), "Clock promotion popup is not a collection host")
         }
         val navigationBackgrounds = trees.values.flatten().filter { it.viewIdResourceName == "android:id/navigationBarBackground" }.map { node ->
             Rect().also { node.getBoundsInScreen(it) }.let { GoogleClockBounds(it.left, it.top, it.right, it.bottom) }
         }.distinct()
-        requireSchema(windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { window ->
+        val safeSystem = windows.filter { it.type != AccessibilityWindowInfo.TYPE_APPLICATION }.all { window ->
             val bounds = Rect().also { window.getBoundsInScreen(it) }
             GoogleClockWindows.system(android.os.Build.VERSION.SDK_INT, window.type, window.isActive, window.isFocused, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), navigationBackgrounds)
-        }, "Clock is covered by an unknown overlay or input window")
-        application.forEach { window ->
-            val nodes = trees.getValue(window.id)
-            requireSchema(visible(nodes, "body").isEmpty() && visible(nodes, "dismiss_button").isEmpty(), "Clock promotion popup is not a collection host")
-            if (window.id != root.windowId) requireSchema(!window.isActive && !window.isFocused && window.layer < active!!.layer && nodes.count { it.viewIdResourceName == id("alarm_recycler_view") } == 1 && visible(nodes, "clock").isEmpty() && visible(nodes, "save_button").isEmpty(), "Clock inactive detail host is not recognized")
         }
+        GoogleClockModalGraph.requireSingle(application.map { GoogleClockApplication(it.id, trees.getValue(it.id).first().packageName?.toString(), it.isActive, it.isFocused, trees.getValue(it.id).first().isVisibleToUser) }, root.windowId, windows.count { it.isActive }, windows.count { it.isFocused }, safeSystem)
         completeNodes(root)
+        val returnedWindows = service.windows
+        if (windowState(returnedWindows) != graph) {
+            requireSchema(returnedWindows.size <= 8, "Clock changed window graph exceeds profile bounds")
+            returnedWindows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }.forEach { window ->
+                val nodes = completeNodes(window.root ?: failure("UNSUPPORTED", "Changed Clock window root unavailable"))
+                requireSchema(visible(nodes, "body").isEmpty() && visible(nodes, "dismiss_button").isEmpty(), "Clock promotion popup is not a collection host")
+            }
+            failure("UNSUPPORTED", "Clock window safety graph changed during fresh traversal")
+        }
         return root
     }
 
@@ -195,22 +206,36 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         }
         failure("AMBIGUOUS_STATE", "Clock complete readback could not prove the effect; no retry")
     }
-    private fun rebind(service: BridgeAccessibility, alarm: Boolean, expected: List<GoogleClockEntry>, window: Int) {
+    private fun rebind(service: BridgeAccessibility, alarm: Boolean, expected: List<GoogleClockEntry>, window: Int, transaction: GoogleClockAlarmDelete? = null, permitted: () -> Unit = ExecutionGuard.snapshot()) {
+        ExecutionGuard.check()
+        permitted()
+        transaction?.check(SystemClock.elapsedRealtime())
         gate()
         val component = ComponentName(GoogleClockProfile.PACKAGE, GoogleClockProfile.ACTIVITY)
         val activity = context!!.packageManager.getActivityInfo(component, 0)
         requireSchema(activity.exported && activity.enabled && activity.packageName == GoogleClockProfile.PACKAGE && activity.name == GoogleClockProfile.ACTIVITY, "Clock model-rebind activity does not match the signed profile")
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(GoogleClockProfile.PACKAGE).setComponent(component).setFlags(GoogleClockReadback.RECREATE_FLAGS)
         UiThread.call {
+            permitted()
+            transaction?.check(SystemClock.elapsedRealtime())
+            gate()
             val fresh = collection(service, alarm)
             requireSchema(fresh.window == window && GoogleClockCollection.same(fresh.values, expected), "Clock changed before model rebind")
             Access.unlocked(service)
+            permitted()
+            transaction?.recreate(SystemClock.elapsedRealtime())
             service.startActivity(intent)
         }
         val deadline = SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS
         var returnedWindow: Int? = null
         while (returnedWindow == null && SystemClock.elapsedRealtime() < deadline) {
+            ExecutionGuard.check()
+            permitted()
+            transaction?.check(SystemClock.elapsedRealtime())
+            gate()
             returnedWindow = UiThread.call {
+                permitted()
+                transaction?.check(SystemClock.elapsedRealtime())
                 Access.unlocked(service)
                 val root = service.rootInActiveWindow ?: return@call null
                 requireSchema(root.packageName?.toString() == GoogleClockProfile.PACKAGE, "Clock foreground changed during model rebind")
@@ -229,68 +254,161 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             if (returnedWindow == null) Thread.sleep(100)
         }
         val rebound = returnedWindow ?: failure("UNSUPPORTED", "Clock did not recreate its model-backed collection window")
-        awaitSnapshot(service, alarm, expected, SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS, rebound)
-    }
-    private fun detail(service: BridgeAccessibility, before: Snapshot, target: GoogleClockEntry): AccessibilityNodeInfo {
-        val root = activeRoot(service, true)
-        val nodes = completeNodes(root)
-        requireSchema(boundedText(one(nodes, "clock")) == target.time && boundedText(one(nodes, "alarm_label"), empty = true) == target.label, "Clock detail does not match selected alarm")
-        requireSchema(visible(nodes, "alarm_label_edit").isEmpty() && visible(nodes, "loading_indicator").isEmpty() && visible(nodes, "pause_alarm_cancel_button").isEmpty(), "Clock detail is loading, editing or date-paused")
-        one(nodes, "repeat_days")
-        val save = one(nodes, "save_button")
-        requireSchema(boundedText(save) == "Save", "Unknown Clock detail save schema")
-        val underlying = service.windows.singleOrNull { it.id == before.window && it.id != root.windowId }?.root ?: failure("UNSUPPORTED", "Clock original collection is not exposed under detail")
-        requireSchema(GoogleClockCollection.same(collection(service, true, underlying).values, before.values), "Clock collection changed while opening detail")
-        val deletion = one(nodes, "delete_button")
-        requireSchema(boundedText(deletion) == "Delete", "Unknown Clock detail delete control")
-        clickable(deletion)
-        return deletion
-    }
-    private fun openDetail(service: BridgeAccessibility, before: Snapshot, target: GoogleClockEntry) {
-        gate()
-        UiThread.call {
-            val fresh = collection(service, true)
-            requireSchema(fresh.window == before.window && GoogleClockCollection.same(fresh.values, before.values), "Clock selection changed before detail")
-            val row = fresh.rows.single { it.value.key == target.key }
-            clickable(row.node)
-            service.click(row.node)
-        }
-        val deadline = SystemClock.elapsedRealtime() + 2000
-        repeat(20) {
-            if (SystemClock.elapsedRealtime() < deadline) {
-                val loaded = UiThread.call {
-                    val root = service.safeRoot(GoogleClockProfile.PACKAGE)
-                    val nodes = completeNodes(root)
-                    visible(nodes, "clock").size == 1 && visible(nodes, "alarm_label").size == 1 && visible(nodes, "loading_indicator").isEmpty()
-                }
-                if (loaded) { UiThread.call { detail(service, before, target) }; return }
-                Thread.sleep(100)
-            }
-        }
-        failure("UNSUPPORTED", "Clock detail identity was not exposed; no alarm mutation dispatched")
-    }
-
-    private fun awaitDetailClose(service: BridgeAccessibility, target: GoogleClockEntry, originalWindow: Int, detailWindow: Int, deadline: Long) {
-        repeat(20) {
-            if (SystemClock.elapsedRealtime() >= deadline) failure("AMBIGUOUS_STATE", "Clock detail did not close after deletion")
+        if (transaction == null) awaitSnapshot(service, alarm, expected, SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS, rebound)
+        else while (true) {
+            ExecutionGuard.check()
+            permitted()
+            transaction.check(SystemClock.elapsedRealtime())
             gate()
-            val closed = UiThread.call {
-                val root = service.safeRoot(GoogleClockProfile.PACKAGE)
-                requireSchema(root.windowId in setOf(originalWindow, detailWindow), "Clock window changed after deletion")
-                val nodes = completeNodes(root)
-                if (root.windowId == originalWindow && visible(nodes, "clock").isEmpty() && visible(nodes, "save_button").isEmpty()) {
-                    activeRoot(service)
-                    true
-                } else {
-                    activeRoot(service, true)
-                    requireSchema(root.windowId == detailWindow && boundedText(one(nodes, "clock")) == target.time && boundedText(one(nodes, "alarm_label"), empty = true) == target.label, "Unknown Clock deletion transition")
-                    false
-                }
+            val complete = UiThread.call {
+                permitted()
+                Access.unlocked(service)
+                val fresh = collection(service, alarm)
+                requireSchema(fresh.window == rebound, "Clock recreated window changed before native model proof")
+                transaction.complete(fresh.values, fresh.window, service.windows.any { it.id == window }, service.windows.any { it.id == transaction.detailWindow }, SystemClock.elapsedRealtime())
             }
-            if (closed) return
+            if (complete) {
+                permitted()
+                Access.unlocked(service)
+                break
+            }
             Thread.sleep(100)
         }
-        failure("AMBIGUOUS_STATE", "Clock deletion sheet remained open; no retry")
+    }
+    private fun detailDays(recurrence: AccessibilityNodeInfo): List<Pair<String, Boolean>> {
+        requireSchema(recurrence.className?.toString() == "android.view.ViewGroup", "Unknown Clock detail recurrence schema")
+        val dayNodes = completeNodes(recurrence)
+        val days = (0..6).map { index ->
+            val day = one(dayNodes, "day_button_$index")
+            requireSchema(day.className?.toString() == "android.widget.CheckBox" && day.isCheckable && day.isEnabled && day.parent == recurrence, "Unknown Clock weekday checkbox schema")
+            contained(day, recurrence)
+            boundedText(day, true) to day.isChecked
+        }
+        requireSchema(dayNodes.count { it.isCheckable && it.isVisibleToUser } == 7, "Clock recurrence contains unknown controls")
+        return days
+    }
+    private fun detailSurface(nodes: List<AccessibilityNodeInfo>, window: Int) {
+        requireSchema(nodes.none { it.isEditable || it.className?.toString() == "android.widget.EditText" || it.windowId != window }, "Clock detail contains input or stale-window nodes")
+        requireSchema(nodes.filter { it.isVisibleToUser }.all { node -> node.viewIdResourceName?.let { it.startsWith("${GoogleClockProfile.PACKAGE}:id/") || it in setOf("android:id/content", "android:id/navigationBarBackground", "android:id/statusBarBackground") } != false }, "Clock detail contains unknown resource namespaces")
+        GoogleClockAlarmDetail.requireSurface(nodes.filter { it.isVisibleToUser }.mapNotNull { it.viewIdResourceName?.takeIf { resource -> resource.startsWith("${GoogleClockProfile.PACKAGE}:id/") }?.substringAfter(":id/") })
+    }
+    private fun detail(service: BridgeAccessibility, transaction: GoogleClockAlarmDelete, root: AccessibilityNodeInfo = activeRoot(service)): Pair<AccessibilityNodeInfo, Boolean> {
+        val graph = windowState(service.windows)
+        val nodes = completeNodes(root)
+        detailSurface(nodes, root.windowId)
+        val clock = one(nodes, "clock")
+        val label = one(nodes, "alarm_label")
+        requireSchema(clock.className?.toString() == "android.widget.TextView" && label.className?.toString() == "android.widget.TextView", "Unknown Clock detail identity schema")
+        val recurrence = one(nodes, "repeat_days")
+        val days = detailDays(recurrence)
+        val save = one(nodes, "save_button")
+        val deletion = one(nodes, "delete_button")
+        requireSchema(save.className?.toString() == "android.widget.Button" && boundedText(save) == "Save" && deletion.className?.toString() == "android.widget.Button" && boundedText(deletion) == "Delete", "Unknown Clock detail action schema")
+        clickable(save)
+        clickable(deletion)
+        requireSchema(deletion.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }, "Clock Delete has no source-bound native click")
+        contained(deletion, root)
+        contained(clock, root)
+        contained(label, root)
+        val finalRoot = activeRoot(service)
+        requireSchema(finalRoot.windowId == root.windowId, "Clock detail window changed during identity readback")
+        val finalNodes = completeNodes(finalRoot)
+        detailSurface(finalNodes, finalRoot.windowId)
+        requireSchema(one(finalNodes, "clock") == clock && one(finalNodes, "alarm_label") == label && one(finalNodes, "repeat_days") == recurrence && one(finalNodes, "delete_button") == deletion, "Clock selected detail controls were replaced during identity readback")
+        requireSchema(clock.refresh() && label.refresh() && clock.isVisibleToUser && label.isVisibleToUser && clock.className?.toString() == "android.widget.TextView" && label.className?.toString() == "android.widget.TextView" && detailDays(recurrence) == days, "Clock detail identity or recurrence changed during fresh readback")
+        requireSchema(deletion.refresh() && deletion.windowId == root.windowId && deletion.viewIdResourceName == id("delete_button") && deletion.className?.toString() == "android.widget.Button" && boundedText(deletion) == "Delete", "Clock Delete changed after fresh modal readback")
+        clickable(deletion)
+        contained(deletion, root)
+        if (windowState(service.windows) != graph) {
+            activeRoot(service)
+            failure("UNSUPPORTED", "Clock modal safety graph changed during identity readback")
+        }
+        val stable = transaction.detail(root.windowId, boundedText(label, empty = true), boundedText(clock), boundedText(clock, true), days, SystemClock.elapsedRealtime())
+        return deletion to stable
+    }
+
+    private fun deleteAlarm(service: BridgeAccessibility, before: Snapshot, target: GoogleClockEntry): JSONObject {
+        val transaction = GoogleClockAlarmDelete(before.values.toList(), before.window, target, SystemClock.elapsedRealtime())
+        val permitted = ExecutionGuard.snapshot()
+        fun check() {
+            ExecutionGuard.check()
+            permitted()
+            transaction.check(SystemClock.elapsedRealtime())
+            Access.unlocked(service)
+        }
+        while (true) {
+            check()
+            val current = snapshot(service, true)
+            if (transaction.baseline(current.values, current.window, SystemClock.elapsedRealtime())) break
+            Thread.sleep(100)
+        }
+        UiThread.call {
+            check()
+            gate()
+            val fresh = collection(service, true)
+            val row = fresh.rows.singleOrNull { it.value == target } ?: failure("UNSUPPORTED", "Clock selected card identity changed")
+            clickable(row.node)
+            requireSchema(row.node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK }, "Clock selected card has no native detail action")
+            transaction.select(fresh.values, fresh.window, SystemClock.elapsedRealtime())
+            permitted()
+            Access.unlocked(service)
+            service.click(row.node)
+        }
+        val openingDeadline = SystemClock.elapsedRealtime() + 2000
+        while (true) {
+            check()
+            requireSchema(SystemClock.elapsedRealtime() < openingDeadline, "Clock selected detail did not settle before mutation")
+            val stable = UiThread.call {
+                check()
+                val root = activeRoot(service)
+                if (root.windowId == before.window) {
+                    requireSchema(transaction.phase == GoogleClockAlarmDelete.Phase.SELECTED && GoogleClockCollection.same(collection(service, true, root).values, before.values), "Clock selection returned to a changed collection")
+                    false
+                } else detail(service, transaction, root).second
+            }
+            if (stable) break
+            Thread.sleep(100)
+        }
+        var dispatched = false
+        var phase = "single native Delete dispatch"
+        try {
+            UiThread.call {
+                check()
+                gate()
+                val (deletion, stable) = detail(service, transaction)
+                requireSchema(stable, "Clock selected detail is not stable before Delete")
+                Access.unlocked(service)
+                permitted()
+                transaction.dispatch(deletion.windowId, SystemClock.elapsedRealtime())
+                dispatched = true
+                service.click(deletion)
+            }
+            phase = "complete returned collection proof"
+            while (true) {
+                check()
+                gate()
+                val returned = UiThread.call {
+                    check()
+                    val root = activeRoot(service)
+                    if (root.windowId == transaction.detailWindow) {
+                        detail(service, transaction, root)
+                        false
+                    } else {
+                        val fresh = collection(service, true, root)
+                        transaction.returned(fresh.values, fresh.window, service.windows.any { it.id == transaction.detailWindow }, SystemClock.elapsedRealtime())
+                    }
+                }
+                if (returned) break
+                Thread.sleep(100)
+            }
+            phase = "native model recreation and complete readback"
+            rebind(service, true, transaction.expected, before.window, transaction, permitted)
+            requireSchema(transaction.phase == GoogleClockAlarmDelete.Phase.COMPLETE, "Clock deletion lacks complete native model proof")
+            return JSONObject().put("outcome", "deleted").put("verified", true).put("scope", "complete_collection_model_rebind").put("state", "absent").put("label", target.label).put("time", target.time).put("vendor_id", JSONObject.NULL)
+        } catch (e: Exception) {
+            if (dispatched) failure("AMBIGUOUS_STATE", "Clock Delete dispatched but $phase failed: ${(e as? BridgeFailure)?.code ?: e.javaClass.simpleName}: ${e.message?.take(256)}; never retry effects")
+            throw e
+        }
     }
 
     override fun execute(service: BridgeAccessibility, op: String, args: Arguments): JSONObject {
@@ -328,14 +446,13 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             requireSchema(fresh.window == before.window && GoogleClockCollection.same(fresh.values, before.values), "Clock changed before no-op readback")
             return JSONObject().put("outcome", "unchanged").put("verified", true).put("scope", "complete_current_collection")
         }
-        if (alarm && desired == null) openDetail(service, before, target)
+        if (alarm && desired == null) return deleteAlarm(service, before, target)
         var dispatched = false
-        var effectWindow = before.window
         var phase = "effect dispatch"
         try {
             gate()
             UiThread.call {
-                val node = if (alarm && desired == null) detail(service, before, target) else {
+                val node = run {
                     val fresh = collection(service, alarm)
                     requireSchema(fresh.window == before.window && GoogleClockCollection.same(fresh.values, before.values), "Clock changed before effect dispatch")
                     val row = fresh.rows.single { it.value.key == target.key }
@@ -344,14 +461,12 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
                 }
                 clickable(node)
                 Access.unlocked(service)
-                effectWindow = node.windowId
                 dispatched = true
                 service.click(node)
             }
             val deadline = SystemClock.elapsedRealtime() + GoogleClockReadback.TIMEOUT_MS
             Thread.sleep(100)
             phase = "complete collection readback"
-            if (alarm && desired == null) awaitDetailClose(service, target, before.window, effectWindow, deadline)
             val readback = awaitSnapshot(service, alarm, expected, deadline, before.window)
             phase = "model recreation and readback"
             rebind(service, alarm, expected, readback.window)
