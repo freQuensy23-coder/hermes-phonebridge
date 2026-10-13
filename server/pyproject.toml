@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools==84.0.0", "wheel==0.48.0", "packaging==26.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phonebridge-server"
+version = "0.1.0"
+description = "Authenticated durable Android command relay"
+requires-python = ">=3.11"
+dependencies = [
+  "annotated-doc==0.0.5",
+  "annotated-types==0.8.0",
+  "anyio==4.15.1",
+  "click==8.5.0",
+  "fastapi==0.143.0",
+  "h11==0.16.0",
+  "idna==3.20",
+  "opentelemetry-api==1.45.1",
+  "pydantic==2.14.1",
+  "pydantic-core==2.50.1",
+  "starlette==1.8.0",
+  "typing-extensions==4.16.0",
+  "typing-inspection==0.4.4",
+  "uvicorn==0.54.0",
+  "websockets==17.2",
+]
+[project.optional-dependencies]
+test = ["pytest==8.3.5", "pytest-asyncio==0.26.0", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

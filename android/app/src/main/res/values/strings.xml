@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">PhoneBridge</string>
+    <string name="accessibility_description">Optional remote screen reading and control. Only enable for a server you trust. Screen commands require an unlocked phone. Password fields and secure screenshots are excluded. Disable here to revoke screen control.</string>
+</resources>
