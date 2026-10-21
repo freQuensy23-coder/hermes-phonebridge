@@ -8,8 +8,8 @@ from phonebridge_test_support import ADMIN
 from test_network import live_server as live_server, receive
 
 
-async def test_mock_phone_real_network_debug_status_and_bounded_screenshot_readback(live_server):
-    http_url, ws_url = live_server
+async def test_mock_phone_real_network_debug_status_and_bounded_screenshot_readback(request):
+    http_url, ws_url = request.getfixturevalue("live_server")
     async with httpx.AsyncClient(base_url=http_url, timeout=5) as client:
         pairing_response = await client.post("/v1/pairings", headers=ADMIN, json={"name": "Mock debug phone"})
         assert pairing_response.status_code == 200

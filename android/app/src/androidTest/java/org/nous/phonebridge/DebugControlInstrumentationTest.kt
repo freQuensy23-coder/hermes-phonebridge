@@ -183,7 +183,10 @@ class DebugControlInstrumentationTest {
         else refused(command("screen.screenshot", args(session, pkg)), "UNSUPPORTED")
     }
     private fun success(value: JSONObject): JSONObject {
-        assertEquals("Command must succeed through the production HTTP and WSS path", "succeeded", value.getString("status"))
+        val observedCode = value.optJSONObject("error")?.optString("code").orEmpty()
+        val allowedCodes = setOf("UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR")
+        val code = observedCode.takeIf { it in allowedCodes } ?: "UNCLASSIFIED"
+        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code", "succeeded", value.getString("status"))
         return value.getJSONObject("data")
     }
     private fun refused(value: JSONObject, code: String) {

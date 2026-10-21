@@ -104,7 +104,20 @@ def sanitize_reports(reports, required, exact_names=True):
             if sum(marker_counts.values()) > 1:
                 counts["report_validation_failures"] += 1
             for tag in tags:
-                ET.SubElement(child, tag, {"message": "Restricted observed test outcome"})
+                marker = ET.SubElement(child, tag, {"message": "Restricted observed test outcome"})
+                if known and tag in ("failure", "error"):
+                    original = case.find(tag)
+                    stack = original.text or "" if original is not None else ""
+                    files = set(name.rsplit(".", 1)[-1] + ".kt" for name in INSTRUMENTATION | UNIT)
+                    files.update({"BridgeAccessibility.kt", "BridgeService.kt", "DebugControl.kt", "RemoteWindowPolicy.kt"})
+                    locations = list(dict.fromkeys(
+                        file + ":" + line for file, line in re.findall(
+                            r"(?m)^at org\.nous\.phonebridge\.[A-Za-z0-9_.$]+\(([A-Za-z0-9_]+\.kt):([0-9]{1,6})\)\s*$", stack
+                        ) if file in files
+                    ))[:8]
+                    codes = re.findall(r"\bbridge_code=([A-Z_]+)\b", stack)
+                    code = codes[0] if codes and codes[0] in {"UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR"} else None
+                    marker.text = json.dumps({"locations": locations, "bridge_code": code}, sort_keys=True)
             counts["observed_tests"] += 1
             counts["passed_tests"] += not tags
             counts["failed_tests"] += "failure" in tags

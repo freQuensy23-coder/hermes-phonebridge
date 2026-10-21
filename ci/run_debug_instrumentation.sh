@@ -107,7 +107,7 @@ def publish():
 
 
 def read_private(name):
-    result = adb("exec-out", "run-as", package, "head", "-c", "4097", "files/debug-wholeflow/" + name, required=False)
+    result = adb("shell", "-T", "run-as", package, "head", "-c", "4097", "files/debug-wholeflow/" + name, required=False)
     if result.returncode != 0:
         return None
     if len(result.stdout) > 4096:

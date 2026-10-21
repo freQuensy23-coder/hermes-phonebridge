@@ -573,6 +573,36 @@ def test_wholeflow_requires_exact_ninth_case_genuine_asset_and_observable_host_a
     assert 'NativeClocks(' not in source
 
 
+def test_failure_evidence_keeps_only_allowlisted_source_coordinates():
+    classname, names = next(iter(INSTRUMENTATION.items()))
+    report = ET.fromstring(raw_report(classname, [(sorted(names)[0], "failure")]))
+    failure = report.find("testcase/failure")
+    assert failure is not None
+    failure.text = (
+        "java.lang.AssertionError: PRIVATE_TOKEN bridge_code=UNSUPPORTED\n"
+        "at org.nous.phonebridge.DebugControlInstrumentationTest.waitUntil(DebugControlInstrumentationTest.kt:120)\n"
+        "at org.nous.phonebridge.DebugControlInstrumentationTest.setup(DebugControlInstrumentationTest.kt:324)\n"
+        "at org.nous.phonebridge.PRIVATE_TOKEN(PRIVATE_TOKEN.kt:987)\n"
+    )
+    xml, counts = sanitize_reports([ET.tostring(report)], INSTRUMENTATION)
+    observed = ET.fromstring(xml).find("testcase/failure")
+    assert observed is not None and observed.text is not None
+    assert counts["failed_tests"] == 1
+    assert b"PRIVATE" not in xml
+    assert json.loads(observed.text) == {
+        "locations": ["DebugControlInstrumentationTest.kt:120", "DebugControlInstrumentationTest.kt:324"],
+        "bridge_code": "UNSUPPORTED",
+    }
+
+
+def test_host_adb_json_reads_use_shell_exit_status_for_missing_private_files():
+    source = SCRIPT.read_text()
+    read = source.split("def read_private(name):", 1)[1].split("def write_ack", 1)[0]
+    assert 'adb("shell", "-T", "run-as", package, "head"' in read
+    assert 'if result.returncode != 0:' in read
+    assert 'return None' in read
+
+
 def test_wholeflow_receipt_is_bounded_private_and_never_substitutes_for_observed_junit():
     observed = {"phases": WHOLEFLOW_PHASES, "host_adb_taps": 1, "coordinator_error": False}
     receipt = restricted_wholeflow(json.dumps(observed).encode())
