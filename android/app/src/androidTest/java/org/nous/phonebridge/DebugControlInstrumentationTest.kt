@@ -193,7 +193,20 @@ class DebugControlInstrumentationTest {
         val observedCode = value.optJSONObject("error")?.optString("code").orEmpty()
         val allowedCodes = setOf("UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR")
         val code = observedCode.takeIf { it in allowedCodes } ?: "UNCLASSIFIED"
-        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code", "succeeded", value.getString("status"))
+        val reason = when (value.optJSONObject("error")?.optString("message")) {
+            "System, input method and overlay windows are excluded" -> "SYSTEM_WINDOW"
+            "Cannot inspect relevant window", "Cannot inspect selected window" -> "MISSING_WINDOW_ROOT"
+            "Password-bearing windows are excluded" -> "PASSWORD_WINDOW"
+            "Cannot inspect advertised window child", "Window exceeds complete password-guard traversal bound" -> "INCOMPLETE_TREE"
+            "Relevant window has a different owner" -> "FOREIGN_OWNER"
+            "Another window overlaps the selected native window" -> "OVERLAP"
+            "PhoneBridge consent/settings UI cannot be remotely controlled", "PhoneBridge, permission, credential and lock screens are excluded" -> "OWN_UI"
+            "Protected UI window is present" -> "PROTECTED_UI"
+            "Selected window must be an active focused application with native bounds" -> "INVALID_ACTIVE_WINDOW"
+            "No inspectable active window graph", "Selected active window is missing" -> "INVALID_WINDOW_GRAPH"
+            else -> "UNCLASSIFIED"
+        }
+        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason", "succeeded", value.getString("status"))
         return value.getJSONObject("data")
     }
     private fun refused(value: JSONObject, code: String) {

@@ -117,7 +117,11 @@ def sanitize_reports(reports, required, exact_names=True):
                     ))[:8]
                     codes = re.findall(r"\bbridge_code=([A-Z_]+)\b", stack)
                     code = codes[0] if codes and codes[0] in {"UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR"} else None
-                    marker.text = json.dumps({"locations": locations, "bridge_code": code}, sort_keys=True)
+                    diagnostic = {"locations": locations, "bridge_code": code}
+                    reasons = re.findall(r"\bbridge_reason=([A-Z_]+)\b", stack)
+                    if reasons and reasons[0] in {"SYSTEM_WINDOW", "MISSING_WINDOW_ROOT", "PASSWORD_WINDOW", "INCOMPLETE_TREE", "FOREIGN_OWNER", "OVERLAP", "OWN_UI", "PROTECTED_UI", "INVALID_ACTIVE_WINDOW", "INVALID_WINDOW_GRAPH", "UNCLASSIFIED"}:
+                        diagnostic["bridge_reason"] = reasons[0]
+                    marker.text = json.dumps(diagnostic, sort_keys=True)
             counts["observed_tests"] += 1
             counts["passed_tests"] += not tags
             counts["failed_tests"] += "failure" in tags

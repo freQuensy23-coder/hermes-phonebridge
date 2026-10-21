@@ -120,7 +120,7 @@ def write_ack(name, value):
         "ack.json": "cat > files/debug-wholeflow/ack.pending && mv files/debug-wholeflow/ack.pending files/debug-wholeflow/ack.json",
         "progress-ack.json": "cat > files/debug-wholeflow/progress-ack.pending && mv files/debug-wholeflow/progress-ack.pending files/debug-wholeflow/progress-ack.json",
     }
-    adb("exec-out", "run-as", package, "sh", "-c", "'" + commands[name] + "'", payload=json.dumps(value).encode())
+    adb("shell", "-T", "run-as", package, "sh", "-c", "'" + commands[name] + "'", payload=json.dumps(value).encode())
 
 
 def stop(signum, frame):

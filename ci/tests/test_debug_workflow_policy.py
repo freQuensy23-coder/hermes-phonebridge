@@ -550,7 +550,7 @@ def test_wholeflow_requires_exact_ninth_case_genuine_asset_and_observable_host_a
         '"$RUNNER_TEMP/clock-fixture/google-8.2.apk"',
         '["adb", "-s", serial, *arguments]',
         'adb("shell", "input", "tap", str(request["x"]), str(request["y"]))',
-        'adb("exec-out", "run-as", package', '"expires_elapsed_ms"',
+        'adb("shell", "-T", "run-as", package', '"expires_elapsed_ms"',
         '"expected_package"] != clock', '"debug_session"', '"nonce"',
         'read_private("request.json") != request', 'if consumed is not None:',
         'time.monotonic() + 18 * 60', 'timeout=10', 'len(result.stdout) > 4096',
@@ -579,7 +579,7 @@ def test_failure_evidence_keeps_only_allowlisted_source_coordinates():
     failure = report.find("testcase/failure")
     assert failure is not None
     failure.text = (
-        "java.lang.AssertionError: PRIVATE_TOKEN bridge_code=UNSUPPORTED\n"
+        "java.lang.AssertionError: PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=SYSTEM_WINDOW\n"
         "at org.nous.phonebridge.DebugControlInstrumentationTest.waitUntil(DebugControlInstrumentationTest.kt:120)\n"
         "at org.nous.phonebridge.DebugControlInstrumentationTest.setup(DebugControlInstrumentationTest.kt:324)\n"
         "at org.nous.phonebridge.PRIVATE_TOKEN(PRIVATE_TOKEN.kt:987)\n"
@@ -592,6 +592,7 @@ def test_failure_evidence_keeps_only_allowlisted_source_coordinates():
     assert json.loads(observed.text) == {
         "locations": ["DebugControlInstrumentationTest.kt:120", "DebugControlInstrumentationTest.kt:324"],
         "bridge_code": "UNSUPPORTED",
+        "bridge_reason": "SYSTEM_WINDOW",
     }
 
 
