@@ -139,12 +139,15 @@ def sanitize_reports(reports, required, exact_names=True):
                     code = codes[0] if codes and codes[0] in {"UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR"} else None
                     diagnostic = {"locations": locations, "bridge_code": code}
                     reasons = re.findall(r"\bbridge_reason=([A-Z_]+)\b", stack)
-                    if reasons and reasons[0] in {"SYSTEM_WINDOW", "MISSING_WINDOW_ROOT", "PASSWORD_WINDOW", "INCOMPLETE_TREE", "FOREIGN_OWNER", "OVERLAP", "OWN_UI", "PROTECTED_UI", "INVALID_ACTIVE_WINDOW", "INVALID_WINDOW_GRAPH", "UNCLASSIFIED", "CLOCK_MISSING_ROOT", "CLOCK_POPUP", "CLOCK_WINDOW_GRAPH", "CLOCK_WINDOW_CHANGED", "CLOCK_INCOMPLETE_TREE", "CLOCK_STALE_NODE", "CLOCK_FOREIGN_NODE", "CLOCK_DETAIL_OR_LOADING", "CLOCK_COLLECTION_ANCHOR", "CLOCK_COLLECTION_COUNT", "CLOCK_COLLECTION_SCHEMA", "CLOCK_COLLECTION_INCOMPLETE", "CLOCK_COLLECTION_GEOMETRY", "CLOCK_ALARM_IDENTITY", "CLOCK_ALARM_SCHEMA", "CLOCK_ALARM_SCHEDULE"}:
+                    if reasons and reasons[0] in {"SYSTEM_WINDOW", "MISSING_WINDOW_ROOT", "PASSWORD_WINDOW", "INCOMPLETE_TREE", "FOREIGN_OWNER", "OVERLAP", "OWN_UI", "PROTECTED_UI", "INVALID_ACTIVE_WINDOW", "INVALID_WINDOW_GRAPH", "LOCAL_MAIN", "UNCLASSIFIED", "CLOCK_MISSING_ROOT", "CLOCK_POPUP", "CLOCK_WINDOW_GRAPH", "CLOCK_WINDOW_CHANGED", "CLOCK_INCOMPLETE_TREE", "CLOCK_STALE_NODE", "CLOCK_FOREIGN_NODE", "CLOCK_DETAIL_OR_LOADING", "CLOCK_COLLECTION_ANCHOR", "CLOCK_COLLECTION_COUNT", "CLOCK_COLLECTION_SCHEMA", "CLOCK_COLLECTION_INCOMPLETE", "CLOCK_COLLECTION_GEOMETRY", "CLOCK_ALARM_IDENTITY", "CLOCK_ALARM_SCHEMA", "CLOCK_ALARM_SCHEDULE"}:
                         diagnostic["bridge_reason"] = reasons[0]
                     if classname in INSTRUMENTATION:
                         windows = restricted_bridge_windows(stack)
                         if windows is not None:
                             diagnostic["bridge_windows"] = windows
+                        local = re.findall(r"(?<!\S)bridge_local=(\S*)", stack)
+                        if len(local) == 1 and re.fullmatch(r"\[[01],[01],[01],[0-3],[0-3],[01],[0-2]\]", local[0]):
+                            diagnostic["bridge_local"] = [int(value) for value in local[0][1:-1].split(",")]
                     marker.text = json.dumps(diagnostic, sort_keys=True)
             counts["observed_tests"] += 1
             counts["passed_tests"] += not tags

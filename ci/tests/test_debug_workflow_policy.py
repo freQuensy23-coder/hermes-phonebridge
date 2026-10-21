@@ -813,6 +813,23 @@ def test_private_coordinator_failure_accepts_only_one_exact_enum_and_rejects_sec
     assert restricted_coordinator_failure(read_report(path, max_bytes=256)) is None
 
 
+def test_local_consent_ui_diagnostics_preserve_only_boolean_and_owner_categories():
+    vector = [1, 1, 0, 0, 1, 1, 1]
+    stack = "PRIVATE_TOKEN bridge_reason=LOCAL_MAIN bridge_local=" + json.dumps(vector, separators=(",", ":"))
+    xml, counts = sanitize_reports([bridge_diagnostic_report(stack)], INSTRUMENTATION)
+    assert_observed_totals(xml, counts, ["failure"])
+    observed = ET.fromstring(xml).find("testcase/failure")
+    assert observed is not None and observed.text is not None
+    assert json.loads(observed.text) == {
+        "bridge_code": None, "bridge_reason": "LOCAL_MAIN", "bridge_local": vector, "locations": [],
+    }
+    for token in ("PRIVATE_TOKEN", "[]", "[1,1,0,0,1,1,1,1]", "[1,1,0,4,1,1,1]", "[1,1,0,0,1,1,3]", "[1,1,0,0,1,1,1]PRIVATE_TOKEN", "[1,1,0,0,1,1,1] bridge_local=[1,1,0,0,1,1,1]"):
+        xml, counts = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN bridge_local=" + token)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        assert b"bridge_local" not in xml
+        assert b"PRIVATE_TOKEN" not in xml
+
+
 def test_coordinator_failure_is_optional_summary_only_without_changing_receipt_or_counts():
     source = (ROOT / "ci/debug_evidence.py").read_text()
     main = source.split("def main():", 1)[1]

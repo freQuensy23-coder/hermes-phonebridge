@@ -304,8 +304,29 @@ class DebugControlInstrumentationTest {
         instrumentation.waitForIdleSync()
     }
     private fun showMain() {
-        shell("am start -W -f 0x00020000 -n org.nous.phonebridge/.MainActivity")
-        waitUntil { automation.rootInActiveWindow?.packageName?.toString() == context.packageName }
+        val launch = shell("am start -W -f 0x00020000 -n org.nous.phonebridge/.MainActivity")
+        try {
+            waitUntil { automation.rootInActiveWindow?.packageName?.toString() == context.packageName }
+        } catch (error: AssertionError) {
+            fun owner(node: AccessibilityNodeInfo?): Int = when (node?.packageName?.toString()) {
+                null -> 0
+                context.packageName -> 1
+                "com.android.systemui" -> 2
+                else -> 3
+            }
+            val flags = listOf(
+                if (MainActivity.resumed) 1 else 0,
+                if (context.getSystemService(android.os.PowerManager::class.java).isInteractive) 1 else 0,
+                if (context.getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked) 1 else 0,
+                owner(automation.rootInActiveWindow),
+                UiThread.call { owner(BridgeAccessibility.current?.rootInActiveWindow) },
+                if (context.packageName == "org.nous.phonebridge") 1 else 0,
+                if (launch.contains("Error:")) 2 else if (launch.contains("Status: ok")) 1 else 0
+            )
+            val local = flags.joinToString(",", "[", "]")
+            val windows = bridgeWindowsDiagnostic()?.let { " bridge_windows=$it" }.orEmpty()
+            throw AssertionError("Local MainActivity observation failed; bridge_reason=LOCAL_MAIN bridge_local=$local$windows", error)
+        }
     }
     private fun showFixture(mode: String = "ordinary") {
         shell("am force-stop $fixture")
