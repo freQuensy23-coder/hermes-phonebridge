@@ -25,7 +25,8 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
             }
         }
     }
-    @Synchronized fun begin(command: JSONObject): JSONObject? {
+    @Synchronized fun begin(command: JSONObject, sinks: CommandSinks? = null): JSONObject? {
+        val boundary = if (command.optString("op").startsWith("screen.")) sinks ?: failure("PERMISSION_REQUIRED", "Screen cache access requires current debug authorization") else CommandSinks()
         val args = Arguments(command)
         val id = args.string("id", 128)!!
         requireBridge(id.isNotBlank(), "Empty command ID")
@@ -38,7 +39,7 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
         db.beginTransaction()
         try {
             db.query("commands", arrayOf("fingerprint", "result"), "id=?", arrayOf(id), null, null, null).use { cursor ->
-                if (cursor.moveToFirst()) {
+                if (boundary.prepared({ cursor }) { it.moveToFirst() }) {
                     requireBridge(cursor.getString(0) == digest, "Command ID reused with different payload")
                     val cached = if (cursor.isNull(1)) Results.error(id, "AMBIGUOUS_STATE", "Command already started; replay refused") else JSONObject(cursor.getString(1))
                     db.setTransactionSuccessful()
@@ -53,17 +54,25 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
                 if (remaining >= 2048) failure("QUEUE_FULL", "Result cache full; command was not executed")
             }
             val result = if (expires <= now) Results.error(id, "EXPIRED", "Command expired before execution") else null
-            db.insertOrThrow("commands", null, ContentValues().apply {
+            boundary.prepared({ ContentValues().apply {
                 put("id", id); put("fingerprint", digest); put("expires", expires); put("created", now)
                 if (result != null) put("result", result.toString()) else putNull("result")
-            })
+            } }) { values -> db.insertOrThrow("commands", null, values) }
             db.setTransactionSuccessful()
             return result
         } finally { db.endTransaction() }
     }
-    @Synchronized fun complete(id: String, result: JSONObject) {
-        requireBridge(result.toString().toByteArray().size <= 120000, "Result exceeds transport bound")
-        check(writableDatabase.update("commands", ContentValues().apply { put("result", result.toString()) }, "id=? AND result IS NULL", arrayOf(id)) == 1)
+    @Synchronized fun complete(id: String, result: JSONObject, op: String? = null, sinks: CommandSinks? = null) {
+        val boundary = if (op?.startsWith("screen.") == true && result.optBoolean("ok", false)) sinks ?: failure("PERMISSION_REQUIRED", "Screen persistence requires current debug authorization") else CommandSinks()
+        PayloadBounds.validateResult(result, op)
+        val text = result.toString()
+        writableDatabase.compileStatement("UPDATE commands SET result=? WHERE id=? AND result IS NULL").use { statement ->
+            boundary.prepared({
+                statement.bindString(1, text)
+                statement.bindString(2, id)
+                statement
+            }) { prepared -> check(prepared.executeUpdateDelete() == 1) }
+        }
     }
     @Synchronized fun results(): List<JSONObject> = readableDatabase.query("commands", arrayOf("result"), "result IS NOT NULL", null, null, null, "created DESC", "2048").use { cursor ->
         buildList { while (cursor.moveToNext()) add(JSONObject(cursor.getString(0))) }

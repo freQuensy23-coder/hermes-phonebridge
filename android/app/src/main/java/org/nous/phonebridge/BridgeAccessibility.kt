@@ -2,6 +2,7 @@ package org.nous.phonebridge
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
@@ -20,24 +21,34 @@ import java.util.concurrent.atomic.AtomicLong
 class BridgeAccessibility : AccessibilityService() {
     val revision = AtomicLong(0)
     override fun onServiceConnected() {
+        DebugAccess.revoke()
         current = this
         BridgeService.refresh()
     }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) { revision.incrementAndGet() }
-    override fun onInterrupt() { revision.incrementAndGet() }
+    override fun onInterrupt() { revision.incrementAndGet(); DebugAccess.revoke() }
+    override fun onUnbind(intent: Intent?): Boolean {
+        if (current === this) current = null
+        DebugAccess.revoke()
+        return super.onUnbind(intent)
+    }
     override fun onDestroy() {
         if (current === this) current = null
-        BridgeService.refresh()
+        DebugAccess.revoke()
         super.onDestroy()
     }
     fun root(expected: String? = null): AccessibilityNodeInfo {
         Access.unlocked(this)
         val root = rootInActiveWindow ?: failure("FOREGROUND_REQUIRED", "No accessible active window")
         val pkg = root.packageName?.toString() ?: failure("UNSUPPORTED", "Unknown active package")
-        if (pkg in blockedPackages) failure("UNSUPPORTED", "Credential and lock screens are excluded")
+        if (blocked(pkg)) failure("UNSUPPORTED", "PhoneBridge, permission, credential and lock screens are excluded")
         if (expected != null && pkg != expected) failure("FOREGROUND_REQUIRED", "Active package changed; expected $expected")
         return root
     }
+    private val permissionControllerPackage by lazy {
+        packageManager.resolveActivity(Intent("android.intent.action.MANAGE_PERMISSIONS"), android.content.pm.PackageManager.MATCH_SYSTEM_ONLY)?.activityInfo?.packageName
+    }
+    private fun blocked(pkg: String) = pkg == packageName || pkg == permissionControllerPackage || pkg in blockedPackages || pkg.endsWith(".permissioncontroller") || pkg.endsWith(".packageinstaller") || pkg.endsWith(".credentialmanager")
     fun nodes(root: AccessibilityNodeInfo, includePasswords: Boolean = false): List<AccessibilityNodeInfo> {
         val result = ArrayList<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
@@ -54,14 +65,27 @@ class BridgeAccessibility : AccessibilityService() {
         assertSafeWindow(root)
         return root
     }
-    private fun assertSafeWindow(root: AccessibilityNodeInfo) {
-        var count = 0
-        fun visit(node: AccessibilityNodeInfo, depth: Int) {
-            if (depth > 30 || ++count > 400 || node.childCount > 100) failure("UNSUPPORTED", "Window exceeds complete password-guard traversal bound")
-            if (node.isPassword) failure("UNSUPPORTED", "Input and gestures on password-bearing windows are excluded")
-            for (index in 0 until node.childCount) node.getChild(index)?.let { visit(it, depth + 1) }
+    private val remoteNodeAdapter = object : RemoteWindowNodeAdapter<AccessibilityNodeInfo> {
+        override fun windowId(node: AccessibilityNodeInfo) = node.windowId
+        override fun owner(node: AccessibilityNodeInfo) = node.packageName?.toString()
+        override fun isPassword(node: AccessibilityNodeInfo) = node.isPassword
+        override fun childCount(node: AccessibilityNodeInfo) = node.childCount
+        override fun child(node: AccessibilityNodeInfo, index: Int) = node.getChild(index)
+    }
+    private fun assertSafeWindow(root: AccessibilityNodeInfo) = RemoteWindowPolicy.assertSafeWindow(root, remoteNodeAdapter)
+    private fun remoteRoot(expected: String? = null): RemoteWindowTarget<AccessibilityNodeInfo> {
+        if (MainActivity.resumed) failure("UNSUPPORTED", "PhoneBridge consent/settings UI cannot be remotely controlled")
+        val root = root(expected)
+        val snapshot = windows.map { window ->
+            val bounds = Rect().also { window.getBoundsInScreen(it) }
+            val kind = when (window.type) {
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> RemoteWindowKind.APPLICATION
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM -> RemoteWindowKind.SYSTEM
+                else -> RemoteWindowKind.OTHER
+            }
+            RemoteWindowSnapshot(window.id, kind, window.isActive, window.isFocused, RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), window.root)
         }
-        visit(root, 0)
+        return RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked)
     }
     fun exact(root: AccessibilityNodeInfo, id: String, text: String? = null): AccessibilityNodeInfo {
         val matches = nodes(root).filter { it.viewIdResourceName == id && (text == null || it.text?.toString() == text) && it.isVisibleToUser }
@@ -72,12 +96,20 @@ class BridgeAccessibility : AccessibilityService() {
         if (node.isPassword || !node.isVisibleToUser || !node.isEnabled || !node.isClickable) failure("UNSUPPORTED", "Node is not safely clickable")
         if (!node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) failure("UNSUPPORTED", "Accessibility click refused")
     }
+    private fun <T> screenCall(session: String, block: () -> T): T = UiThread.call { DebugAccess.withSession(session, block) }
+    private val debugSessions = object : DebugSessions {
+        override fun <T> withSession(expected: String?, block: () -> T): T = DebugAccess.withSession(expected ?: "", block)
+    }
     fun handle(op: String, args: Arguments): JSONObject {
-        return when (op) {
+        val session = DebugArguments.session(args)
+        DebugAccess.check(session)
+        val guard = ExecutionGuard.snapshot()
+        val effects = ExecutionGuard.snapshotSinks(debugSessions, session) { Access.unlocked(this) }
+        val result = when (op) {
             "screen.tree" -> {
-                args.only("expected_package")
-                UiThread.call {
-                    val root = root(args.string("expected_package", 256, false))
+                args.only("debug_session", "expected_package")
+                screenCall(session) {
+                    val root = remoteRoot(args.string("expected_package", 256, false)).root
                     val result = JSONArray()
                     for (node in nodes(root)) {
                         val bounds = Rect().also { node.getBoundsInScreen(it) }
@@ -85,31 +117,34 @@ class BridgeAccessibility : AccessibilityService() {
                         if (result.length() >= 48 || result.toString().toByteArray().size + value.toString().toByteArray().size > 24000) break
                         result.put(value)
                     }
+                    guard()
                     JSONObject().put("package", root.packageName).put("revision", revision.get()).put("nodes", result).put("bounded", true).put("password_nodes_excluded", true).put("untrusted", true)
                 }
             }
             "screen.input" -> {
-                args.only("expected_package", "resource_id", "expected_text", "text")
+                args.only("debug_session", "expected_package", "resource_id", "expected_text", "text")
                 val pkg = args.string("expected_package", 256)!!
                 val id = args.string("resource_id", 256)!!
                 val text = args.string("text", 4096)!!
-                UiThread.call {
-                    val node = exact(safeRoot(pkg), id, args.string("expected_text", 4096, false))
+                screenCall(session) {
+                    val node = exact(remoteRoot(pkg).root, id, args.string("expected_text", 4096, false))
                     if (!node.isEditable || !node.isEnabled) failure("UNSUPPORTED", "Node does not accept text")
-                    val accepted = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) })
+                    val accepted = effects.prepared({ Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) } }) { arguments ->
+                        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+                    }
                     if (!accepted) failure("UNSUPPORTED", "Text action refused")
                 }
                 var verified = false
                 for (attempt in 0 until 10) {
-                    verified = UiThread.call { exact(safeRoot(pkg), id).text?.toString() == text }
+                    verified = screenCall(session) { exact(remoteRoot(pkg).root, id).text?.toString() == text }
                     if (verified) break
                     Thread.sleep(100)
                 }
                 JSONObject().put("outcome", if (verified) "changed" else "dispatched").put("verified", verified)
             }
-            "screen.tap", "screen.swipe" -> gesture(op, args)
+            "screen.tap", "screen.swipe" -> gesture(op, args, session, guard, effects)
             "screen.global" -> {
-                args.only("action")
+                args.only("debug_session", "action")
                 val action = when (args.string("action", 32)) {
                     "back" -> GLOBAL_ACTION_BACK
                     "home" -> GLOBAL_ACTION_HOME
@@ -118,87 +153,120 @@ class BridgeAccessibility : AccessibilityService() {
                     "quick_settings" -> GLOBAL_ACTION_QUICK_SETTINGS
                     else -> failure("VALIDATION_ERROR", "Global action is not allowlisted")
                 }
-                UiThread.call {
-                    val root = root()
-                    assertSafeWindow(root)
-                    if (!performGlobalAction(action)) failure("UNSUPPORTED", "Global action refused")
+                screenCall(session) {
+                    remoteRoot()
+                    if (!effects.prepared({ action }) { performGlobalAction(it) }) failure("UNSUPPORTED", "Global action refused")
                     JSONObject().put("outcome", "dispatched").put("verified", false)
                 }
             }
-            "screen.screenshot" -> screenshot(args)
+            "screen.screenshot" -> screenshot(args, session, guard, effects)
             else -> failure("UNSUPPORTED", "Unknown screen operation")
         }
+        guard()
+        return DebugAccess.withSession(session) { result }
     }
-    private fun gesture(op: String, args: Arguments): JSONObject {
-        args.only("expected_package", "x", "y", "x1", "y1", "x2", "y2", "duration_ms")
+    private fun gesture(op: String, args: Arguments, session: String, guard: () -> Unit, effects: CommandSinks): JSONObject {
+        args.only("debug_session", "expected_package", "x", "y", "x1", "y1", "x2", "y2", "duration_ms")
         val pkg = args.string("expected_package", 256)!!
         val completed = CountDownLatch(1)
         var accepted = false
-        UiThread.call {
-            val root = safeRoot(pkg)
-            val bounds = Rect().also { root.getBoundsInScreen(it) }
-            requireBridge(bounds.width() > 0 && bounds.height() > 0, "Empty screen bounds")
-            val path = Path()
-            val duration: Int
-            if (op == "screen.tap") {
-                path.moveTo(args.int("x", bounds.left, bounds.right - 1).toFloat(), args.int("y", bounds.top, bounds.bottom - 1).toFloat())
-                duration = 70
-            } else {
-                path.moveTo(args.int("x1", bounds.left, bounds.right - 1).toFloat(), args.int("y1", bounds.top, bounds.bottom - 1).toFloat())
-                path.lineTo(args.int("x2", bounds.left, bounds.right - 1).toFloat(), args.int("y2", bounds.top, bounds.bottom - 1).toFloat())
-                duration = args.int("duration_ms", 100, 2000, 400)
+        val flight = DebugAccess.flight(session)
+        try {
+            screenCall(session) {
+                val target = remoteRoot(pkg)
+                val bounds = Rect().also { target.root.getBoundsInScreen(it) }
+                requireBridge(bounds.width() > 0 && bounds.height() > 0, "Empty screen bounds")
+                if (!target.bounds.contains(RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom))) failure("AMBIGUOUS_STATE", "Gesture root extends outside the selected native window")
+                val path = Path()
+                val duration: Int
+                if (op == "screen.tap") {
+                    path.moveTo(args.int("x", bounds.left, bounds.right - 1).toFloat(), args.int("y", bounds.top, bounds.bottom - 1).toFloat())
+                    duration = 70
+                } else {
+                    path.moveTo(args.int("x1", bounds.left, bounds.right - 1).toFloat(), args.int("y1", bounds.top, bounds.bottom - 1).toFloat())
+                    path.lineTo(args.int("x2", bounds.left, bounds.right - 1).toFloat(), args.int("y2", bounds.top, bounds.bottom - 1).toFloat())
+                    duration = args.int("duration_ms", 100, 2000, 400)
+                }
+                val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration.toLong())).build()
+                flight.effect {
+                    val dispatched = effects.prepared({
+                        object : GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) { accepted = true; completed.countDown() }
+                            override fun onCancelled(gestureDescription: GestureDescription?) { completed.countDown() }
+                        }
+                    }) { callback -> dispatchGesture(gesture, callback, null) }
+                    if (!dispatched) failure("UNSUPPORTED", "Gesture dispatch refused")
+                }
             }
-            val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration.toLong())).build()
-            if (!dispatchGesture(gesture, object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) { accepted = true; completed.countDown() }
-                override fun onCancelled(gestureDescription: GestureDescription?) { completed.countDown() }
-            }, null)) failure("UNSUPPORTED", "Gesture dispatch refused")
-        }
-        if (!completed.await(4, TimeUnit.SECONDS)) failure("AMBIGUOUS_STATE", "Gesture callback timed out; no retry")
-        return JSONObject().put("outcome", "dispatched").put("gesture_completed", accepted).put("verified", false)
+            if (!completed.await(4, TimeUnit.SECONDS)) failure("AMBIGUOUS_STATE", "Gesture callback timed out; no retry")
+            guard()
+            return DebugAccess.withSession(session) { JSONObject().put("outcome", "dispatched").put("gesture_completed", accepted).put("verified", false) }
+        } finally { flight.cancel() }
     }
-    private fun screenshot(args: Arguments): JSONObject {
-        args.only("expected_package")
+    private fun screenshot(args: Arguments, session: String, guard: () -> Unit, effects: CommandSinks): JSONObject {
+        args.only("debug_session", "expected_package")
         if (Build.VERSION.SDK_INT < 34) failure("UNSUPPORTED", "Secure-window-aware screenshots require Android 14 or newer")
         val expected = args.string("expected_package", 256)!!
         val latch = CountDownLatch(1)
+        val flight = DebugAccess.flight(session)
         var image: JSONObject? = null
         var error: BridgeFailure? = null
-        UiThread.call {
-            val root = safeRoot(expected)
-            val window = windows.singleOrNull { it.id == root.windowId && it.isActive } ?: failure("UNSUPPORTED", "No unique active window")
-            val initialRevision = revision.get()
-            takeScreenshotOfWindow(window.id, mainExecutor, object : TakeScreenshotCallback {
-                override fun onSuccess(result: ScreenshotResult) {
-                    val buffer = result.hardwareBuffer
-                    try {
-                        Access.unlocked(this@BridgeAccessibility)
-                        if (revision.get() != initialRevision || rootInActiveWindow?.packageName?.toString() != expected) failure("AMBIGUOUS_STATE", "Screen changed during capture; image discarded")
-                        val original = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace) ?: failure("UNSUPPORTED", "Cannot decode screenshot")
-                        try {
-                            val scale = minOf(1.0, 240.0 / maxOf(original.width, original.height))
-                            val bitmap = Bitmap.createScaledBitmap(original, (original.width * scale).toInt().coerceAtLeast(1), (original.height * scale).toInt().coerceAtLeast(1), true)
+        try {
+            screenCall(session) {
+                val target = remoteRoot(expected)
+                val bounds = Rect(target.bounds.left, target.bounds.top, target.bounds.right, target.bounds.bottom)
+                val initialRevision = revision.get()
+                val windowId = target.windowId
+                val executor = mainExecutor
+                flight.effect {
+                    effects.prepared({ object : TakeScreenshotCallback {
+                        override fun onSuccess(result: ScreenshotResult) {
+                            val buffer = result.hardwareBuffer
                             try {
-                                val bytes = ByteArrayOutputStream()
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 35, bytes)
-                                if (bytes.size() > 10000) failure("UNSUPPORTED", "Screenshot exceeds bounded payload")
-                                image = JSONObject().put("mime", "image/jpeg").put("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)).put("width", bitmap.width).put("height", bitmap.height).put("package", expected).put("secure_window_guard", "platform_window_capture")
-                            } finally { if (bitmap !== original) bitmap.recycle() }
-                        } finally { original.recycle() }
-                    } catch (e: BridgeFailure) { error = e } catch (_: Exception) { error = BridgeFailure("UNSUPPORTED", "Screenshot conversion unavailable") } finally { buffer.close(); latch.countDown() }
+                                guard()
+                                DebugAccess.withSession(session) {
+                                    val fresh = remoteRoot(expected)
+                                    if (revision.get() != initialRevision || fresh.windowId != target.windowId || fresh.owner != target.owner || fresh.bounds != target.bounds) failure("AMBIGUOUS_STATE", "Screen changed during capture; image discarded")
+                                }
+                                val hardware = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace) ?: failure("UNSUPPORTED", "Cannot decode screenshot")
+                                val software = try { hardware.copy(Bitmap.Config.ARGB_8888, false) ?: failure("UNSUPPORTED", "Cannot copy screenshot") } finally { hardware.recycle() }
+                                val encoded = try { encodeScreenshot(software, bounds, expected) } finally { software.recycle() }
+                                guard()
+                                DebugAccess.withSession(session) {
+                                    val fresh = remoteRoot(expected)
+                                    if (revision.get() != initialRevision || fresh.windowId != target.windowId || fresh.owner != target.owner || fresh.bounds != target.bounds) failure("AMBIGUOUS_STATE", "Screen changed during encoding; image discarded")
+                                    flight.deliver { image = encoded }
+                                }
+                            } catch (e: BridgeFailure) { error = e } catch (_: Exception) { error = BridgeFailure("UNSUPPORTED", "Screenshot conversion unavailable") } finally { buffer.close(); latch.countDown() }
+                        }
+                        override fun onFailure(errorCode: Int) {
+                            error = BridgeFailure("UNSUPPORTED", "Platform refused window screenshot ($errorCode); secure windows are excluded")
+                            latch.countDown()
+                        }
+                    } }) { callback -> takeScreenshotOfWindow(windowId, executor, callback) }
                 }
-                override fun onFailure(errorCode: Int) {
-                    error = BridgeFailure("UNSUPPORTED", "Platform refused window screenshot ($errorCode); secure windows are excluded")
-                    latch.countDown()
-                }
-            })
-        }
-        if (!latch.await(8, TimeUnit.SECONDS)) failure("AMBIGUOUS_STATE", "Screenshot timed out")
-        error?.let { throw it }
-        return image ?: failure("UNSUPPORTED", "No screenshot")
+            }
+            if (!latch.await(8, TimeUnit.SECONDS)) failure("AMBIGUOUS_STATE", "Screenshot timed out; no retry")
+            guard()
+            return DebugAccess.withSession(session) { error?.let { throw it }; image ?: failure("UNSUPPORTED", "No screenshot") }
+        } finally { flight.cancel() }
+    }
+    private fun encodeScreenshot(original: Bitmap, bounds: Rect, expected: String): JSONObject {
+        val scale = minOf(1.0, 1280.0 / maxOf(original.width, original.height))
+        val bitmap = Bitmap.createScaledBitmap(original, (original.width * scale).toInt().coerceAtLeast(1), (original.height * scale).toInt().coerceAtLeast(1), true)
+        try {
+            var bytes: ByteArray? = null
+            for (quality in listOf(85, 75, 65, 55, 45, 35)) {
+                val output = ByteArrayOutputStream()
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)) failure("UNSUPPORTED", "JPEG encoder refused screenshot")
+                if (output.size() <= PayloadBounds.SCREENSHOT_JPEG_BYTES) { bytes = output.toByteArray(); break }
+            }
+            val jpeg = bytes ?: failure("UNSUPPORTED", "Readable screenshot cannot fit the bounded JPEG budget")
+            return JSONObject().put("mime", "image/jpeg").put("base64", Base64.encodeToString(jpeg, Base64.NO_WRAP)).put("width", bitmap.width).put("height", bitmap.height).put("screen_bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom))).put("window_bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom))).put("package", expected).put("secure_window_guard", "platform_window_capture")
+        } finally { if (bitmap !== original) bitmap.recycle() }
     }
     companion object {
         @Volatile var current: BridgeAccessibility? = null
-        val blockedPackages = setOf("com.android.systemui", "com.android.settings", "com.google.android.gms", "com.samsung.android.biometrics.app.setting")
+        val blockedPackages = setOf("com.android.systemui", "com.android.settings", "com.google.android.gms", "com.samsung.android.biometrics.app.setting", "com.android.permissioncontroller", "com.google.android.permissioncontroller", "com.samsung.android.permissioncontroller", "com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.credentials", "com.android.credentialmanager", "com.samsung.android.settings", "com.samsung.android.knox.containeragent")
     }
 }

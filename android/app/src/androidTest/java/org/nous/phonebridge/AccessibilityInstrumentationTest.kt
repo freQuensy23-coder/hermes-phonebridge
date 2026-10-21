@@ -4,17 +4,19 @@ import android.app.UiAutomation
 import android.graphics.Rect
 import android.os.Build
 import android.os.SystemClock
-import android.text.InputType
+import android.provider.Settings
 import android.widget.EditText
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONObject
-import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestRule
 import org.junit.runner.RunWith
+import org.junit.runners.model.Statement
 
 @RunWith(AndroidJUnit4::class)
 class AccessibilityInstrumentationTest {
@@ -22,78 +24,144 @@ class AccessibilityInstrumentationTest {
     private val context = instrumentation.targetContext
     private val component = "org.nous.phonebridge/org.nous.phonebridge.BridgeAccessibility"
     private var scenario: ActivityScenario<MainActivity>? = null
-    @get:org.junit.Rule val testName = org.junit.rules.TestName()
+    private var originalServices: String? = null
+    private var originalEnabled: String? = null
+    private var settingsCaptured = false
+    private val screenOps = listOf("screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global")
+    @get:Rule val testName = org.junit.rules.TestName()
+    @get:Rule val cleanupRule = TestRule { base, _ ->
+        object : Statement() {
+            override fun evaluate() {
+                var failure: Throwable? = null
+                try { base.evaluate() } catch (error: Throwable) { failure = error }
+                val actions: List<() -> Unit> = listOf(
+                    { scenario?.close(); scenario = null },
+                    { BridgeService.stop(context, true) },
+                    { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0") },
+                    { if (settingsCaptured) waitUntil("service-cleanup") { BridgeAccessibility.current == null } },
+                    { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, originalServices) },
+                    { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, originalEnabled) },
+                    { ForegroundFixture.wake() }
+                )
+                for (action in actions) {
+                    try { action() } catch (error: Throwable) {
+                        if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
+                    }
+                }
+                failure?.let { throw it }
+            }
+        }
+    }
     private fun shell(command: String) = ForegroundFixture.shell(command)
     private fun waitUntil(phase: String, predicate: () -> Boolean) = ForegroundFixture.waitUntil("${testName.methodName}-$phase", 15000, predicate)
+    private fun quote(value: String) = "'${value.replace("'", "'\\''")}'"
+    private fun restoreSetting(key: String, value: String?) {
+        shell(if (value == null) "settings delete secure $key" else "settings put secure $key ${quote(value)}")
+        waitUntil("setting-$key") { Settings.Secure.getString(context.contentResolver, key) == value }
+    }
+    private fun refused(code: String, block: () -> Unit) {
+        try { block(); fail("Expected $code refusal") } catch (error: BridgeFailure) { assertEquals(code, error.code) }
+    }
+    private fun assertDebugOff(handlers: NativeHandlers) {
+        val status = handlers.execute("debug.status", JSONObject())
+        assertTrue(status.getBoolean("experimental"))
+        assertFalse(status.getBoolean("enabled"))
+        assertTrue(status.has("debug_session") && status.isNull("debug_session"))
+        assertEquals(0, status.getInt("remaining_seconds"))
+        assertEquals(Build.VERSION.SDK_INT >= 34 && BridgeAccessibility.current != null, status.getBoolean("screenshot_supported"))
+        val advertised = Access.capabilities(context)
+        val capabilities = (0 until advertised.length()).map { advertised.getString(it) }.toSet()
+        assertTrue("debug.status" in capabilities)
+        assertTrue(capabilities.none { it.startsWith("screen.") })
+    }
+    private fun screenArgs(op: String): JSONObject = JSONObject().put("expected_package", context.packageName).apply {
+        when (op) {
+            "screen.input" -> put("resource_id", "org.nous.phonebridge:id/device_name").put("text", "Must not change")
+            "screen.tap" -> put("x", 10).put("y", 10)
+            "screen.swipe" -> put("x1", 10).put("y1", 100).put("x2", 10).put("y2", 10).put("duration_ms", 400)
+            "screen.global" -> { remove("expected_package"); put("action", "unlock") }
+        }
+    }
     @Before fun setup() {
+        originalServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        originalEnabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED)
+        settingsCaptured = true
         BridgeService.stop(context, true)
-        shell("settings put secure enabled_accessibility_services null")
-        shell("settings put secure accessibility_enabled 0")
+        restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0")
+        restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
         waitUntil("service-disconnected") { BridgeAccessibility.current == null }
         ForegroundFixture.prepare(testName.methodName)
         scenario = ActivityScenario.launch(MainActivity::class.java)
         waitUntil("activity-focused") { ForegroundFixture.focused() }
     }
-    @After fun cleanup() {
-        try {
-            scenario?.close()
-        } finally {
-            scenario = null
-            try {
-                shell("settings put secure enabled_accessibility_services null")
-                shell("settings put secure accessibility_enabled 0")
-                waitUntil("service-cleanup") { BridgeAccessibility.current == null }
-            } finally {
-                BridgeService.stop(context, true)
-                ForegroundFixture.wake()
+    @Test fun optionalAccessibilityGrantRevokePreservesDebugOffAndUnknownClockGuards() {
+        DurableStore(context).use { store ->
+            val handlers = NativeHandlers(context, store)
+            assertFalse(Access.permissions(context).getBoolean("accessibility"))
+            assertDebugOff(handlers)
+            for (op in screenOps) {
+                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
+                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }
             }
-        }
-    }
-    @Test fun optionalAccessFreshSelectorsPasswordGuardAndSecureWindowScreenshot() {
-        DurableStore(context).use {
-            try { NativeHandlers(context, it).execute("screen.tree", JSONObject()); fail("Accessibility permission required") } catch (e: BridgeFailure) { assertEquals("PERMISSION_REQUIRED", e.code) }
-        }
-        shell("settings put secure enabled_accessibility_services $component")
-        shell("settings put secure accessibility_enabled 1")
-        waitUntil("service-connected") { BridgeAccessibility.current != null }
-        val service = BridgeAccessibility.current!!
-        for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
+            restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, component)
+            restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "1")
+            waitUntil("service-connected") { BridgeAccessibility.current != null }
+            val service = BridgeAccessibility.current!!
+            assertTrue(Access.permissions(context).getBoolean("accessibility"))
+            assertDebugOff(handlers)
+            for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
+                for (op in AospClockAdapter.operations) {
+                    refused("UNSUPPORTED") { adapter.execute(service, op, Arguments(JSONObject())) }
+                }
+            }
+            val expectedClockOps = if (GoogleClockProfile.installed(context)) GoogleClockProfile.operations else emptySet()
+            assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
+            val advertised = Access.capabilities(context)
+            val capabilities = (0 until advertised.length()).map { advertised.getString(it) }.toSet()
+            for (op in AospClockAdapter.operations) assertEquals(op in expectedClockOps, op in capabilities)
+            waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
+            var originalName: String? = null
+            scenario!!.onActivity { activity -> originalName = activity.findViewById<EditText>(R.id.device_name).text.toString() }
+            for (op in screenOps) {
+                val cases = listOf(
+                    screenArgs(op) to "PERMISSION_REQUIRED",
+                    screenArgs(op).put("debug_session", JSONObject.NULL) to "PERMISSION_REQUIRED",
+                    screenArgs(op).put("debug_session", "not-a-current-session") to "PERMISSION_REQUIRED",
+                    screenArgs(op).put("debug_session", "") to "PERMISSION_REQUIRED",
+                    screenArgs(op).put("debug_session", 17) to "VALIDATION_ERROR",
+                    screenArgs(op).put("debug_session", true) to "VALIDATION_ERROR",
+                    screenArgs(op).put("debug_session", JSONObject()) to "VALIDATION_ERROR",
+                    screenArgs(op).put("debug_session", "x".repeat(129)) to "VALIDATION_ERROR",
+                    screenArgs(op).put("debug_session", "invalid" + 0.toChar() + "session") to "VALIDATION_ERROR"
+                )
+                for ((args, code) in cases) {
+                    refused(code) { handlers.execute(op, args) }
+                    refused(code) { service.handle(op, Arguments(args)) }
+                }
+                scenario!!.onActivity { activity -> assertEquals(originalName, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
+                assertDebugOff(handlers)
+            }
+            refused("UNSUPPORTED") { UiThread.call { service.root(context.packageName) } }
+            for (op in listOf("debug.enable", "debug.renew")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
+            assertDebugOff(handlers)
+            scenario!!.onActivity { activity -> assertEquals(originalName, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
+            restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0")
+            restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
+            waitUntil("service-revoked") { BridgeAccessibility.current == null }
+            assertFalse(Access.permissions(context).getBoolean("accessibility"))
+            assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
             for (op in AospClockAdapter.operations) {
-                try { adapter.execute(service, op, Arguments(JSONObject())); fail("Unidentified clock profile must refuse every UI operation") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
+                refused("PERMISSION_REQUIRED") { ClockAdapters(context).execute(op, Arguments(JSONObject())) }
             }
+            val revoked = Access.capabilities(context)
+            val revokedCapabilities = (0 until revoked.length()).map { revoked.getString(it) }.toSet()
+            for (op in AospClockAdapter.operations) assertFalse(op in revokedCapabilities)
+            for (op in screenOps) {
+                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", "not-a-current-session")) }
+                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }
+            }
+            assertDebugOff(handlers)
         }
-        val expectedClockOps = if (GoogleClockProfile.installed(context)) GoogleClockProfile.operations else emptySet()
-        assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
-        for (op in AospClockAdapter.operations) assertEquals(op in expectedClockOps, Access.capabilities(context).toString().contains(op))
-        waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
-        val expected = JSONObject().put("expected_package", context.packageName)
-        val initial = service.handle("screen.tree", Arguments(expected))
-        assertEquals(context.packageName, initial.getString("package"))
-        assertTrue(initial.getBoolean("password_nodes_excluded"))
-        assertTrue(initial.getJSONArray("nodes").length() > 0)
-        val resource = "org.nous.phonebridge:id/device_name"
-        val input = expected.toString().let { JSONObject(it) }.put("resource_id", resource).put("text", "CI readback")
-        val result = service.handle("screen.input", Arguments(input))
-        assertTrue(result.getBoolean("verified"))
-        scenario!!.onActivity { activity -> assertEquals("CI readback", activity.findViewById<EditText>(R.id.device_name).text.toString()) }
-        scenario!!.onActivity { activity ->
-            val field = activity.findViewById<EditText>(R.id.device_name)
-            field.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            field.setText("CI password must not appear")
-        }
-        waitUntil("password-visible") { UiThread.call { service.nodes(service.root(), true).any { it.isPassword } } }
-        val redacted = service.handle("screen.tree", Arguments(expected))
-        assertFalse(redacted.toString().contains("CI password must not appear"))
-        try { service.handle("screen.input", Arguments(input)); fail("Password window input must be rejected") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
-        val tap = JSONObject(expected.toString()).put("x", 10).put("y", 10)
-        try { service.handle("screen.tap", Arguments(tap)); fail("Password window gestures must be rejected") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
-        scenario!!.onActivity { activity -> activity.findViewById<EditText>(R.id.device_name).apply { inputType = InputType.TYPE_CLASS_TEXT; setText("CI ordinary field") } }
-        waitUntil("password-cleared") { UiThread.call { service.nodes(service.root(), true).none { it.isPassword } } }
-        try { service.handle("screen.screenshot", Arguments(expected)); fail("FLAG_SECURE screenshot or pre-34 capture must be rejected") } catch (e: BridgeFailure) { assertTrue(e.code in setOf("UNSUPPORTED", "AMBIGUOUS_STATE")) }
-        val wrong = JSONObject().put("expected_package", "com.example.unexpected")
-        try { service.handle("screen.tree", Arguments(wrong)); fail("Changed package must be refused") } catch (e: BridgeFailure) { assertEquals("FOREGROUND_REQUIRED", e.code) }
-        try { service.handle("screen.global", Arguments(JSONObject().put("action", "unlock"))); fail("No keyguard bypass global action") } catch (e: BridgeFailure) { assertEquals("VALIDATION_ERROR", e.code) }
-        assertEquals(Build.VERSION.SDK_INT >= 34, Access.capabilities(context).toString().contains("screen.screenshot"))
     }
 }
 

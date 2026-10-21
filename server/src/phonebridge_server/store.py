@@ -8,14 +8,19 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from .protocol import (
+    IDENTIFIER_PATTERN,
+    MAX_RESULT_DATA_BYTES,
+    MAX_RESULT_STRING_CHARS,
     NATIVE_CLOCK_OPERATIONS,
     OPERATIONS,
     PACKAGE_PATTERN,
+    SCREEN_OPERATIONS,
     BridgeError,
     digest,
     encode_json,
     fingerprint,
     validate_json,
+    validate_screenshot_data,
 )
 
 
@@ -146,10 +151,12 @@ class Store:
                 self.connection.execute("ROLLBACK")
                 raise
 
-    def _bounded(self, value, maximum=None):
+    def _bounded(self, value, maximum=None, string_limit=None):
+        if string_limit is None:
+            string_limit = self.settings.max_json_bytes if maximum is None else 16384
         try:
             validate_json(value, min(maximum or self.settings.max_json_bytes, self.settings.max_json_bytes),
-                          self.settings.max_json_bytes if maximum is None else 16384)
+                          string_limit)
         except (ValueError, UnicodeError) as error:
             raise BridgeError("VALIDATION_ERROR", "JSON data limit exceeded", 422) from error
 
@@ -330,6 +337,10 @@ class Store:
 
     def enqueue(self, device_id, request):
         self._bounded(request.args, 32768)
+        if request.op in SCREEN_OPERATIONS:
+            debug_session = request.args.get("debug_session")
+            if not isinstance(debug_session, str) or not IDENTIFIER_PATTERN.fullmatch(debug_session):
+                raise BridgeError("VALIDATION_ERROR", "Screen commands require a bounded debug_session identifier", 422)
         now = int(self.clock())
         request_hash = fingerprint({"op": request.op, "args": request.args, "ttl_seconds": request.ttl_seconds})
         with self.transaction() as db:
@@ -397,14 +408,14 @@ class Store:
 
     def result(self, device_id, session_id, frame):
         if frame.data is not None:
-            self._bounded(frame.data)
+            self._bounded(frame.data, MAX_RESULT_DATA_BYTES, MAX_RESULT_STRING_CHARS)
         if (frame.ok and frame.error is not None) or (not frame.ok and (frame.error is None or frame.data is not None)):
             raise BridgeError("INVALID_RESULT", "Result success and error fields disagree", 422)
         data = dict(frame.data) if frame.data is not None else None
         if data is not None and data.get("outcome") == "dispatched":
             data["verified"] = False
         if data is not None:
-            self._bounded(data)
+            self._bounded(data, MAX_RESULT_DATA_BYTES, MAX_RESULT_STRING_CHARS)
         now = int(self.clock())
         with self.transaction() as db:
             self._expire(db)
@@ -412,13 +423,18 @@ class Store:
             row = db.execute("SELECT * FROM commands WHERE id=?", (frame.id,)).fetchone()
             if row is None or row["device_id"] != device_id:
                 raise BridgeError("RESULT_OWNERSHIP", "Result has no command owned by this device", 403)
+            if frame.ok and row["op"] == "screen.screenshot":
+                try:
+                    validate_screenshot_data(data)
+                except ValueError as error:
+                    raise BridgeError("INVALID_RESULT", "Invalid or oversized JPEG screenshot", 422) from error
             if frame.ok and row["op"] in NATIVE_CLOCK_OPERATIONS:
                 package = data.get("package") if data is not None else None
                 if not isinstance(package, str) or len(package) > 255 or not PACKAGE_PATTERN.fullmatch(package):
                     raise BridgeError("INVALID_RESULT", "Native clock dispatch requires its resolved package", 422)
                 data["outcome"] = "dispatched"
                 data["verified"] = False
-                self._bounded(data)
+                self._bounded(data, MAX_RESULT_DATA_BYTES, MAX_RESULT_STRING_CHARS)
             result_hash = fingerprint({"ok": frame.ok, "data": data,
                                        "error": frame.error.model_dump() if frame.error else None})
             if row["status"] in ("succeeded", "failed"):

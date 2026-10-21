@@ -83,24 +83,50 @@ fun calendarDays(days: JSONArray): IntArray {
 }
 
 object PayloadBounds {
-    fun validate(value: Any?, maxBytes: Int = 32768) {
+    const val SCREENSHOT_RESULT_BYTES = 384 * 1024
+    const val SCREENSHOT_JPEG_BYTES = 240 * 1024
+
+    fun validate(value: Any?, maxBytes: Int = 32768) = validateBounded(value, maxBytes, false)
+
+    fun validateResult(frame: JSONObject, op: String? = null) {
+        val screenshot = op == "screen.screenshot" && frame.optBoolean("ok", false)
+        if (screenshot) {
+            val data = frame.getJSONObject("data")
+            requireBridge(data.optString("mime") == "image/jpeg", "Invalid screenshot MIME")
+            Arguments(data).int("width", 1, 1280)
+            Arguments(data).int("height", 1, 1280)
+            val bounds = data.optJSONArray("screen_bounds") ?: failure("VALIDATION_ERROR", "Missing native screen_bounds")
+            requireBridge(bounds.length() == 4, "Invalid native screen_bounds")
+            val coordinates = (0..3).map { Arguments(JSONObject().put("coordinate", bounds.get(it))).int("coordinate", -100000, 100000) }
+            requireBridge(coordinates[2] > coordinates[0] && coordinates[3] > coordinates[1], "Empty native screen_bounds")
+            val encoded = Arguments(data).string("base64", 327680)!!
+            requireBridge(encoded.isNotEmpty() && encoded.length % 4 == 0 && encoded.matches(Regex("[A-Za-z0-9+/]*={0,2}")), "Invalid screenshot base64")
+            val padding = encoded.takeLast(2).count { it == '=' }
+            requireBridge(encoded.length / 4 * 3 - padding <= SCREENSHOT_JPEG_BYTES, "Screenshot JPEG exceeds bound")
+        } else if (frame.optBoolean("ok", false)) {
+            validate(frame.getJSONObject("data"))
+        }
+        validateBounded(frame, if (screenshot) SCREENSHOT_RESULT_BYTES else 120000, screenshot)
+    }
+
+    private fun validateBounded(value: Any?, maxBytes: Int, screenshot: Boolean) {
         var remaining = 2048
-        fun visit(item: Any?, depth: Int) {
+        fun visit(item: Any?, depth: Int, path: List<String>) {
             requireBridge(depth <= 12 && --remaining >= 0, "JSON nesting or item bound exceeded")
             when (item) {
                 is JSONObject -> {
                     requireBridge(item.length() <= 128, "JSON object bound exceeded")
-                    item.keys().forEach { key -> requireBridge(key.length <= 128, "JSON key bound exceeded"); visit(item.get(key), depth + 1) }
+                    item.keys().forEach { key -> requireBridge(key.length <= 128, "JSON key bound exceeded"); visit(item.get(key), depth + 1, path + key) }
                 }
                 is JSONArray -> {
                     requireBridge(item.length() <= 512, "JSON array bound exceeded")
-                    for (index in 0 until item.length()) visit(item.get(index), depth + 1)
+                    for (index in 0 until item.length()) visit(item.get(index), depth + 1, path + index.toString())
                 }
-                is String -> requireBridge(item.length <= 16384, "JSON string bound exceeded")
+                is String -> requireBridge(item.length <= if (screenshot && path == listOf("data", "base64")) 327680 else 16384, "JSON string bound exceeded")
                 is Number -> requireBridge(item.toDouble().isFinite(), "Non-finite JSON number")
             }
         }
-        visit(value, 0)
+        visit(value, 0, emptyList())
         requireBridge(value.toString().toByteArray().size <= maxBytes, "JSON byte bound exceeded")
     }
 }

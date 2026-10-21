@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">PhoneBridge</string>
-    <string name="accessibility_description">Optional remote screen reading and control. Only enable for a server you trust. Screen commands require an unlocked phone. Password fields and secure screenshots are excluded. Disable here to revoke screen control.</string>
+    <string name="accessibility_description">Optional experimental remote screen reading and control for a trusted server. Accessibility permission alone does not enable debug: confirm a timed or until-stopped session locally in PhoneBridge. Screen access requires an awake, unlocked phone. PhoneBridge consent, Android permission and credential UI, passwords and secure screenshots are excluded. Stop debug in PhoneBridge or its notification; disconnect, service loss and process restart also revoke consent.</string>
 </resources>

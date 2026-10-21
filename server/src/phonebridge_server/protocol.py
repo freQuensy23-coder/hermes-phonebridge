@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -8,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 
 
 OPERATIONS = frozenset({
-    "device.info", "capabilities", "device.capabilities",
+    "device.info", "capabilities", "device.capabilities", "debug.status",
     "notifications.list", "notifications.dismiss", "notifications.reply", "notifications.action",
     "apps.list", "apps.open", "audio.get", "audio.set", "contacts.list",
     "calendar.list", "calendar.create", "calendar.delete", "clipboard.get", "clipboard.set",
@@ -26,6 +28,12 @@ NATIVE_CLOCK_OPERATIONS = frozenset({
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
+SCREEN_OPERATIONS = frozenset({
+    "screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global",
+})
+MAX_RESULT_DATA_BYTES = 384 * 1024
+MAX_SCREENSHOT_BYTES = 240 * 1024
+MAX_RESULT_STRING_CHARS = 327680
 
 
 class BridgeError(Exception):
@@ -110,6 +118,26 @@ def decode_json(raw, max_bytes=65536, string_limit=16384):
     return value
 
 
+def validate_screenshot_data(data):
+    if not isinstance(data, dict) or data.get("mime") != "image/jpeg":
+        raise ValueError("Screenshot must be JPEG")
+    encoded = data.get("base64")
+    if not isinstance(encoded, str) or not 1 <= len(encoded) <= MAX_RESULT_STRING_CHARS:
+        raise ValueError("Screenshot base64 limit exceeded")
+    try:
+        image = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError("Invalid screenshot base64") from error
+    if (not 1 <= len(image) <= MAX_SCREENSHOT_BYTES
+            or base64.b64encode(image).decode("ascii") != encoded):
+        raise ValueError("Invalid screenshot encoding or byte limit")
+    if not image.startswith(b"\xff\xd8") or not image.endswith(b"\xff\xd9"):
+        raise ValueError("Invalid JPEG boundaries")
+    if any(type(data.get(key)) is not int or not 1 <= data[key] <= 1280 for key in ("width", "height")):
+        raise ValueError("Invalid screenshot dimensions")
+    return data
+
+
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -192,7 +220,7 @@ class ResultFrame(Model):
     @field_validator("data")
     @classmethod
     def valid_data(cls, value):
-        return validate_json(value, 524288, 524288) if value is not None else None
+        return validate_json(value, MAX_RESULT_DATA_BYTES, MAX_RESULT_STRING_CHARS) if value is not None else None
 
 
 class EventFrame(Model):

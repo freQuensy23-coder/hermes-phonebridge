@@ -29,24 +29,28 @@ import kotlin.math.min
 import kotlin.random.Random
 
 object ExecutionGuard {
-    private val active = ThreadLocal<Pair<Long, () -> Boolean>>()
-    fun install(expires: Long, permitted: () -> Boolean) { active.set(expires to permitted) }
+    private data class Guard(val expires: Long, val permitted: () -> Boolean, val debugCheck: () -> Unit, val wallSeconds: () -> Long) {
+        fun check() {
+            debugCheck()
+            if (!permitted()) failure("AMBIGUOUS_STATE", "Connection stopped or revoked during command; no retry")
+            debugCheck()
+            if (wallSeconds() >= expires) failure("EXPIRED", "Command expired before access or side effect")
+        }
+    }
+    private val active = ThreadLocal<Guard>()
+    fun install(expires: Long, debugCheck: () -> Unit = {}, wallSeconds: () -> Long = { System.currentTimeMillis() / 1000 }, permitted: () -> Boolean) { active.set(Guard(expires, permitted, debugCheck, wallSeconds)) }
     fun clear() { active.remove() }
     fun check() {
         if (Thread.currentThread().isInterrupted) failure("AMBIGUOUS_STATE", "Execution interrupted; no retry")
-        active.get()?.let { (expires, permitted) ->
-            if (!permitted()) failure("AMBIGUOUS_STATE", "Connection stopped or revoked during command")
-            if (System.currentTimeMillis() / 1000 >= expires) failure("EXPIRED", "Command expired before side effect")
-        }
+        active.get()?.check()
     }
     fun snapshot(): () -> Unit {
         val value = active.get()
-        return {
-            if (value != null) {
-                if (!value.second()) failure("AMBIGUOUS_STATE", "Connection stopped or revoked during UI action")
-                if (System.currentTimeMillis() / 1000 >= value.first) failure("EXPIRED", "Command expired before UI action")
-            }
-        }
+        return { value?.check() }
+    }
+    fun snapshotSinks(sessions: DebugSessions, session: String?, unlockedCheck: () -> Unit): CommandSinks {
+        val value = active.get() ?: failure("AMBIGUOUS_STATE", "Execution guard missing before screen effect; no retry")
+        return CommandSinks(sessions, session, { value.check() }, value.expires, value.wallSeconds, unlockedCheck)
     }
 }
 
@@ -68,18 +72,25 @@ class BridgeService : Service() {
     private var retry: java.util.concurrent.ScheduledFuture<*>? = null
     private var helloState = ""
     private val sentEvents = EventSendWindow()
-    private var pendingResults = ArrayDeque<Pair<Long, String>>()
+    private val debugSessions = object : DebugSessions {
+        override fun <T> withSession(expected: String?, block: () -> T): T = DebugAccess.withSession(expected ?: "", block)
+    }
+    private fun screenSinks(session: String?, expires: Long, execution: () -> Unit): CommandSinks = CommandSinks(debugSessions, session, execution, expires) { Access.unlocked(this) }
+    private data class PendingResult(val expires: Long, val id: String, val op: String, val session: String?, val text: String, val execution: () -> Unit = {})
+    private val pendingResults = ArrayDeque<PendingResult>()
+    private var pendingResultBytes = 0
     private var lastHello = 0L
     private var credits = 8.0
     private var creditTime = android.os.SystemClock.elapsedRealtime()
     private val network = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { scheduleNetwork() }
-        override fun onLost(network: Network) { scheduleNetwork() }
+        override fun onLost(network: Network) { DebugAccess.revoke(); scheduleNetwork() }
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) { scheduleNetwork() }
     }
     override fun onCreate() {
         super.onCreate()
         current = this
+        DebugAccess.revoke()
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "PhoneBridge connection", NotificationManager.IMPORTANCE_LOW))
         startForeground(18940, notification("Starting"))
         store.recover()
@@ -87,6 +98,11 @@ class BridgeService : Service() {
         control.scheduleWithFixedDelay({ dispatch { advertise(); flush() } }, 3, 3, TimeUnit.SECONDS)
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == STOP_DEBUG) {
+            DebugAccess.revoke()
+            if (!connected) { stopSelf(); return START_NOT_STICKY }
+            return START_STICKY
+        }
         if (intent?.action == STOP || intent?.action == DISCONNECT) {
             halt(if (intent.action == DISCONNECT) "Disconnected" else "Stopped", intent.action == DISCONNECT)
             return START_NOT_STICKY
@@ -108,6 +124,7 @@ class BridgeService : Service() {
         } catch (_: RejectedExecutionException) { }
     }
     internal fun interruptTransport() {
+        DebugAccess.revoke()
         if (!active || control.isShutdown) return
         dispatch {
             val ownEpoch = epoch
@@ -120,6 +137,7 @@ class BridgeService : Service() {
         if (!active || control.isShutdown) return
         dispatch {
             if (!hasNetwork()) {
+                DebugAccess.revoke()
                 epoch++
                 socket?.cancel()
                 socket = null
@@ -153,6 +171,7 @@ class BridgeService : Service() {
                     helloState = ""
                     sentEvents.clear()
                     pendingResults.clear()
+                    pendingResultBytes = 0
                     advertise()
                     state("Connected")
                     flush()
@@ -171,7 +190,7 @@ class BridgeService : Service() {
                             sentEvents.ack(id)
                         }
                         "command" -> accept(frame, value.deviceId)
-                        "revoked" -> dispatch { halt("Revoked by server", true) }
+                        "revoked" -> { DebugAccess.revoke(); dispatch { halt("Revoked by server", true) } }
                         "error" -> { protocolError = frame.optString("code", "INVALID_FRAME") }
                     }
                 } catch (_: Exception) { webSocket.close(1008, "Invalid frame") }
@@ -184,6 +203,7 @@ class BridgeService : Service() {
                 closed(ownEpoch, code)
             }
             private fun closed(ownEpoch: Long, code: Int) {
+                if (ownEpoch == epoch) DebugAccess.revoke()
                 dispatch {
                     if (ownEpoch != epoch) return@dispatch
                     val error = protocolError
@@ -192,12 +212,14 @@ class BridgeService : Service() {
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                if (ownEpoch == epoch) DebugAccess.revoke()
                 if (!control.isShutdown) dispatch { lost(ownEpoch, response?.code in setOf(401, 403)) }
             }
         })
     }
     private fun lost(ownEpoch: Long, revoked: Boolean) {
         if (!active || ownEpoch != epoch) return
+        DebugAccess.revoke()
         epoch++
         socket = null
         connected = false
@@ -208,47 +230,97 @@ class BridgeService : Service() {
         retry?.cancel(false)
         retry = control.schedule({ retry = null; dispatch { connect() } }, Random.nextLong(ceiling / 2, ceiling + 1), TimeUnit.MILLISECONDS)
     }
+    internal fun debugConnectionReady(): Boolean = active && connected && prefs.getBoolean("enabled", false)
     private fun accept(frame: JSONObject, deviceId: String) {
         val args = Arguments(frame)
         args.only("type", "id", "op", "args", "expires_at")
         val id = args.string("id", 128)!!
-        args.string("op", 128)
+        val op = args.string("op", 128)!!
         requireBridge(frame.opt("args") is JSONObject, "Command args must be an object")
-        args.long("expires_at", 1, Long.MAX_VALUE)
+        val expires = args.long("expires_at", 1, Long.MAX_VALUE)
+        val screen = op.startsWith("screen.")
+        val session = frame.getJSONObject("args").opt("debug_session") as? String
+        val acceptedEpoch = epoch
         try {
             commands.execute {
                 if (!active) return@execute
                 var reserved = false
-                val result = try {
-                    val cached = store.begin(frame)
-                    if (cached != null) cached else {
-                        reserved = true
-                        ExecutionGuard.install(frame.getLong("expires_at")) { active && prefs.getBoolean("enabled", false) && credentials.load()?.deviceId == deviceId }
+                var result: JSONObject
+                var execution: () -> Unit = {}
+                try {
+                    ExecutionGuard.install(expires, {
+                        if (screen) DebugAccess.check(DebugArguments.session(Arguments(frame.getJSONObject("args"))))
+                    }) { active && connected && epoch == acceptedEpoch && prefs.getBoolean("enabled", false) && credentials.load()?.deviceId == deviceId }
+                    execution = ExecutionGuard.snapshot()
+                    result = try {
                         ExecutionGuard.check()
-                        val data = NativeHandlers(this, store).execute(frame.getString("op"), frame.getJSONObject("args"))
-                        PayloadBounds.validate(data)
-                        Results.ok(id, data)
+                        val cached = store.begin(frame, if (screen) screenSinks(session, expires, execution) else null)
+                        reserved = cached == null
+                        if (cached != null && op != "debug.status") cached else {
+                            val data = NativeHandlers(this, store).execute(op, frame.getJSONObject("args"))
+                            Results.ok(id, data).also { PayloadBounds.validateResult(it, op) }
+                        }
+                    } catch (e: BridgeFailure) { Results.error(id, e.code, e.message) }
+                      catch (_: SecurityException) { Results.error(id, "PERMISSION_REQUIRED", "Android denied the operation; inspect granted permissions") }
+                      catch (_: android.content.ActivityNotFoundException) { Results.error(id, "NOT_FOUND", "Resolved activity is no longer available") }
+                      catch (_: InterruptedException) { Results.error(id, "AMBIGUOUS_STATE", "Execution interrupted; no replay") }
+                      catch (_: Exception) { Results.error(id, "AMBIGUOUS_STATE", "Native operation failed; inspect phone state before issuing a new command") }
+                    if (screen && result.optBoolean("ok", false)) {
+                        try {
+                            if (reserved && active) store.complete(id, result, op, screenSinks(session, expires, execution))
+                            reserved = false
+                        } catch (e: BridgeFailure) { result = Results.error(id, e.code, e.message) }
                     }
-                } catch (e: BridgeFailure) { Results.error(id, e.code, e.message) }
-                  catch (_: SecurityException) { Results.error(id, "PERMISSION_REQUIRED", "Android denied the operation; inspect granted permissions") }
-                  catch (_: android.content.ActivityNotFoundException) { Results.error(id, "NOT_FOUND", "Resolved activity is no longer available") }
-                  catch (_: InterruptedException) { Results.error(id, "AMBIGUOUS_STATE", "Execution interrupted; no replay") }
-                  catch (_: Exception) { Results.error(id, "AMBIGUOUS_STATE", "Native operation failed; inspect phone state before issuing a new command") }
-                  finally { ExecutionGuard.clear() }
-                if (reserved && active) {
-                    try { store.complete(id, result) } catch (_: Exception) { halt("Result persistence failed; connection stopped for safety", false); return@execute }
-                }
+                    if (reserved && active) store.complete(id, result, op)
+                } catch (_: Exception) {
+                    halt("Result persistence failed; connection stopped for safety", false)
+                    return@execute
+                } finally { ExecutionGuard.clear() }
                 if (active && !control.isShutdown) dispatch {
-                    if (pendingResults.size < 2048) pendingResults.addLast(frame.getLong("expires_at") to result.toString())
+                    enqueue(PendingResult(expires, id, op, session, result.toString(), execution))
                     flush()
                 }
             }
         } catch (_: RejectedExecutionException) {
             dispatch {
-                if (pendingResults.size < 2048) pendingResults.addLast(frame.getLong("expires_at") to Results.error(id, "QUEUE_FULL", "Serial command queue full; no execution").toString())
+                enqueue(PendingResult(expires, id, op, session, Results.error(id, "QUEUE_FULL", "Serial command queue full; no execution").toString()))
                 flush()
             }
         }
+    }
+    private fun enqueue(result: PendingResult) {
+        if (result.op.startsWith("screen.") && JSONObject(result.text).optBoolean("ok", false)) {
+            try {
+                addPending(result, screenSinks(result.session, result.expires, result.execution))
+            } catch (e: BridgeFailure) {
+                addPending(result.copy(text = Results.error(result.id, e.code, e.message).toString()))
+            }
+        } else addPending(result)
+    }
+    private fun addPending(result: PendingResult, sinks: CommandSinks = CommandSinks()) {
+        val bytes = result.text.toByteArray().size
+        if (pendingResults.size >= 2048 || pendingResultBytes + bytes > 2097152) {
+            halt("Pending result buffer full; stopped without command replay", false)
+            return
+        }
+        sinks.prepared({ bytes }) { preparedBytes ->
+            pendingResults.addLast(result)
+            pendingResultBytes += preparedBytes
+        }
+    }
+    private fun pruneDebugResults() {
+        val state = DebugAccess.snapshot()
+        val retained = pendingResults.map { pending ->
+            if (pending.op.startsWith("screen.") && (!state.enabled || state.debugSession != pending.session) && JSONObject(pending.text).optBoolean("ok", false)) {
+                pending.copy(text = Results.error(pending.id, "PERMISSION_REQUIRED", "Debug consent ended; queued screen result discarded").toString())
+            } else pending
+        }
+        pendingResults.clear()
+        pendingResults.addAll(retained)
+        pendingResultBytes = retained.sumOf { it.text.toByteArray().size }
+    }
+    private fun removePending() {
+        pendingResultBytes -= pendingResults.removeFirst().text.toByteArray().size
     }
     private fun advertise() {
         if (!connected || !active) return
@@ -272,9 +344,24 @@ class BridgeService : Service() {
         if (!active || !connected) return
         var budget = 8
         while (pendingResults.isNotEmpty() && budget-- > 0 && (socket?.queueSize() ?: Long.MAX_VALUE) < 262144) {
-            if (pendingResults.first().first <= System.currentTimeMillis() / 1000) { pendingResults.removeFirst(); continue }
-            if (!takeCredit() || socket?.send(pendingResults.first().second) != true) break
-            pendingResults.removeFirst()
+            val pending = pendingResults.first()
+            if (pending.expires <= System.currentTimeMillis() / 1000) { removePending(); continue }
+            if (!takeCredit()) break
+            val frame = JSONObject(pending.text)
+            val sent = if (pending.op.startsWith("screen.") && frame.optBoolean("ok", false)) {
+                try {
+                    screenSinks(pending.session, pending.expires, pending.execution).prepared({
+                        PayloadBounds.validateResult(frame, pending.op)
+                        pending.text
+                    }) { text -> socket?.send(text) == true }
+                } catch (e: BridgeFailure) { socket?.send(Results.error(pending.id, e.code, e.message).toString()) == true }
+            } else {
+                val outgoing = if (pending.op == "debug.status" && frame.optBoolean("ok", false)) Results.ok(pending.id, DebugAccess.status()) else frame
+                PayloadBounds.validateResult(outgoing, pending.op)
+                socket?.send(outgoing.toString()) == true
+            }
+            if (!sent) break
+            removePending()
         }
         sentEvents.flush(store.events(), budget, android.os.SystemClock.elapsedRealtime()) { send(it) }
     }
@@ -285,9 +372,15 @@ class BridgeService : Service() {
     private fun notification(status: String): Notification {
         val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 2, Intent(this, BridgeService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText(status).setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE).addAction(Notification.Action.Builder(null, "Stop", stop).build()).build()
+        val debug = DebugAccess.snapshot()
+        val stopDebug = PendingIntent.getService(this, 3, Intent(this, BridgeService::class.java).setAction(STOP_DEBUG), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val debugText = if (!debug.enabled) "Debug OFF" else "Experimental debug ON: ${debug.remainingSeconds?.let { "${it}s remaining" } ?: "until stopped"}"
+        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText("$status — $debugText").setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(Notification.Action.Builder(null, "Stop debug", stopDebug).build())
+            .addAction(Notification.Action.Builder(null, "Stop connection", stop).build()).build()
     }
     private fun halt(message: String, erase: Boolean) {
+        DebugAccess.revoke()
         active = false
         connected = false
         prefs.edit().putBoolean("enabled", false).putString("status", message).commit()
@@ -298,6 +391,7 @@ class BridgeService : Service() {
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
     override fun onDestroy() {
+        DebugAccess.revoke()
         active = false
         connected = false
         if (current === this) current = null
@@ -312,6 +406,7 @@ class BridgeService : Service() {
     companion object {
         const val CHANNEL = "phonebridge.connection"
         const val STOP = "org.nous.phonebridge.STOP"
+        const val STOP_DEBUG = "org.nous.phonebridge.STOP_DEBUG"
         const val DISCONNECT = "org.nous.phonebridge.DISCONNECT"
         @Volatile var current: BridgeService? = null
         fun start(context: Context) {
@@ -320,6 +415,7 @@ class BridgeService : Service() {
             context.startForegroundService(Intent(context, BridgeService::class.java))
         }
         fun stop(context: Context, disconnect: Boolean = false) {
+            DebugAccess.revoke()
             context.getSharedPreferences("connection", MODE_PRIVATE).edit().putBoolean("enabled", false).putString("status", if (disconnect) "Disconnected" else "Stopped").commit()
             val service = current
             if (service != null) service.halt(if (disconnect) "Disconnected" else "Stopped", disconnect) else if (disconnect) {
@@ -328,7 +424,12 @@ class BridgeService : Service() {
             }
         }
         fun refresh() {
-            current?.let { service -> if (!service.control.isShutdown) service.dispatch { service.advertise() } }
+            current?.let { service -> if (!service.control.isShutdown) service.dispatch {
+                service.pruneDebugResults()
+                service.advertise()
+                service.getSystemService(NotificationManager::class.java).notify(18940, service.notification(service.prefs.getString("status", "Connected") ?: "Connected"))
+                service.flush()
+            } }
         }
         fun emit(context: Context, name: String, data: JSONObject) {
             if (!context.getSharedPreferences("connection", MODE_PRIVATE).getBoolean("enabled", false)) return

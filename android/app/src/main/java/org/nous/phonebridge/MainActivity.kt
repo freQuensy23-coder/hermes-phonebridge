@@ -22,12 +22,14 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var name: EditText
+    private lateinit var debugStatus: TextView
+    private var debugDialog: AlertDialog? = null
     private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var pairing = false
     private var pairingGeneration = 0L
     private val updater = object : Runnable {
-        override fun run() { render(); handler.postDelayed(this, 2000) }
+        override fun run() { render(); handler.postDelayed(this, 1000) }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,10 +65,53 @@ class MainActivity : Activity() {
         button("Optional Accessibility screen control") {
             AlertDialog.Builder(this).setTitle("Enable remote screen control?").setMessage("Accessibility can read non-password UI text and perform your server's screen actions. It requires an unlocked, awake phone. Secure-window screenshots are blocked. Google/Samsung clock UI versions without verified selectors are unsupported.").setNegativeButton("Cancel", null).setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
         }
+        text("Experimental remote debug is OFF by default. Accessibility permission alone does not grant debug consent. Each local enable authorizes ordinary screen reading and control by your server for one connection/process lifetime.")
+        debugStatus = TextView(this).apply { id = R.id.debug_status }.also { layout.addView(it) }
+        fun debugButton(label: String, resourceId: Int, minutes: Int?) {
+            layout.addView(Button(this).apply { text = label; id = resourceId; physicalClick(this) { confirmDebug(minutes) } })
+        }
+        debugButton("Enable debug for 10 minutes", R.id.debug_enable_10, 10)
+        debugButton("Enable debug for 15 minutes", R.id.debug_enable_15, 15)
+        debugButton("Enable debug for 1 hour", R.id.debug_enable_60, 60)
+        debugButton("Enable debug until manually stopped", R.id.debug_enable_manual, null)
+        layout.addView(Button(this).apply { text = "Stop debug"; id = R.id.debug_stop; setOnClickListener { DebugAccess.revoke(); render() } })
         button("Do Not Disturb access for audio") { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
         button("App permissions / battery settings") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
         text("Persistent connection uses a visible foreground service and no permanent wake lock. Android force-stop prevents boot restore until you open the app. Samsung: remove PhoneBridge from sleeping/deep-sleeping apps and select unrestricted battery use. Pixel: select unrestricted battery use. OEM restrictions or network loss can interrupt delivery. Clipboard and activity launches may require PhoneBridge in foreground. Screenshots require Android 14+. No PhoneBridge alarms or timers are created; typed intents dispatch to existing clocks without claiming verification.")
         render()
+    }
+    private fun physicalClick(button: Button, action: () -> Unit) {
+        var touchedAt = -1L
+        button.filterTouchesWhenObscured = true
+        button.setOnTouchListener { view, event ->
+            touchedAt = if (event.actionMasked == android.view.MotionEvent.ACTION_UP && event.isFromSource(android.view.InputDevice.SOURCE_TOUCHSCREEN) && event.flags and (android.view.MotionEvent.FLAG_WINDOW_IS_OBSCURED or android.view.MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED) == 0 && view.isShown && view.hasWindowFocus() && resumed) android.os.SystemClock.elapsedRealtime() else -1L
+            false
+        }
+        button.setOnClickListener {
+            val physical = touchedAt >= 0 && android.os.SystemClock.elapsedRealtime() - touchedAt <= 1000
+            touchedAt = -1L
+            if (physical && resumed && button.isShown && button.hasWindowFocus()) {
+                try { action() } catch (e: BridgeFailure) { message(e.message) }
+            }
+        }
+    }
+    private fun confirmDebug(minutes: Int?) {
+        Access.unlocked(this)
+        debugDialog?.dismiss()
+        val duration = minutes?.let { "$it minutes" } ?: "until manually stopped (this process/connection only)"
+        val dialog = AlertDialog.Builder(this).setTitle("Enable experimental remote debug?")
+            .setMessage("For $duration your authorized server can read ordinary screen content and operate apps as you. This is high risk and experimental, not ADB or root. It cannot bypass the lock screen, passwords, secure windows or Android permission/credential consent. PhoneBridge consent/settings cannot be remotely controlled. Stop debug here or in the persistent notification at any time. A dispatched gesture may finish after Stop; later commands and late screenshots are blocked. Never authorize payments, sending, deletion or permission grants without your own separate intent.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Enable debug", null).create()
+        debugDialog = dialog
+        dialog.setOnShowListener {
+            dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            physicalClick(dialog.getButton(AlertDialog.BUTTON_POSITIVE)) {
+                DebugAccess.enableLocal(this, minutes)
+                dialog.dismiss()
+                render()
+            }
+        }
+        dialog.show()
     }
     private fun scan() {
         if (pairing) return
@@ -113,6 +158,8 @@ class MainActivity : Activity() {
     }
     private fun render() {
         if (!::status.isInitialized || pairing) return
+        val debug = DebugAccess.snapshot()
+        if (::debugStatus.isInitialized) debugStatus.text = if (!debug.enabled) "Experimental debug: OFF" else "Experimental debug: ON — ${debug.remainingSeconds?.let { "${it}s remaining" } ?: "until manually stopped"}"
         val value = Credentials(this).load()
         val prefs = getSharedPreferences("connection", MODE_PRIVATE)
         status.text = "${prefs.getString("status", "Not connected")}\nServer: ${value?.server ?: "not paired"}\nDevice: ${value?.deviceId ?: "none"}\nGranted: ${Access.permissions(this)}"
@@ -132,6 +179,8 @@ class MainActivity : Activity() {
     }
     override fun onPause() {
         resumed = false
+        debugDialog?.dismiss()
+        debugDialog = null
         handler.removeCallbacks(updater)
         BridgeService.refresh()
         super.onPause()

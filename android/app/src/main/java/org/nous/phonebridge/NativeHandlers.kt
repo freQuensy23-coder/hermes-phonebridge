@@ -32,8 +32,8 @@ import java.util.concurrent.TimeUnit
 
 object UiThread {
     fun <T> call(block: () -> T): T {
-        if (Looper.myLooper() == Looper.getMainLooper()) return block()
         ExecutionGuard.check()
+        if (Looper.myLooper() == Looper.getMainLooper()) return block()
         val guard = ExecutionGuard.snapshot()
         val task = FutureTask(Callable { guard(); block() })
         Handler(Looper.getMainLooper()).post(task)
@@ -56,6 +56,7 @@ class NativeHandlers(private val context: Context, private val store: DurableSto
             op.startsWith("screen.") -> (BridgeAccessibility.current ?: failure("PERMISSION_REQUIRED", "Enable Accessibility")).handle(op, args)
             op.startsWith("clock.") -> NativeClocks(context).execute(op, args)
             else -> when (op) {
+                "debug.status" -> { args.only(); DebugAccess.status() }
                 "device.info" -> { args.only(); deviceInfo() }
                 "capabilities", "device.capabilities" -> { args.only(); JSONObject().put("capabilities", Access.capabilities(context)).put("permissions", Access.permissions(context)) }
                 "apps.list" -> apps(args)

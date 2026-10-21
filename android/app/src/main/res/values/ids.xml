@@ -1,3 +1,9 @@
 <resources>
     <item name="device_name" type="id" />
+    <item name="debug_enable_10" type="id" />
+    <item name="debug_enable_15" type="id" />
+    <item name="debug_enable_60" type="id" />
+    <item name="debug_enable_manual" type="id" />
+    <item name="debug_stop" type="id" />
+    <item name="debug_status" type="id" />
 </resources>
