@@ -184,7 +184,7 @@ class GoogleClockInstrumentationTest {
         }
         var promotionGraph: List<List<Any?>>? = null
         var promotionSince = 0L
-        waitUntil("Genuine alarm detail music promotion was not exposed after refusal") {
+        waitUntil("Genuine alarm detail music promotion was not exposed before deletion refusal") {
             val graph = try { UiThread.call {
                 val windows = service.windows
                 val applications = windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
@@ -504,6 +504,9 @@ class GoogleClockInstrumentationTest {
         show(true)
         val before = list(true)
         assertEquals(defaultAlarms.size + 2, before.size)
+        shell("am force-stop $pkg")
+        show(true)
+        assertEquals("Cold fixture restart must preserve every alarm before opening the music promotion", values(before), values(list(true)))
         prepareAlarmDeleteAfterMusicPromotionRefusal(before.single { it.getString("label") == "CI popup target alarm" }, before)
         shell("am force-stop $pkg")
         show(true)

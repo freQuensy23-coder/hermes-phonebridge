@@ -360,8 +360,15 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             requireSchema(SystemClock.elapsedRealtime() < openingDeadline, "Clock selected detail did not settle before mutation")
             val stable = UiThread.call {
                 check()
-                val root = activeRoot(service)
-                if (root.windowId == before.window) {
+                val root = try {
+                    activeRoot(service)
+                } catch (error: BridgeFailure) {
+                    if (transaction.phase != GoogleClockAlarmDelete.Phase.SELECTED || error.code != "UNSUPPORTED" || error.message != "Clock window root unavailable") throw error
+                    null
+                }
+                if (root == null) {
+                    false
+                } else if (root.windowId == before.window) {
                     requireSchema(transaction.phase == GoogleClockAlarmDelete.Phase.SELECTED && GoogleClockCollection.same(collection(service, true, root).values, before.values), "Clock selection returned to a changed collection")
                     false
                 } else detail(service, transaction, root).second
