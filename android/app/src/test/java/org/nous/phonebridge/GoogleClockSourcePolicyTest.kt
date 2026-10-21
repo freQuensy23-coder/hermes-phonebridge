@@ -210,6 +210,19 @@ class GoogleClockSourcePolicyTest {
         rejected("AMBIGUOUS_STATE") { ready.dispatch(91, 2201) }
     }
 
+    @Test fun modalSafeFreshTraversalStillRequiresProofAndDispatchInsideTheOriginalSelectionBound() {
+        val lastPermitted = modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL)
+        assertTrue(modalDetail(lastPermitted, now = 3199))
+        lastPermitted.dispatch(91, 3199)
+        val expiredSelection = modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL)
+        assertTrue(modalDetail(expiredSelection, now = 3199))
+        rejected { expiredSelection.dispatch(91, 3200) }
+        val expiredProof = modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL)
+        rejected { modalDetail(expiredProof, now = 3200) }
+        val staleFinalRead = modalTransaction(GoogleClockAlarmDelete.Phase.DETAIL)
+        rejected { staleFinalRead.dispatch(91, 2101) }
+    }
+
     @Test fun modalSafeRecurrenceBindsSevenIndependentNamedCheckboxesToTheSelectedSchedule() {
         GoogleClockAlarmDetail.requireIdentity(modalTarget, modalTarget.label, modalTarget.time, modalTarget.time, modalDays.reversed())
         val once = modalTarget.copy(schedule = "")

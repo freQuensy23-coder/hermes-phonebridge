@@ -6,9 +6,13 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
+import android.view.Display
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
@@ -68,15 +72,41 @@ class BridgeAccessibility : AccessibilityService() {
     private val remoteNodeAdapter = object : RemoteWindowNodeAdapter<AccessibilityNodeInfo> {
         override fun windowId(node: AccessibilityNodeInfo) = node.windowId
         override fun owner(node: AccessibilityNodeInfo) = node.packageName?.toString()
+        override fun bounds(node: AccessibilityNodeInfo): RemoteWindowBounds {
+            val bounds = Rect().also { node.getBoundsInScreen(it) }
+            return RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+        }
         override fun isPassword(node: AccessibilityNodeInfo) = node.isPassword
         override fun childCount(node: AccessibilityNodeInfo) = node.childCount
         override fun child(node: AccessibilityNodeInfo, index: Int) = node.getChild(index)
     }
     private fun assertSafeWindow(root: AccessibilityNodeInfo) = RemoteWindowPolicy.assertSafeWindow(root, remoteNodeAdapter)
+    private fun nativeWindowGeometry(): RemoteWindowGeometry? {
+        return try {
+            val display = getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY) ?: return null
+            if (!display.isValid) return null
+            val context = createWindowContext(display, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+            if (context.display?.displayId != Display.DEFAULT_DISPLAY) return null
+            val metrics = context.getSystemService(WindowManager::class.java)?.maximumWindowMetrics ?: return null
+            val bounds = metrics.bounds
+            fun insets(type: Int): RemoteWindowInsets {
+                val value = metrics.windowInsets.getInsetsIgnoringVisibility(type)
+                return RemoteWindowInsets(value.left, value.top, value.right, value.bottom)
+            }
+            RemoteWindowGeometry.fromInsets(
+                RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                insets(WindowInsets.Type.statusBars()),
+                insets(WindowInsets.Type.navigationBars()),
+                insets(WindowInsets.Type.displayCutout())
+            )
+        } catch (_: Exception) { null }
+    }
     private fun remoteRoot(expected: String? = null): RemoteWindowTarget<AccessibilityNodeInfo> {
         if (MainActivity.resumed) failure("UNSUPPORTED", "PhoneBridge consent/settings UI cannot be remotely controlled")
         val root = root(expected)
-        val snapshot = windows.map { window ->
+        val nativeWindows = windows
+        val geometry = if (nativeWindows.all { it.displayId == Display.DEFAULT_DISPLAY }) nativeWindowGeometry() else null
+        val snapshot = nativeWindows.map { window ->
             val bounds = Rect().also { window.getBoundsInScreen(it) }
             val kind = when (window.type) {
                 android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> RemoteWindowKind.APPLICATION
@@ -85,7 +115,7 @@ class BridgeAccessibility : AccessibilityService() {
             }
             RemoteWindowSnapshot(window.id, kind, window.isActive, window.isFocused, RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), window.root)
         }
-        return RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked)
+        return RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked, geometry)
     }
     fun exact(root: AccessibilityNodeInfo, id: String, text: String? = null): AccessibilityNodeInfo {
         val matches = nodes(root).filter { it.viewIdResourceName == id && (text == null || it.text?.toString() == text) && it.isVisibleToUser }
@@ -180,14 +210,23 @@ class BridgeAccessibility : AccessibilityService() {
                 val path = Path()
                 val duration: Int
                 if (op == "screen.tap") {
-                    path.moveTo(args.int("x", bounds.left, bounds.right - 1).toFloat(), args.int("y", bounds.top, bounds.bottom - 1).toFloat())
+                    val x = args.int("x", bounds.left, bounds.right - 1)
+                    val y = args.int("y", bounds.top, bounds.bottom - 1)
+                    target.requireGesturePoint(x, y)
+                    path.moveTo(x.toFloat(), y.toFloat())
                     duration = 70
                 } else {
-                    path.moveTo(args.int("x1", bounds.left, bounds.right - 1).toFloat(), args.int("y1", bounds.top, bounds.bottom - 1).toFloat())
-                    path.lineTo(args.int("x2", bounds.left, bounds.right - 1).toFloat(), args.int("y2", bounds.top, bounds.bottom - 1).toFloat())
+                    val x1 = args.int("x1", bounds.left, bounds.right - 1)
+                    val y1 = args.int("y1", bounds.top, bounds.bottom - 1)
+                    val x2 = args.int("x2", bounds.left, bounds.right - 1)
+                    val y2 = args.int("y2", bounds.top, bounds.bottom - 1)
+                    target.requireGesturePoint(x1, y1)
+                    target.requireGesturePoint(x2, y2)
+                    path.moveTo(x1.toFloat(), y1.toFloat())
+                    path.lineTo(x2.toFloat(), y2.toFloat())
                     duration = args.int("duration_ms", 100, 2000, 400)
                 }
-                val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration.toLong())).build()
+                val gesture = GestureDescription.Builder().setDisplayId(Display.DEFAULT_DISPLAY).addStroke(GestureDescription.StrokeDescription(path, 0, duration.toLong())).build()
                 flight.effect {
                     val dispatched = effects.prepared({
                         object : GestureResultCallback() {

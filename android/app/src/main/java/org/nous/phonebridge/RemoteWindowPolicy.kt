@@ -3,6 +3,7 @@ package org.nous.phonebridge
 internal interface RemoteWindowNodeAdapter<N> {
     fun windowId(node: N): Int
     fun owner(node: N): String?
+    fun bounds(node: N): RemoteWindowBounds?
     fun isPassword(node: N): Boolean
     fun childCount(node: N): Int
     fun child(node: N, index: Int): N?
@@ -14,6 +15,43 @@ internal data class RemoteWindowBounds(val left: Int, val top: Int, val right: I
     val nonempty: Boolean get() = left < right && top < bottom
     fun overlaps(other: RemoteWindowBounds) = nonempty && other.nonempty && left < other.right && other.left < right && top < other.bottom && other.top < bottom
     fun contains(other: RemoteWindowBounds) = nonempty && other.nonempty && left <= other.left && top <= other.top && right >= other.right && bottom >= other.bottom
+    fun contains(x: Int, y: Int) = nonempty && x >= left && x < right && y >= top && y < bottom
+    fun intersect(other: RemoteWindowBounds) = RemoteWindowBounds(maxOf(left, other.left), maxOf(top, other.top), minOf(right, other.right), minOf(bottom, other.bottom))
+}
+
+internal data class RemoteWindowInsets(val left: Int = 0, val top: Int = 0, val right: Int = 0, val bottom: Int = 0)
+
+internal class RemoteWindowGeometry private constructor(
+    val displayBounds: RemoteWindowBounds,
+    val nativeBarBounds: List<RemoteWindowBounds>,
+    val inputBounds: RemoteWindowBounds
+) {
+    companion object {
+        fun fromInsets(
+            displayBounds: RemoteWindowBounds,
+            statusBars: RemoteWindowInsets,
+            navigationBars: RemoteWindowInsets,
+            displayCutout: RemoteWindowInsets = RemoteWindowInsets()
+        ): RemoteWindowGeometry? {
+            if (!displayBounds.nonempty) return null
+            val insets = listOf(statusBars, navigationBars, displayCutout)
+            if (insets.any { it.left < 0 || it.top < 0 || it.right < 0 || it.bottom < 0 }) return null
+            val left = insets.maxOf { it.left }
+            val top = insets.maxOf { it.top }
+            val right = insets.maxOf { it.right }
+            val bottom = insets.maxOf { it.bottom }
+            if (left.toLong() + right >= displayBounds.right.toLong() - displayBounds.left || top.toLong() + bottom >= displayBounds.bottom.toLong() - displayBounds.top) return null
+            val bars = buildList {
+                for (bar in listOf(statusBars, navigationBars)) {
+                    if (bar.left > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.left + bar.left, displayBounds.bottom))
+                    if (bar.top > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.right, displayBounds.top + bar.top))
+                    if (bar.right > 0) add(RemoteWindowBounds(displayBounds.right - bar.right, displayBounds.top, displayBounds.right, displayBounds.bottom))
+                    if (bar.bottom > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.bottom - bar.bottom, displayBounds.right, displayBounds.bottom))
+                }
+            }
+            return RemoteWindowGeometry(displayBounds, bars.distinct(), RemoteWindowBounds(displayBounds.left + left, displayBounds.top + top, displayBounds.right - right, displayBounds.bottom - bottom))
+        }
+    }
 }
 
 internal data class RemoteWindowSnapshot<N>(
@@ -25,7 +63,11 @@ internal data class RemoteWindowSnapshot<N>(
     val root: N?
 )
 
-internal data class RemoteWindowTarget<N>(val root: N, val windowId: Int, val owner: String, val bounds: RemoteWindowBounds)
+internal data class RemoteWindowTarget<N>(val root: N, val windowId: Int, val owner: String, val bounds: RemoteWindowBounds, val inputBounds: RemoteWindowBounds = bounds) {
+    fun requireGesturePoint(x: Int, y: Int) {
+        if (!inputBounds.contains(x, y)) failure("VALIDATION_ERROR", "Gesture coordinates must exclude native system bars and display cutouts")
+    }
+}
 
 internal object RemoteWindowPolicy {
     fun <N : Any> assertSafeWindow(root: N, adapter: RemoteWindowNodeAdapter<N>) {
@@ -49,7 +91,8 @@ internal object RemoteWindowPolicy {
         expectedOwner: String?,
         windows: List<RemoteWindowSnapshot<N>>,
         adapter: RemoteWindowNodeAdapter<N>,
-        protectedOwner: (String) -> Boolean
+        protectedOwner: (String) -> Boolean,
+        nativeGeometry: RemoteWindowGeometry? = null
     ): RemoteWindowTarget<N> {
         val selectedId = adapter.windowId(activeRoot)
         if (selectedId < 0 || windows.isEmpty()) failure("UNSUPPORTED", "No inspectable active window graph")
@@ -61,12 +104,18 @@ internal object RemoteWindowPolicy {
         if (adapter.owner(activeRoot) != owner) failure("AMBIGUOUS_STATE", "Active root and selected window owners differ")
         if (expectedOwner != null && owner != expectedOwner) failure("FOREGROUND_REQUIRED", "Selected window owner changed")
         if (!selected.active || !selected.focused || selected.kind != RemoteWindowKind.APPLICATION || !selected.bounds.nonempty) failure("UNSUPPORTED", "Selected window must be an active focused application with native bounds")
+        val geometry = nativeGeometry?.takeIf { it.displayBounds.contains(selected.bounds) }
         for (window in windows) {
             val relevant = window.active || window.focused || window.kind != RemoteWindowKind.SYSTEM || !window.bounds.nonempty || window.bounds.overlaps(selected.bounds)
             if (!relevant) continue
             val node = window.root ?: failure("UNSUPPORTED", "Cannot inspect relevant window")
             val otherOwner = adapter.owner(node)?.takeIf { it.isNotBlank() } ?: failure("UNSUPPORTED", "Unknown relevant window owner")
             if (window.id < 0 || adapter.windowId(node) != window.id || !window.bounds.nonempty) failure("AMBIGUOUS_STATE", "Relevant root and native window do not correspond")
+            val nativeBar = geometry != null && window.kind == RemoteWindowKind.SYSTEM && !window.active && !window.focused && otherOwner == "com.android.systemui" && adapter.bounds(node) == window.bounds && window.bounds in geometry.nativeBarBounds
+            if (nativeBar) {
+                assertSafeWindow(node, adapter)
+                continue
+            }
             if (protectedOwner(otherOwner)) failure("UNSUPPORTED", "Protected UI window is present")
             if (window.kind != RemoteWindowKind.APPLICATION) failure("UNSUPPORTED", "System, input method and overlay windows are excluded")
             if ((window.active || window.focused) && window.id != selectedId) failure("AMBIGUOUS_STATE", "Active or focused window differs from selected window")
@@ -74,6 +123,6 @@ internal object RemoteWindowPolicy {
             if (window.id != selectedId && window.bounds.overlaps(selected.bounds)) failure("UNSUPPORTED", "Another window overlaps the selected native window")
             assertSafeWindow(node, adapter)
         }
-        return RemoteWindowTarget(selectedRoot, selectedId, owner, selected.bounds)
+        return RemoteWindowTarget(selectedRoot, selectedId, owner, selected.bounds, geometry?.inputBounds?.intersect(selected.bounds) ?: selected.bounds)
     }
 }

@@ -9,12 +9,14 @@ class RemoteWindowPolicyTest {
         val owner: String? = "ordinary.app",
         val password: Boolean = false,
         val children: List<Node?> = emptyList(),
-        val advertisedChildren: Int = children.size
+        val advertisedChildren: Int = children.size,
+        val bounds: RemoteWindowBounds? = null
     )
 
     private val adapter = object : RemoteWindowNodeAdapter<Node> {
         override fun windowId(node: Node) = node.windowId
         override fun owner(node: Node) = node.owner
+        override fun bounds(node: Node) = node.bounds
         override fun isPassword(node: Node) = node.password
         override fun childCount(node: Node) = node.advertisedChildren
         override fun child(node: Node, index: Int) = node.children.getOrNull(index)
@@ -29,8 +31,23 @@ class RemoteWindowPolicyTest {
         kind: RemoteWindowKind = RemoteWindowKind.APPLICATION,
         rectangle: RemoteWindowBounds = bounds
     ) = RemoteWindowSnapshot(id, kind, active, focused, rectangle, node)
-    private fun resolve(windows: List<RemoteWindowSnapshot<Node>>, expected: String? = "ordinary.app", activeRoot: Node = root) =
-        RemoteWindowPolicy.resolve(activeRoot, expected, windows, adapter) { it == "protected.app" }
+    private fun resolve(windows: List<RemoteWindowSnapshot<Node>>, expected: String? = "ordinary.app", activeRoot: Node = root, geometry: RemoteWindowGeometry? = null) =
+        RemoteWindowPolicy.resolve(activeRoot, expected, windows, adapter, { it == "protected.app" || it == "com.android.systemui" }, geometry)
+    private val displayBounds = RemoteWindowBounds(0, 0, 1080, 2400)
+    private val statusBounds = RemoteWindowBounds(0, 0, 1080, 63)
+    private val navigationBounds = RemoteWindowBounds(0, 2274, 1080, 2400)
+    private fun geometry(statusHeight: Int = 63) = RemoteWindowGeometry.fromInsets(
+        displayBounds, RemoteWindowInsets(top = statusHeight), RemoteWindowInsets(bottom = 126)
+    )!!
+    private fun bar(id: Int, rectangle: RemoteWindowBounds) = window(
+        id, Node(id, "com.android.systemui", bounds = rectangle), false, false, RemoteWindowKind.SYSTEM, rectangle
+    )
+    private fun fullGraph() = listOf(window(rectangle = displayBounds), bar(8, statusBounds), bar(9, navigationBounds))
+    private fun invalidGesture(block: () -> Unit) {
+        try { block(); fail("Expected excluded gesture coordinate refusal") } catch (e: BridgeFailure) {
+            assertEquals("VALIDATION_ERROR", e.code)
+        }
+    }
     private fun refused(block: () -> Unit) {
         try { block(); fail("Expected fail-closed refusal") } catch (e: BridgeFailure) {
             assertTrue(e.code == "UNSUPPORTED" || e.code == "AMBIGUOUS_STATE" || e.code == "FOREGROUND_REQUIRED")
@@ -63,6 +80,119 @@ class RemoteWindowPolicyTest {
         assertFalse(bounds.contains(RemoteWindowBounds(10, 50, 990, 1801)))
         assertFalse(bounds.contains(RemoteWindowBounds(10, 39, 990, 1790)))
         assertFalse(bounds.contains(RemoteWindowBounds(10, 50, 10, 1790)))
+    }
+    @Test fun independentlyProvedNativeBarsAllowAFullApplicationFrameWithoutChangingCaptureBounds() {
+        for (height in listOf(63, 128)) {
+            val status = RemoteWindowBounds(0, 0, 1080, height)
+            val target = resolve(listOf(window(rectangle = displayBounds), bar(8, status), bar(9, navigationBounds)), geometry = geometry(height))
+            assertSame(root, target.root)
+            assertEquals(7, target.windowId)
+            assertEquals(displayBounds, target.bounds)
+            assertEquals(RemoteWindowBounds(0, height, 1080, 2274), target.inputBounds)
+        }
+    }
+    @Test fun observedBarGeometryAloneIsNotNativeProof() {
+        refused { resolve(fullGraph()) }
+        val noBars = RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(), RemoteWindowInsets())!!
+        assertTrue(noBars.nativeBarBounds.isEmpty())
+        refused { resolve(fullGraph(), geometry = noBars) }
+        refused { resolve(fullGraph(), geometry = geometry(64)) }
+    }
+    @Test fun nativeProofDoesNotExemptWrongOwnersTypesFocusOrActivity() {
+        val original = bar(8, statusBounds)
+        val invalid = listOf(
+            original.copy(root = Node(8, "ordinary.app", bounds = statusBounds)),
+            original.copy(root = Node(8, "protected.app", bounds = statusBounds)),
+            original.copy(root = Node(8, null, bounds = statusBounds)),
+            original.copy(kind = RemoteWindowKind.APPLICATION),
+            original.copy(kind = RemoteWindowKind.OTHER),
+            original.copy(active = true),
+            original.copy(focused = true)
+        )
+        for (candidate in invalid) refused { resolve(listOf(window(rectangle = displayBounds), candidate), geometry = geometry()) }
+    }
+    @Test fun provedBarRequiresExactInspectableRootIdentityAndBounds() {
+        val original = bar(8, statusBounds)
+        val invalid = listOf(
+            original.copy(root = null),
+            original.copy(root = Node(9, "com.android.systemui", bounds = statusBounds)),
+            original.copy(root = Node(8, "com.android.systemui")),
+            original.copy(root = Node(8, "com.android.systemui", bounds = navigationBounds)),
+            original.copy(id = -1),
+            original.copy(bounds = RemoteWindowBounds(0, 0, 1080, 0))
+        )
+        for (candidate in invalid) refused { resolve(listOf(window(rectangle = displayBounds), candidate), geometry = geometry()) }
+    }
+    @Test fun interiorAndNearBarSystemOverlaysAreNotNativeBars() {
+        for (rectangle in listOf(
+            RemoteWindowBounds(0, 63, 1080, 126),
+            RemoteWindowBounds(0, 0, 1080, 62),
+            RemoteWindowBounds(1, 0, 1080, 63),
+            RemoteWindowBounds(0, 0, 1080, 64),
+            RemoteWindowBounds(0, 2273, 1080, 2400),
+            displayBounds
+        )) refused { resolve(listOf(window(rectangle = displayBounds), bar(8, rectangle)), geometry = geometry()) }
+    }
+    @Test fun nativeProofDoesNotExemptProtectedApplicationsForeignFocusOrPasswordTrees() {
+        val protected = Node(owner = "com.android.systemui")
+        refused { resolve(listOf(window(node = protected, rectangle = displayBounds)), expected = "com.android.systemui", activeRoot = protected, geometry = geometry()) }
+        refused { resolve(fullGraph() + window(10, Node(10, "foreign.app"), false, true), geometry = geometry()) }
+        refused { resolve(fullGraph() + window(10, Node(10), false, false), geometry = geometry()) }
+        val password = Node(children = listOf(Node(password = true)))
+        refused { resolve(listOf(window(node = password, rectangle = displayBounds), bar(8, statusBounds)), activeRoot = password, geometry = geometry()) }
+        val passwordBar = bar(8, statusBounds).copy(root = Node(8, "com.android.systemui", password = true, bounds = statusBounds))
+        refused { resolve(listOf(window(rectangle = displayBounds), passwordBar), geometry = geometry()) }
+        val incompleteBar = bar(8, statusBounds).copy(root = Node(8, "com.android.systemui", advertisedChildren = 1, bounds = statusBounds))
+        refused { resolve(listOf(window(rectangle = displayBounds), incompleteBar), geometry = geometry()) }
+    }
+    @Test fun tapAndSwipeEndpointsExcludeNativeBarCoordinatesWithoutRejectingTheFullRoot() {
+        val target = resolve(fullGraph(), geometry = geometry())
+        assertTrue(target.bounds.contains(displayBounds))
+        assertEquals(displayBounds, target.bounds)
+        target.requireGesturePoint(0, 63)
+        target.requireGesturePoint(1079, 2273)
+        for ((x, y) in listOf(0 to 0, 500 to 62, 500 to 2274, 1079 to 2399, -1 to 100, 1080 to 100)) {
+            invalidGesture { target.requireGesturePoint(x, y) }
+        }
+        for ((start, end) in listOf((500 to 63) to (500 to 62), (500 to 2274) to (500 to 100))) {
+            invalidGesture {
+                target.requireGesturePoint(start.first, start.second)
+                target.requireGesturePoint(end.first, end.second)
+            }
+        }
+    }
+    @Test fun nativeInputExclusionsApplyEvenWithoutVisibleBarWindows() {
+        val target = resolve(listOf(window(rectangle = displayBounds)), geometry = geometry())
+        invalidGesture { target.requireGesturePoint(500, 0) }
+        invalidGesture { target.requireGesturePoint(500, 2399) }
+        assertEquals(displayBounds, target.bounds)
+    }
+    @Test fun independentInsetTypesRetainBothBarsOnTheSameEdgeAndCutoutOnlyRestrictsInput() {
+        val native = RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(top = 63), RemoteWindowInsets(top = 126), RemoteWindowInsets(left = 20, top = 128))!!
+        assertEquals(listOf(statusBounds, RemoteWindowBounds(0, 0, 1080, 126)), native.nativeBarBounds)
+        assertEquals(RemoteWindowBounds(20, 128, 1080, 2400), native.inputBounds)
+        assertFalse(native.nativeBarBounds.contains(RemoteWindowBounds(0, 0, 20, 2400)))
+        val target = resolve(listOf(window(rectangle = displayBounds), bar(8, statusBounds)), geometry = native)
+        invalidGesture { target.requireGesturePoint(19, 200) }
+        target.requireGesturePoint(20, 128)
+        refused { resolve(listOf(window(rectangle = displayBounds), bar(8, RemoteWindowBounds(0, 0, 1080, 128))), geometry = native) }
+    }
+    @Test fun landscapeAndOffsetNativeGeometryUseTheirOwnEdges() {
+        val display = RemoteWindowBounds(100, 200, 2500, 1280)
+        val native = RemoteWindowGeometry.fromInsets(display, RemoteWindowInsets(top = 63), RemoteWindowInsets(right = 126))!!
+        assertEquals(listOf(RemoteWindowBounds(100, 200, 2500, 263), RemoteWindowBounds(2374, 200, 2500, 1280)), native.nativeBarBounds)
+        assertEquals(RemoteWindowBounds(100, 263, 2374, 1280), native.inputBounds)
+        val target = resolve(listOf(window(rectangle = display), bar(8, native.nativeBarBounds[1])), geometry = native)
+        target.requireGesturePoint(2373, 300)
+        invalidGesture { target.requireGesturePoint(2374, 300) }
+        assertEquals(display, target.bounds)
+    }
+    @Test fun nativeGeometryMustContainTheSelectedWindowAndLeaveNonemptyInput() {
+        refused { resolve(fullGraph(), geometry = RemoteWindowGeometry.fromInsets(bounds, RemoteWindowInsets(top = 63), RemoteWindowInsets(bottom = 126))) }
+        assertNull(RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(top = -1), RemoteWindowInsets()))
+        assertNull(RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(top = 2400), RemoteWindowInsets()))
+        assertNull(RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(left = 600), RemoteWindowInsets(right = 600)))
+        assertNull(RemoteWindowGeometry.fromInsets(RemoteWindowBounds(0, 0, 0, 0), RemoteWindowInsets(), RemoteWindowInsets()))
     }
     @Test fun emptyWindowGraphIsRefused() {
         refused { resolve(emptyList()) }

@@ -21,6 +21,7 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         val values get() = rows.map { it.value }
     }
     private data class Snapshot(val values: List<GoogleClockEntry>, val window: Int)
+    private data class Tree(val root: AccessibilityNodeInfo, val nodes: List<AccessibilityNodeInfo>)
     private fun id(value: String) = "${GoogleClockProfile.PACKAGE}:id/$value"
     private fun requireSchema(value: Boolean, message: String) {
         if (!value) failure("UNSUPPORTED", message)
@@ -46,7 +47,7 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         val bounds = Rect().also { window.getBoundsInScreen(it) }
         listOf(window.id, window.type, window.isActive, window.isFocused, window.layer, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom))
     }
-    private fun activeRoot(service: BridgeAccessibility): AccessibilityNodeInfo {
+    private fun activeTree(service: BridgeAccessibility): Tree {
         val root = service.safeRoot(GoogleClockProfile.PACKAGE)
         val windows = service.windows
         val graph = windowState(windows)
@@ -68,7 +69,8 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             GoogleClockWindows.system(android.os.Build.VERSION.SDK_INT, window.type, window.isActive, window.isFocused, window.root?.packageName?.toString(), GoogleClockBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), navigationBackgrounds)
         }
         GoogleClockModalGraph.requireSingle(application.map { GoogleClockApplication(it.id, trees.getValue(it.id).first().packageName?.toString(), it.isActive, it.isFocused, trees.getValue(it.id).first().isVisibleToUser) }, root.windowId, windows.count { it.isActive }, windows.count { it.isFocused }, safeSystem)
-        completeNodes(root)
+        val nodes = trees.getValue(root.windowId)
+        requireSchema(nodes.first() == root, "Clock active root does not match its application window")
         val returnedWindows = service.windows
         if (windowState(returnedWindows) != graph) {
             requireSchema(returnedWindows.size <= 8, "Clock changed window graph exceeds profile bounds")
@@ -78,8 +80,10 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             }
             failure("UNSUPPORTED", "Clock window safety graph changed during fresh traversal")
         }
-        return root
+        return Tree(nodes.first(), nodes)
     }
+
+    private fun activeRoot(service: BridgeAccessibility): AccessibilityNodeInfo = activeTree(service).root
 
     private fun visible(nodes: List<AccessibilityNodeInfo>, resource: String) = nodes.filter { it.viewIdResourceName == id(resource) && it.isVisibleToUser }
     private fun one(nodes: List<AccessibilityNodeInfo>, resource: String): AccessibilityNodeInfo = visible(nodes, resource).singleOrNull() ?: failure("UNSUPPORTED", "Missing or duplicate Clock $resource")
@@ -292,9 +296,10 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         requireSchema(nodes.filter { it.isVisibleToUser }.all { node -> node.viewIdResourceName?.let { it.startsWith("${GoogleClockProfile.PACKAGE}:id/") || it in setOf("android:id/content", "android:id/navigationBarBackground", "android:id/statusBarBackground") } != false }, "Clock detail contains unknown resource namespaces")
         GoogleClockAlarmDetail.requireSurface(nodes.filter { it.isVisibleToUser }.mapNotNull { it.viewIdResourceName?.takeIf { resource -> resource.startsWith("${GoogleClockProfile.PACKAGE}:id/") }?.substringAfter(":id/") })
     }
-    private fun detail(service: BridgeAccessibility, transaction: GoogleClockAlarmDelete, root: AccessibilityNodeInfo = activeRoot(service)): Pair<AccessibilityNodeInfo, Boolean> {
+    private fun detail(service: BridgeAccessibility, transaction: GoogleClockAlarmDelete, tree: Tree = activeTree(service)): Pair<AccessibilityNodeInfo, Boolean> {
         val graph = windowState(service.windows)
-        val nodes = completeNodes(root)
+        val root = tree.root
+        val nodes = tree.nodes
         detailSurface(nodes, root.windowId)
         val clock = one(nodes, "clock")
         val label = one(nodes, "alarm_label")
@@ -310,9 +315,10 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
         contained(deletion, root)
         contained(clock, root)
         contained(label, root)
-        val finalRoot = activeRoot(service)
+        val finalTree = activeTree(service)
+        val finalRoot = finalTree.root
         requireSchema(finalRoot.windowId == root.windowId, "Clock detail window changed during identity readback")
-        val finalNodes = completeNodes(finalRoot)
+        val finalNodes = finalTree.nodes
         detailSurface(finalNodes, finalRoot.windowId)
         requireSchema(one(finalNodes, "clock") == clock && one(finalNodes, "alarm_label") == label && one(finalNodes, "repeat_days") == recurrence && one(finalNodes, "delete_button") == deletion, "Clock selected detail controls were replaced during identity readback")
         requireSchema(clock.refresh() && label.refresh() && clock.isVisibleToUser && label.isVisibleToUser && clock.className?.toString() == "android.widget.TextView" && label.className?.toString() == "android.widget.TextView" && detailDays(recurrence) == days, "Clock detail identity or recurrence changed during fresh readback")
@@ -360,18 +366,18 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
             requireSchema(SystemClock.elapsedRealtime() < openingDeadline, "Clock selected detail did not settle before mutation")
             val stable = UiThread.call {
                 check()
-                val root = try {
-                    activeRoot(service)
+                val tree = try {
+                    activeTree(service)
                 } catch (error: BridgeFailure) {
                     if (transaction.phase != GoogleClockAlarmDelete.Phase.SELECTED || error.code != "UNSUPPORTED" || error.message != "Clock window root unavailable") throw error
                     null
                 }
-                if (root == null) {
+                if (tree == null) {
                     false
-                } else if (root.windowId == before.window) {
-                    requireSchema(transaction.phase == GoogleClockAlarmDelete.Phase.SELECTED && GoogleClockCollection.same(collection(service, true, root).values, before.values), "Clock selection returned to a changed collection")
+                } else if (tree.root.windowId == before.window) {
+                    requireSchema(transaction.phase == GoogleClockAlarmDelete.Phase.SELECTED && GoogleClockCollection.same(collection(service, true, tree.root).values, before.values), "Clock selection returned to a changed collection")
                     false
-                } else detail(service, transaction, root).second
+                } else detail(service, transaction, tree).second
             }
             if (stable) break
             Thread.sleep(100)
@@ -396,12 +402,12 @@ class GoogleClockAdapter(private val context: Context? = null) : ClockUiAdapter 
                 gate()
                 val returned = UiThread.call {
                     check()
-                    val root = activeRoot(service)
-                    if (root.windowId == transaction.detailWindow) {
-                        detail(service, transaction, root)
+                    val tree = activeTree(service)
+                    if (tree.root.windowId == transaction.detailWindow) {
+                        detail(service, transaction, tree)
                         false
                     } else {
-                        val fresh = collection(service, true, root)
+                        val fresh = collection(service, true, tree.root)
                         transaction.returned(fresh.values, fresh.window, service.windows.any { it.id == transaction.detailWindow }, SystemClock.elapsedRealtime())
                     }
                 }

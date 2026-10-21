@@ -34,6 +34,7 @@ class GoogleClockInstrumentationTest {
     private var originalTimeFormat: String? = null
     private val component = "org.nous.phonebridge/org.nous.phonebridge.BridgeAccessibility"
     private val evidence = JSONArray()
+    private val dismissedCollectionPromotions = ArrayList<String>()
     private val clocks get() = NativeClocks(context)
     private val service get() = BridgeAccessibility.current ?: error("Real PhoneBridge Accessibility service is not connected")
 
@@ -112,7 +113,7 @@ class GoogleClockInstrumentationTest {
         rejected(setOf("UNSUPPORTED")) { ui(if (alarm) "clock.alarms.delete" else "clock.timers.cancel", args().put("label", "missing-under-promotion").apply { if (alarm) put("time", "00:00") }) }
         assertEquals(count, modelCount(alarm))
         GoogleClockProfile.requireInstalled(context)
-        UiThread.call {
+        val dismissedBody = UiThread.call {
             Access.unlocked(service)
             val active = service.safeRoot(pkg)
             val windows = service.windows
@@ -155,9 +156,11 @@ class GoogleClockInstrumentationTest {
             val dismissalBounds = android.graphics.Rect().also { dismissal.getBoundsInScreen(it) }
             assertTrue(!dismissalBounds.isEmpty && popupBounds.contains(dismissalBounds) && hostBounds.contains(dismissalBounds))
             service.click(dismissal)
+            body.text.toString()
         }
         waitUntil("Genuine vendor promotion remained after its single explicit dismissal") { UiThread.call { service.windows.none { it.id == candidate } } }
         assertEquals("Promotion dismissal must not mutate native models", count, modelCount(alarm))
+        dismissedCollectionPromotions.add(dismissedBody)
         record("vendor-promotion-dismissed")
         return true
     }
@@ -507,6 +510,11 @@ class GoogleClockInstrumentationTest {
         shell("am force-stop $pkg")
         show(true)
         assertEquals("Cold fixture restart must preserve every alarm before opening the music promotion", values(before), values(list(true)))
+        assertEquals("Privacy and bedtime each suppress music for their entire vendor process", listOf("You can find the privacy policy here", "Set a consistent bedtime for better sleep"), dismissedCollectionPromotions)
+        shell("am force-stop $pkg")
+        show(true)
+        assertEquals("The music fixture must start a fresh process after both one-time collection promotions", 2, dismissedCollectionPromotions.size)
+        assertEquals("Promotion-only process setup must preserve every alarm value", values(before), values(list(true)))
         prepareAlarmDeleteAfterMusicPromotionRefusal(before.single { it.getString("label") == "CI popup target alarm" }, before)
         shell("am force-stop $pkg")
         show(true)
