@@ -163,24 +163,62 @@ class GoogleClockInstrumentationTest {
     }
     private fun prepareAlarmDeleteAfterMusicPromotionRefusal(target: JSONObject, before: List<JSONObject>) {
         val originalWindow = UiThread.call { service.safeRoot(pkg).windowId }
+        assertEquals(values(before), values(list(true)))
+        UiThread.call {
+            val root = service.safeRoot(pkg)
+            assertEquals(originalWindow, root.windowId)
+            val card = fixtureNodes(root).single { node ->
+                node.viewIdResourceName == "$pkg:id/alarm_card" && node.isVisibleToUser &&
+                    fixtureNodes(node).any { it.viewIdResourceName == "$pkg:id/label" && it.text?.toString() == target.getString("label") } &&
+                    fixtureNodes(node).any { it.viewIdResourceName == "$pkg:id/digital_clock" && it.text?.toString() == target.getString("time") }
+            }
+            assertTrue(card.isEnabled && card.isClickable && !card.isPassword)
+            assertTrue("Fixture must open the exact alarm detail without requesting deletion", card.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+        }
+        record("alarm-detail-opening")
+        fun musicPromotion(nodes: List<AccessibilityNodeInfo>): Boolean {
+            val header = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/header" && it.isVisibleToUser && it.className?.toString() == "android.widget.TextView" } ?: return false
+            val body = nodes.singleOrNull { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.className?.toString() == "android.widget.TextView" } ?: return false
+            val music = Regex("You can now choose music from (Calm|Spotify|Pandora|YouTube Music), (Calm|Spotify|Pandora|YouTube Music), (Calm|Spotify|Pandora|YouTube Music), & (Calm|Spotify|Pandora|YouTube Music)").matchEntire(body.text?.toString().orEmpty()) ?: return false
+            return header.text?.toString() == "Wake up to music" && music.groupValues.drop(1).toSet() == setOf("Calm", "Spotify", "Pandora", "YouTube Music")
+        }
+        var promotionGraph: List<List<Any?>>? = null
+        var promotionSince = 0L
+        waitUntil("Genuine alarm detail music promotion was not exposed after refusal") {
+            val graph = try { UiThread.call {
+                val windows = service.windows
+                val applications = windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+                if (windows.size > 8 || applications.size != 2 || windows.count { it.isActive } != 1 || windows.count { it.isFocused } != 1) return@call null
+                val roots = applications.associate { it.id to (it.root ?: return@call null) }
+                if (roots.any { (window, root) -> root.windowId != window || root.packageName?.toString() != pkg }) return@call null
+                val host = applications.singleOrNull { it.isActive && it.isFocused && it.id != originalWindow } ?: return@call null
+                if (service.rootInActiveWindow?.windowId != host.id) return@call null
+                val hostNodes = fixtureNodes(roots.getValue(host.id))
+                if (hostNodes.singleOrNull { it.viewIdResourceName == "$pkg:id/clock" && it.isVisibleToUser }?.text?.toString() != target.getString("time") || hostNodes.singleOrNull { it.viewIdResourceName == "$pkg:id/alarm_label" && it.isVisibleToUser }?.text?.toString() != target.getString("label")) return@call null
+                val popup = applications.single { it.id != host.id }
+                if (popup.isActive || popup.isFocused || popup.layer <= host.layer || !musicPromotion(fixtureNodes(roots.getValue(popup.id)))) return@call null
+                windows.sortedBy { it.id }.map { window ->
+                    val bounds = android.graphics.Rect().also { window.getBoundsInScreen(it) }
+                    listOf(window.id, window.type, window.isActive, window.isFocused, window.layer, bounds.left, bounds.top, bounds.right, bounds.bottom)
+                }
+            } } catch (_: VendorFixtureUnavailable) { null }
+            val now = SystemClock.elapsedRealtime()
+            if (graph == null || graph != promotionGraph) {
+                promotionGraph = graph
+                promotionSince = now
+                false
+            } else now - promotionSince >= 200
+        }
+        record("alarm-detail-music-promotion-exposed")
         try {
             ui("clock.alarms.delete", selection(target, true))
-            fail("Genuine native music promotion must refuse deletion before an alarm effect")
+            fail("Stable genuine music promotion must refuse deletion before an alarm effect")
         } catch (e: BridgeFailure) {
             assertEquals("UNSUPPORTED", e.code)
             assertEquals("Clock promotion popup is not a collection host", e.message)
         }
-        val promotionBodies = setOf("You can now choose music from Calm, Spotify, Pandora, & YouTube Music", "You can now choose music from Pandora, Spotify, YouTube Music, & Calm")
-        waitUntil("Genuine alarm detail music promotion was not exposed after refusal") {
-            UiThread.call {
-                service.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && !it.isActive && !it.isFocused }.any { window ->
-                    window.root?.let { root -> fixtureNodes(root).any { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser && it.text?.toString() in promotionBodies } } == true
-                }
-            }
-        }
         record("alarm-detail-music-promotion-refused")
         rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.list") }
-        rejected(setOf("UNSUPPORTED")) { ui("clock.alarms.delete", selection(target, true)) }
         GoogleClockProfile.requireInstalled(context)
         val candidate = UiThread.call {
             val root = service.safeRoot(pkg)
@@ -213,7 +251,7 @@ class GoogleClockInstrumentationTest {
             assertFalse(nodes.any { it.viewIdResourceName in setOf("$pkg:id/onoff", "$pkg:id/play_pause_button", "$pkg:id/play_pause", "$pkg:id/delete_button", "$pkg:id/tertiary_button", "$pkg:id/save_button", "$pkg:id/alarm_recycler_view", "$pkg:id/timer_view", "$pkg:id/clock", "$pkg:id/alarm_label", "$pkg:id/repeat_days") && it.isVisibleToUser })
             val body = nodes.single { it.viewIdResourceName == "$pkg:id/body" && it.isVisibleToUser }
             assertEquals("android.widget.TextView", body.className?.toString())
-            assertTrue(body.text?.toString() in promotionBodies)
+            assertTrue("Only the complete genuine music promotion may be dismissed", musicPromotion(nodes))
             val dismissal = nodes.single { it.viewIdResourceName == "$pkg:id/dismiss_button" && it.isVisibleToUser }
             assertEquals("android.widget.TextView", dismissal.className?.toString())
             assertEquals("Dismiss", dismissal.text?.toString())
@@ -327,8 +365,9 @@ class GoogleClockInstrumentationTest {
         }
         record("effect-$outcome")
     }
-    private fun record(phase: String) {
+    private fun record(phase: String, refusal: BridgeFailure? = null) {
         val frame = JSONObject().put("phase", phase).put("sdk", Build.VERSION.SDK_INT).put("monotonic_ms", SystemClock.elapsedRealtime()).put("model", Build.MODEL).put("fingerprint", Build.FINGERPRINT)
+        if (refusal != null) frame.put("refusal_code", refusal.code).put("refusal_message", refusal.message)
         UiThread.call {
             val access = BridgeAccessibility.current ?: return@call
             val active = access.rootInActiveWindow
@@ -588,8 +627,10 @@ class GoogleClockInstrumentationTest {
         show(false)
         rejected(setOf("UNSUPPORTED")) { ui("clock.timers.cancel", args().put("label", "")) }
         UiThread.call { service.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-        waitUntil("PhoneBridge did not become foreground") { MainActivity.resumed }
-        rejected(setOf("FOREGROUND_REQUIRED")) { ui("clock.timers.cancel", args().put("label", "unknown")) }
+        waitUntil("PhoneBridge did not become foreground") {
+            MainActivity.resumed && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName }
+        }
+        rejected(setOf("UNSUPPORTED")) { ui("clock.timers.cancel", args().put("label", "unknown")) }
         shell("settings put system time_12_24 12")
         rejected(setOf("UNSUPPORTED")) { ui("clock.timers.cancel", args().put("label", "unknown")) }
         assertTrue(ClockAdapters(context).capabilities().isEmpty())

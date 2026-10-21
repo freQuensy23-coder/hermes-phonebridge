@@ -25,7 +25,6 @@ class AccessibilityInstrumentationTest {
     private val component = "org.nous.phonebridge/org.nous.phonebridge.BridgeAccessibility"
     private var scenario: ActivityScenario<MainActivity>? = null
     private var originalServices: String? = null
-    private var originalEnabled: String? = null
     private var settingsCaptured = false
     private val screenOps = listOf("screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global")
     @get:Rule val testName = org.junit.rules.TestName()
@@ -37,10 +36,9 @@ class AccessibilityInstrumentationTest {
                 val actions: List<() -> Unit> = listOf(
                     { scenario?.close(); scenario = null },
                     { BridgeService.stop(context, true) },
-                    { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0") },
+                    { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null) },
                     { if (settingsCaptured) waitUntil("service-cleanup") { BridgeAccessibility.current == null } },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, originalServices) },
-                    { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, originalEnabled) },
                     { ForegroundFixture.wake() }
                 )
                 for (action in actions) {
@@ -84,10 +82,8 @@ class AccessibilityInstrumentationTest {
     }
     @Before fun setup() {
         originalServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-        originalEnabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED)
         settingsCaptured = true
         BridgeService.stop(context, true)
-        restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0")
         restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
         waitUntil("service-disconnected") { BridgeAccessibility.current == null }
         ForegroundFixture.prepare(testName.methodName)
@@ -104,7 +100,6 @@ class AccessibilityInstrumentationTest {
                 refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }
             }
             restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, component)
-            restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "1")
             waitUntil("service-connected") { BridgeAccessibility.current != null }
             val service = BridgeAccessibility.current!!
             assertTrue(Access.permissions(context).getBoolean("accessibility"))
@@ -145,7 +140,6 @@ class AccessibilityInstrumentationTest {
             for (op in listOf("debug.enable", "debug.renew")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
             assertDebugOff(handlers)
             scenario!!.onActivity { activity -> assertEquals(originalName, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
-            restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, "0")
             restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
             waitUntil("service-revoked") { BridgeAccessibility.current == null }
             assertFalse(Access.permissions(context).getBoolean("accessibility"))
