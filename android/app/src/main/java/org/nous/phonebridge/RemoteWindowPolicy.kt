@@ -24,6 +24,7 @@ internal data class RemoteWindowInsets(val left: Int = 0, val top: Int = 0, val 
 internal class RemoteWindowGeometry private constructor(
     val displayBounds: RemoteWindowBounds,
     val nativeBarBounds: List<RemoteWindowBounds>,
+    val navigationBarBounds: List<RemoteWindowBounds>,
     val inputBounds: RemoteWindowBounds
 ) {
     companion object {
@@ -41,15 +42,14 @@ internal class RemoteWindowGeometry private constructor(
             val right = insets.maxOf { it.right }
             val bottom = insets.maxOf { it.bottom }
             if (left.toLong() + right >= displayBounds.right.toLong() - displayBounds.left || top.toLong() + bottom >= displayBounds.bottom.toLong() - displayBounds.top) return null
-            val bars = buildList {
-                for (bar in listOf(statusBars, navigationBars)) {
-                    if (bar.left > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.left + bar.left, displayBounds.bottom))
-                    if (bar.top > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.right, displayBounds.top + bar.top))
-                    if (bar.right > 0) add(RemoteWindowBounds(displayBounds.right - bar.right, displayBounds.top, displayBounds.right, displayBounds.bottom))
-                    if (bar.bottom > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.bottom - bar.bottom, displayBounds.right, displayBounds.bottom))
-                }
+            fun barBounds(bar: RemoteWindowInsets) = buildList {
+                if (bar.left > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.left + bar.left, displayBounds.bottom))
+                if (bar.top > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.top, displayBounds.right, displayBounds.top + bar.top))
+                if (bar.right > 0) add(RemoteWindowBounds(displayBounds.right - bar.right, displayBounds.top, displayBounds.right, displayBounds.bottom))
+                if (bar.bottom > 0) add(RemoteWindowBounds(displayBounds.left, displayBounds.bottom - bar.bottom, displayBounds.right, displayBounds.bottom))
             }
-            return RemoteWindowGeometry(displayBounds, bars.distinct(), RemoteWindowBounds(displayBounds.left + left, displayBounds.top + top, displayBounds.right - right, displayBounds.bottom - bottom))
+            val navigationBounds = barBounds(navigationBars)
+            return RemoteWindowGeometry(displayBounds, (barBounds(statusBars) + navigationBounds).distinct(), navigationBounds, RemoteWindowBounds(displayBounds.left + left, displayBounds.top + top, displayBounds.right - right, displayBounds.bottom - bottom))
         }
     }
 }
@@ -92,7 +92,8 @@ internal object RemoteWindowPolicy {
         windows: List<RemoteWindowSnapshot<N>>,
         adapter: RemoteWindowNodeAdapter<N>,
         protectedOwner: (String) -> Boolean,
-        nativeGeometry: RemoteWindowGeometry? = null
+        nativeGeometry: RemoteWindowGeometry? = null,
+        verifiedNavigationOwner: String? = null
     ): RemoteWindowTarget<N> {
         val selectedId = adapter.windowId(activeRoot)
         if (selectedId < 0 || windows.isEmpty()) failure("UNSUPPORTED", "No inspectable active window graph")
@@ -111,7 +112,10 @@ internal object RemoteWindowPolicy {
             val node = window.root ?: failure("UNSUPPORTED", "Cannot inspect relevant window")
             val otherOwner = adapter.owner(node)?.takeIf { it.isNotBlank() } ?: failure("UNSUPPORTED", "Unknown relevant window owner")
             if (window.id < 0 || adapter.windowId(node) != window.id || !window.bounds.nonempty) failure("AMBIGUOUS_STATE", "Relevant root and native window do not correspond")
-            val nativeBar = geometry != null && window.kind == RemoteWindowKind.SYSTEM && !window.active && !window.focused && otherOwner == "com.android.systemui" && adapter.bounds(node) == window.bounds && window.bounds in geometry.nativeBarBounds
+            val nativeBar = geometry != null && window.kind == RemoteWindowKind.SYSTEM && !window.active && !window.focused && adapter.bounds(node) == window.bounds && (
+                (otherOwner == "com.android.systemui" && window.bounds in geometry.nativeBarBounds) ||
+                    (otherOwner == verifiedNavigationOwner && window.bounds in geometry.navigationBarBounds)
+                )
             if (nativeBar) {
                 assertSafeWindow(node, adapter)
                 continue

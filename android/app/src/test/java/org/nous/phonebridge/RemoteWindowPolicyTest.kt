@@ -31,8 +31,8 @@ class RemoteWindowPolicyTest {
         kind: RemoteWindowKind = RemoteWindowKind.APPLICATION,
         rectangle: RemoteWindowBounds = bounds
     ) = RemoteWindowSnapshot(id, kind, active, focused, rectangle, node)
-    private fun resolve(windows: List<RemoteWindowSnapshot<Node>>, expected: String? = "ordinary.app", activeRoot: Node = root, geometry: RemoteWindowGeometry? = null) =
-        RemoteWindowPolicy.resolve(activeRoot, expected, windows, adapter, { it == "protected.app" || it == "com.android.systemui" }, geometry)
+    private fun resolve(windows: List<RemoteWindowSnapshot<Node>>, expected: String? = "ordinary.app", activeRoot: Node = root, geometry: RemoteWindowGeometry? = null, navigationOwner: String? = null) =
+        RemoteWindowPolicy.resolve(activeRoot, expected, windows, adapter, { it == "protected.app" || it == "com.android.systemui" }, geometry, navigationOwner)
     private val displayBounds = RemoteWindowBounds(0, 0, 1080, 2400)
     private val statusBounds = RemoteWindowBounds(0, 0, 1080, 63)
     private val navigationBounds = RemoteWindowBounds(0, 2274, 1080, 2400)
@@ -97,6 +97,68 @@ class RemoteWindowPolicyTest {
         assertTrue(noBars.nativeBarBounds.isEmpty())
         refused { resolve(fullGraph(), geometry = noBars) }
         refused { resolve(fullGraph(), geometry = geometry(64)) }
+    }
+    @Test fun independentlyVerifiedRecentsOwnerAllowsOnlyTheNativeNavigationBarAndPreservesCaptureBounds() {
+        val navigation = bar(9, navigationBounds).copy(root = Node(9, "verified.recents", bounds = navigationBounds))
+        val target = resolve(listOf(window(rectangle = displayBounds), bar(8, RemoteWindowBounds(0, 0, 1080, 128)), navigation), geometry = geometry(128), navigationOwner = "verified.recents")
+        assertSame(root, target.root)
+        assertEquals(displayBounds, target.bounds)
+        assertEquals(RemoteWindowBounds(0, 128, 1080, 2274), target.inputBounds)
+        target.requireGesturePoint(500, 128)
+        target.requireGesturePoint(500, 2273)
+        invalidGesture { target.requireGesturePoint(500, 127) }
+        invalidGesture { target.requireGesturePoint(500, 2274) }
+    }
+    @Test fun navigationOwnerMustBeIndependentlyProvenAndMatchExactly() {
+        val navigation = bar(9, navigationBounds).copy(root = Node(9, "verified.recents", bounds = navigationBounds))
+        val graph = listOf(window(rectangle = displayBounds), navigation)
+        refused { resolve(graph, geometry = geometry()) }
+        refused { resolve(graph, geometry = geometry(), navigationOwner = "other.recents") }
+        refused { resolve(graph, geometry = geometry(), navigationOwner = "") }
+        refused { resolve(graph, navigationOwner = "verified.recents") }
+        val noNavigation = RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(top = 63), RemoteWindowInsets())!!
+        refused { resolve(graph, geometry = noNavigation, navigationOwner = "verified.recents") }
+    }
+    @Test fun verifiedNavigationOwnerCannotExemptStatusInteriorNearBarOrFullScreenWindows() {
+        for (rectangle in listOf(statusBounds, RemoteWindowBounds(0, 63, 1080, 126), RemoteWindowBounds(0, 2273, 1080, 2400), RemoteWindowBounds(1, 2274, 1080, 2400), displayBounds)) {
+            val candidate = bar(9, rectangle).copy(root = Node(9, "verified.recents", bounds = rectangle))
+            refused { resolve(listOf(window(rectangle = displayBounds), candidate), geometry = geometry(), navigationOwner = "verified.recents") }
+        }
+    }
+    @Test fun verifiedNavigationOwnerDoesNotExemptApplicationsOtherTypesFocusOrActivity() {
+        val navigation = bar(9, navigationBounds).copy(root = Node(9, "verified.recents", bounds = navigationBounds))
+        for (candidate in listOf(navigation.copy(kind = RemoteWindowKind.APPLICATION), navigation.copy(kind = RemoteWindowKind.OTHER), navigation.copy(active = true), navigation.copy(focused = true))) {
+            refused { resolve(listOf(window(rectangle = displayBounds), candidate), geometry = geometry(), navigationOwner = "verified.recents") }
+        }
+        val application = Node(owner = "verified.recents")
+        refused { resolve(listOf(window(node = application, rectangle = displayBounds), window(9, Node(9, "verified.recents", bounds = navigationBounds), false, false, RemoteWindowKind.APPLICATION, navigationBounds)), expected = "verified.recents", activeRoot = application, geometry = geometry(), navigationOwner = "verified.recents") }
+    }
+    @Test fun verifiedNavigationBarRequiresExactRootIdentityBoundsAndCompletePasswordGuard() {
+        val navigation = bar(9, navigationBounds).copy(root = Node(9, "verified.recents", bounds = navigationBounds))
+        for (candidate in listOf(
+            navigation.copy(root = null),
+            navigation.copy(root = Node(10, "verified.recents", bounds = navigationBounds)),
+            navigation.copy(root = Node(9, "verified.recents")),
+            navigation.copy(root = Node(9, "verified.recents", bounds = statusBounds)),
+            navigation.copy(root = Node(9, null, bounds = navigationBounds)),
+            navigation.copy(root = Node(9, "verified.recents", children = listOf(Node(password = true)), bounds = navigationBounds)),
+            navigation.copy(root = Node(9, "verified.recents", advertisedChildren = 1, bounds = navigationBounds)),
+            navigation.copy(id = -1)
+        )) refused { resolve(listOf(window(rectangle = displayBounds), candidate), geometry = geometry(), navigationOwner = "verified.recents") }
+    }
+    @Test fun navigationProofUsesOnlyNavigationInsetsIncludingRotatedEdgesAndNeverCutouts() {
+        val native = RemoteWindowGeometry.fromInsets(displayBounds, RemoteWindowInsets(top = 63), RemoteWindowInsets(right = 126), RemoteWindowInsets(left = 20, top = 128))!!
+        val navigation = RemoteWindowBounds(954, 0, 1080, 2400)
+        assertEquals(listOf(navigation), native.navigationBarBounds)
+        assertTrue(statusBounds in native.nativeBarBounds)
+        assertFalse(statusBounds in native.navigationBarBounds)
+        val candidate = bar(9, navigation).copy(root = Node(9, "verified.recents", bounds = navigation))
+        val target = resolve(listOf(window(rectangle = displayBounds), candidate), geometry = native, navigationOwner = "verified.recents")
+        target.requireGesturePoint(20, 128)
+        invalidGesture { target.requireGesturePoint(19, 200) }
+        invalidGesture { target.requireGesturePoint(954, 200) }
+        val cutout = RemoteWindowBounds(0, 0, 20, 2400)
+        refused { resolve(listOf(window(rectangle = displayBounds), bar(9, cutout).copy(root = Node(9, "verified.recents", bounds = cutout))), geometry = native, navigationOwner = "verified.recents") }
     }
     @Test fun nativeProofDoesNotExemptWrongOwnersTypesFocusOrActivity() {
         val original = bar(8, statusBounds)

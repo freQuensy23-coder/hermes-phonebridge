@@ -2,7 +2,11 @@ package org.nous.phonebridge
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
@@ -81,6 +85,29 @@ class BridgeAccessibility : AccessibilityService() {
         override fun child(node: AccessibilityNodeInfo, index: Int) = node.getChild(index)
     }
     private fun assertSafeWindow(root: AccessibilityNodeInfo) = RemoteWindowPolicy.assertSafeWindow(root, remoteNodeAdapter)
+    private fun verifiedNavigationOwner(): String? {
+        return try {
+            val resource = resources.getIdentifier("config_recentsComponentName", "string", "android")
+            if (resource == 0) return null
+            val component = ComponentName.unflattenFromString(resources.getString(resource)) ?: return null
+            val activity = packageManager.getActivityInfo(component, PackageManager.MATCH_SYSTEM_ONLY)
+            val application = activity.applicationInfo ?: return null
+            if (activity.packageName != component.packageName || application.packageName != component.packageName) return null
+            if (!activity.enabled || !application.enabled || application.flags and ApplicationInfo.FLAG_SYSTEM == 0) return null
+            val enabledStates = setOf(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+            if (packageManager.getApplicationEnabledSetting(component.packageName) !in enabledStates || packageManager.getComponentEnabledSetting(component) !in enabledStates) return null
+            if (packageManager.checkPermission("android.permission.STATUS_BAR_SERVICE", component.packageName) != PackageManager.PERMISSION_GRANTED) return null
+            component.packageName
+        } catch (_: Resources.NotFoundException) {
+            null
+        } catch (_: PackageManager.NameNotFoundException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        } catch (_: SecurityException) {
+            null
+        }
+    }
     private fun nativeWindowGeometry(): RemoteWindowGeometry? {
         return try {
             val display = getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY) ?: return null
@@ -115,7 +142,7 @@ class BridgeAccessibility : AccessibilityService() {
             }
             RemoteWindowSnapshot(window.id, kind, window.isActive, window.isFocused, RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), window.root)
         }
-        return RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked, geometry)
+        return RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked, geometry, verifiedNavigationOwner())
     }
     fun exact(root: AccessibilityNodeInfo, id: String, text: String? = null): AccessibilityNodeInfo {
         val matches = nodes(root).filter { it.viewIdResourceName == id && (text == null || it.text?.toString() == text) && it.isVisibleToUser }

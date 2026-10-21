@@ -844,6 +844,30 @@ def test_coordinator_failure_is_optional_summary_only_without_changing_receipt_o
     assert "coordinator_failure" not in receipt
 
 
+def test_navigation_owner_proof_requires_exact_enabled_framework_recents_authority():
+    source = (ROOT / "android/app/src/main/java/org/nous/phonebridge/BridgeAccessibility.kt").read_text()
+    proof = source.split("private fun verifiedNavigationOwner(): String?", 1)[1].split("private fun nativeWindowGeometry()", 1)[0]
+    for required in (
+        'resources.getIdentifier("config_recentsComponentName", "string", "android")',
+        'if (resource == 0) return null',
+        'ComponentName.unflattenFromString(resources.getString(resource)) ?: return null',
+        'packageManager.getActivityInfo(component, PackageManager.MATCH_SYSTEM_ONLY)',
+        'activity.packageName != component.packageName || application.packageName != component.packageName',
+        '!activity.enabled || !application.enabled || application.flags and ApplicationInfo.FLAG_SYSTEM == 0',
+        'packageManager.getApplicationEnabledSetting(component.packageName) !in enabledStates',
+        'packageManager.getComponentEnabledSetting(component) !in enabledStates',
+        'packageManager.checkPermission("android.permission.STATUS_BAR_SERVICE", component.packageName) != PackageManager.PERMISSION_GRANTED',
+        'Resources.NotFoundException', 'PackageManager.NameNotFoundException', 'IllegalArgumentException', 'SecurityException',
+    ):
+        assert required in proof
+    for forbidden in ('Build.VERSION', 'com.android.launcher3', 'CATEGORY_HOME', 'debugfixture', 'checkSignatures', 'getDeclaredMethod'):
+        assert forbidden not in proof
+    assert 'RemoteWindowPolicy.resolve(root, expected, snapshot, remoteNodeAdapter, ::blocked, geometry, verifiedNavigationOwner())' in source
+    policy = (ROOT / "android/app/src/main/java/org/nous/phonebridge/RemoteWindowPolicy.kt").read_text()
+    assert 'verifiedNavigationOwner: String? = null' in policy
+    assert '(otherOwner == verifiedNavigationOwner && window.bounds in geometry.navigationBarBounds)' in policy
+
+
 def test_barproof_diagnostic_uses_independent_native_metrics_and_live_categorized_service_owners():
     source = TEST.read_text()
     capture = source.split("private fun bridgeBarProofDiagnostic(): String?", 1)[1].split("private fun bridgeWindowsDiagnostic()", 1)[0]
