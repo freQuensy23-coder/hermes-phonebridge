@@ -596,6 +596,31 @@ def test_failure_evidence_keeps_only_allowlisted_source_coordinates():
     }
 
 
+def test_host_adb_focus_uses_display_dump_and_requires_one_exact_clock_window():
+    script = SCRIPT.read_text()
+    assert 'adb("shell", "dumpsys", "window", "displays")' in script
+    assert 'adb("shell", "dumpsys", "window", "windows")' not in script
+    assert 'if not clock_is_focused(focus):' in script
+    source = "def clock_is_focused(focus):" + script.split("def clock_is_focused(focus):", 1)[1].split("def write_ack", 1)[0]
+    namespace: dict[str, object] = {"re": re}
+    exec(compile(source, "host-adb-focus", "exec"), namespace)
+    focused = namespace["clock_is_focused"]
+    assert callable(focused)
+    valid = "  mCurrentFocus=Window{123abc u0 com.google.android.deskclock/com.android.deskclock.DeskClock}\n"
+    assert focused(valid)
+    assert focused("Display: mDisplayId=0\n" + valid + "  mLastFocus=null\n")
+    for value in (
+        "", "mCurrentFocus=null\n", valid + valid,
+        valid + "  mCurrentFocus=null\n",
+        valid.replace("com.google.android.deskclock/", "com.example.clock/"),
+        valid.replace("com.google.android.deskclock/", "com.google.android.deskclock.evil/"),
+        valid.replace("mCurrentFocus=", "mLastFocus="),
+        "Window #0 " + valid.strip(),
+        valid.rstrip() + " forged\n",
+    ):
+        assert not focused(value)
+
+
 def test_host_adb_json_reads_use_shell_exit_status_for_missing_private_files():
     source = SCRIPT.read_text()
     read = source.split("def read_private(name):", 1)[1].split("def write_ack", 1)[0]

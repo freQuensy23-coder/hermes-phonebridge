@@ -115,6 +115,11 @@ def read_private(name):
     return json.loads(result.stdout)
 
 
+def clock_is_focused(focus):
+    focused = re.findall(r"(?m)^\s*mCurrentFocus=([^\r\n]+)$", focus)
+    return len(focused) == 1 and re.fullmatch(r"Window\{[0-9a-f]+ u[0-9]+ com\.google\.android\.deskclock/[A-Za-z0-9_.$]+\}", focused[0].strip()) is not None
+
+
 def write_ack(name, value):
     commands = {
         "ack.json": "cat > files/debug-wholeflow/ack.pending && mv files/debug-wholeflow/ack.pending files/debug-wholeflow/ack.json",
@@ -172,8 +177,8 @@ try:
                 uptime = float(adb("shell", "cat", "/proc/uptime").stdout.split()[0]) * 1000
                 if not uptime < request["expires_elapsed_ms"] <= uptime + 20000:
                     raise RuntimeError("Host ADB tap request expired")
-                focus = adb("shell", "dumpsys", "window", "windows").stdout.decode()
-                if re.search(r"mCurrentFocus=Window\{[^\n]*\scom\.google\.android\.deskclock/[^\n]*\}", focus) is None:
+                focus = adb("shell", "dumpsys", "window", "displays").stdout.decode()
+                if not clock_is_focused(focus):
                     raise RuntimeError("Genuine Clock is not the host-observed focused window")
                 if read_private("request.json") != request:
                     raise RuntimeError("Host ADB request changed before dispatch")
