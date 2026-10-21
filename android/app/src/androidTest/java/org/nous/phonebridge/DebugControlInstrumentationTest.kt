@@ -189,13 +189,35 @@ class DebugControlInstrumentationTest {
         if (Build.VERSION.SDK_INT == 31) serverEnqueueUnsupported("screen.screenshot", args(session, pkg))
         else refused(command("screen.screenshot", args(session, pkg)), "UNSUPPORTED")
     }
+    private fun bridgeWindowsDiagnostic(): String? = try {
+        UiThread.call {
+            val service = BridgeAccessibility.current ?: return@call null
+            fun bounds(node: AccessibilityNodeInfo?): List<Int> {
+                if (node == null) return listOf(-1, -1, -1, -1)
+                val rect = Rect().also { node.getBoundsInScreen(it) }
+                return listOf(rect.left, rect.top, rect.right, rect.bottom)
+            }
+            val selected = service.rootInActiveWindow
+            val windows = service.windows.take(16)
+            val vector = mutableListOf(selected?.windowId ?: -1)
+            vector.addAll(bounds(selected))
+            vector.add(windows.size)
+            for (window in windows) {
+                val native = Rect().also { window.getBoundsInScreen(it) }
+                vector.addAll(listOf(window.id, window.type, if (window.isActive) 1 else 0, if (window.isFocused) 1 else 0,
+                    native.left, native.top, native.right, native.bottom))
+                vector.addAll(bounds(window.root))
+            }
+            vector.joinToString(",", "[", "]")
+        }
+    } catch (_: Exception) { null }
     private fun success(value: JSONObject): JSONObject {
         val observedCode = value.optJSONObject("error")?.optString("code").orEmpty()
         val allowedCodes = setOf("UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR")
         val code = observedCode.takeIf { it in allowedCodes } ?: "UNCLASSIFIED"
         val reason = when (value.optJSONObject("error")?.optString("message")) {
             "System, input method and overlay windows are excluded" -> "SYSTEM_WINDOW"
-            "Cannot inspect relevant window", "Cannot inspect selected window" -> "MISSING_WINDOW_ROOT"
+            "Cannot inspect relevant window", "Cannot inspect selected window", "No accessible active window" -> "MISSING_WINDOW_ROOT"
             "Password-bearing windows are excluded" -> "PASSWORD_WINDOW"
             "Cannot inspect advertised window child", "Window exceeds complete password-guard traversal bound" -> "INCOMPLETE_TREE"
             "Relevant window has a different owner" -> "FOREIGN_OWNER"
@@ -204,9 +226,26 @@ class DebugControlInstrumentationTest {
             "Protected UI window is present" -> "PROTECTED_UI"
             "Selected window must be an active focused application with native bounds" -> "INVALID_ACTIVE_WINDOW"
             "No inspectable active window graph", "Selected active window is missing" -> "INVALID_WINDOW_GRAPH"
+            "Clock window root unavailable", "Changed Clock window root unavailable" -> "CLOCK_MISSING_ROOT"
+            "Clock promotion popup is not a collection host" -> "CLOCK_POPUP"
+            "Clock window graph exceeds profile bounds", "Clock changed window graph exceeds profile bounds", "Clock modal-safe window graph is not recognized" -> "CLOCK_WINDOW_GRAPH"
+            "Clock window root identity changed", "Clock tree contains stale-window nodes", "Clock window safety graph changed during fresh traversal" -> "CLOCK_WINDOW_CHANGED"
+            "Clock tree exceeds complete traversal bound", "Clock refreshed child bound exceeded", "Clock tree child unavailable" -> "CLOCK_INCOMPLETE_TREE"
+            "Clock node cannot be freshly reacquired" -> "CLOCK_STALE_NODE"
+            "Clock tree contains excluded or foreign nodes" -> "CLOCK_FOREIGN_NODE"
+            "Clock detail or loading surface is active" -> "CLOCK_DETAIL_OR_LOADING"
+            "Clock complete collection anchor is unavailable" -> "CLOCK_COLLECTION_ANCHOR"
+            "Clock complete collection count is unavailable" -> "CLOCK_COLLECTION_COUNT"
+            "Clock alarm collection is not the source-bound GridLayout accessibility schema", "Unsupported Clock collection metadata", "Unsupported Clock collection item", "Unknown Clock collection rectangle" -> "CLOCK_COLLECTION_SCHEMA"
+            "Complete bounded Clock collection is not exposed", "Clock collection contains unknown rows" -> "CLOCK_COLLECTION_INCOMPLETE"
+            "Nonempty Clock collection is hidden", "Scrollable Clock collections are excluded", "Clock row is clipped" -> "CLOCK_COLLECTION_GEOMETRY"
+            "Clock alarm identity is not independently corroborated", "Clock alarm full label is not corroborated", "Duplicate current Clock identities" -> "CLOCK_ALARM_IDENTITY"
+            "Unknown Clock alarm card/switch schema" -> "CLOCK_ALARM_SCHEMA"
+            "Unknown Clock alarm scheduling graph", "Unknown or date-scheduled Clock alarm", "Paused-date, watch, firing or routine alarms are excluded" -> "CLOCK_ALARM_SCHEDULE"
             else -> "UNCLASSIFIED"
         }
-        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason", "succeeded", value.getString("status"))
+        val windows = if (value.optString("status") != "succeeded") bridgeWindowsDiagnostic()?.let { " bridge_windows=$it" }.orEmpty() else ""
+        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason$windows", "succeeded", value.getString("status"))
         return value.getJSONObject("data")
     }
     private fun refused(value: JSONObject, code: String) {

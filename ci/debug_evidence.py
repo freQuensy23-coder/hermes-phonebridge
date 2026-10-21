@@ -37,6 +37,26 @@ WHOLEFLOW_PHASES = [
 WHOLEFLOW_OPTIONAL_PHASES = {"promotion_refused", "promotion_dismissed", "failed"}
 
 
+def restricted_bridge_windows(stack):
+    markers = re.findall(r"(?<!\S)bridge_windows=(\S*)", stack)
+    if len(markers) != 1:
+        return None
+    marker = markers[0]
+    if len(marker) > 4096 or re.fullmatch(r"\[(?:0|-?[1-9][0-9]{0,9})(?:,(?:0|-?[1-9][0-9]{0,9}))*\]", marker) is None:
+        return None
+    vector = [int(value) for value in marker[1:-1].split(",")]
+    if any(value < -2147483648 or value > 2147483647 for value in vector):
+        return None
+    if len(vector) < 6 or not 0 <= vector[5] <= 16 or len(vector) != 6 + 12 * vector[5]:
+        return None
+    if vector[0] < -1 or (vector[0] == -1 and vector[1:5] != [-1] * 4):
+        return None
+    for offset in range(6, len(vector), 12):
+        if vector[offset] < 0 or vector[offset + 1] not in range(1, 7) or vector[offset + 2] not in (0, 1) or vector[offset + 3] not in (0, 1):
+            return None
+    return vector
+
+
 def sanitize_reports(reports, required, exact_names=True):
     clean = ET.Element("testsuite", {"name": "Restricted observed debug tests"})
     counts = {
@@ -109,7 +129,7 @@ def sanitize_reports(reports, required, exact_names=True):
                     original = case.find(tag)
                     stack = original.text or "" if original is not None else ""
                     files = set(name.rsplit(".", 1)[-1] + ".kt" for name in INSTRUMENTATION | UNIT)
-                    files.update({"BridgeAccessibility.kt", "BridgeService.kt", "DebugControl.kt", "RemoteWindowPolicy.kt"})
+                    files.update({"BridgeAccessibility.kt", "BridgeService.kt", "DebugControl.kt", "RemoteWindowPolicy.kt", "GoogleClockAdapter.kt", "GoogleClockProfile.kt"})
                     locations = list(dict.fromkeys(
                         file + ":" + line for file, line in re.findall(
                             r"(?m)^at org\.nous\.phonebridge\.[A-Za-z0-9_.$]+\(([A-Za-z0-9_]+\.kt):([0-9]{1,6})\)\s*$", stack
@@ -119,8 +139,12 @@ def sanitize_reports(reports, required, exact_names=True):
                     code = codes[0] if codes and codes[0] in {"UNSUPPORTED", "PERMISSION_REQUIRED", "FOREGROUND_REQUIRED", "PHONE_LOCKED", "AMBIGUOUS_STATE", "VALIDATION_ERROR", "NOT_FOUND", "EXPIRED", "INTERNAL_ERROR"} else None
                     diagnostic = {"locations": locations, "bridge_code": code}
                     reasons = re.findall(r"\bbridge_reason=([A-Z_]+)\b", stack)
-                    if reasons and reasons[0] in {"SYSTEM_WINDOW", "MISSING_WINDOW_ROOT", "PASSWORD_WINDOW", "INCOMPLETE_TREE", "FOREIGN_OWNER", "OVERLAP", "OWN_UI", "PROTECTED_UI", "INVALID_ACTIVE_WINDOW", "INVALID_WINDOW_GRAPH", "UNCLASSIFIED"}:
+                    if reasons and reasons[0] in {"SYSTEM_WINDOW", "MISSING_WINDOW_ROOT", "PASSWORD_WINDOW", "INCOMPLETE_TREE", "FOREIGN_OWNER", "OVERLAP", "OWN_UI", "PROTECTED_UI", "INVALID_ACTIVE_WINDOW", "INVALID_WINDOW_GRAPH", "UNCLASSIFIED", "CLOCK_MISSING_ROOT", "CLOCK_POPUP", "CLOCK_WINDOW_GRAPH", "CLOCK_WINDOW_CHANGED", "CLOCK_INCOMPLETE_TREE", "CLOCK_STALE_NODE", "CLOCK_FOREIGN_NODE", "CLOCK_DETAIL_OR_LOADING", "CLOCK_COLLECTION_ANCHOR", "CLOCK_COLLECTION_COUNT", "CLOCK_COLLECTION_SCHEMA", "CLOCK_COLLECTION_INCOMPLETE", "CLOCK_COLLECTION_GEOMETRY", "CLOCK_ALARM_IDENTITY", "CLOCK_ALARM_SCHEMA", "CLOCK_ALARM_SCHEDULE"}:
                         diagnostic["bridge_reason"] = reasons[0]
+                    if classname in INSTRUMENTATION:
+                        windows = restricted_bridge_windows(stack)
+                        if windows is not None:
+                            diagnostic["bridge_windows"] = windows
                     marker.text = json.dumps(diagnostic, sort_keys=True)
             counts["observed_tests"] += 1
             counts["passed_tests"] += not tags
@@ -160,6 +184,21 @@ def restricted_wholeflow(payload):
         return result
 
 
+def restricted_coordinator_failure(payload):
+    try:
+        if payload is None or len(payload) > 256:
+            return None
+        value = json.loads(payload, object_pairs_hook=list)
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], tuple) or value[0][0] != "code":
+            return None
+        code = value[0][1]
+        if isinstance(code, str) and code in {"ADB_FAILURE", "DISPLAY_BOUNDS", "REQUEST_EXPIRED", "WRONG_FOCUS", "INVALID_HANDSHAKE", "DEADLINE", "INTERNAL"}:
+            return code
+    except (ValueError, UnicodeError):
+        pass
+    return None
+
+
 def evidence_summary(instrumentation, unit, primary_status, cleanup_status, wholeflow):
     return {
         "suite": "DebugControlInstrumentationTest",
@@ -177,18 +216,18 @@ def evidence_summary(instrumentation, unit, primary_status, cleanup_status, whol
     }
 
 
-def read_report(path):
+def read_report(path, max_bytes=MAX_REPORT_BYTES):
     try:
         metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_REPORT_BYTES:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
             return None
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(descriptor, "rb") as source:
             metadata = os.fstat(source.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_REPORT_BYTES:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
                 return None
-            payload = source.read(MAX_REPORT_BYTES + 1)
-            return payload if len(payload) <= MAX_REPORT_BYTES else None
+            payload = source.read(max_bytes + 1)
+            return payload if len(payload) <= max_bytes else None
     except OSError:
         return None
 
@@ -204,6 +243,9 @@ def main():
     unit_xml, unit = sanitize_reports((read_report(path) for path in unit_paths), UNIT, exact_names=False)
     wholeflow = restricted_wholeflow(read_report(Path(os.environ["RUNNER_TEMP"]) / "debug-wholeflow-host.json"))
     summary = evidence_summary(instrumentation, unit, int(os.environ["DEBUG_CONTROL_PRIMARY_STATUS"]), int(os.environ["DEBUG_CONTROL_CLEANUP_STATUS"]), wholeflow)
+    coordinator_failure = restricted_coordinator_failure(read_report(Path(os.environ["RUNNER_TEMP"]) / "debug-wholeflow-diagnostic.json", max_bytes=256))
+    if coordinator_failure is not None:
+        summary["coordinator_failure"] = coordinator_failure
     for name, payload in (
         ("debug-control-junit.xml", instrumentation_xml),
         ("debug-control-unit-junit.xml", unit_xml),

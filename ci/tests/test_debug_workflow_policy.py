@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
-from ci.debug_evidence import INSTRUMENTATION, MAX_REPORT_BYTES, UNIT, WHOLEFLOW_PHASES, evidence_summary, read_report, restricted_wholeflow, sanitize_reports
+from ci.debug_evidence import INSTRUMENTATION, MAX_REPORT_BYTES, UNIT, WHOLEFLOW_PHASES, evidence_summary, read_report, restricted_coordinator_failure, restricted_wholeflow, sanitize_reports
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -632,3 +632,171 @@ def test_wholeflow_receipt_is_bounded_private_and_never_substitutes_for_observed
         restricted = restricted_wholeflow(json.dumps(observed | mutation).encode())
         assert restricted["receipt_valid"] and not restricted["complete"]
         assert not evidence_summary(present, unit, 0, 0, restricted)["complete"]
+
+
+def test_bridge_window_diagnostic_reads_only_live_service_numeric_geometry_on_ui_thread():
+    source = TEST.read_text()
+    capture = source.split("private fun bridgeWindowsDiagnostic(): String?", 1)[1].split("private fun success(", 1)[0]
+    for required in (
+        "UiThread.call {", "BridgeAccessibility.current", "service.rootInActiveWindow",
+        "service.windows.take(16)", "selected?.windowId ?: -1", "vector.add(windows.size)",
+        "listOf(-1, -1, -1, -1)", "window.id, window.type",
+        "if (window.isActive) 1 else 0", "if (window.isFocused) 1 else 0",
+        "window.getBoundsInScreen(it)", "node.getBoundsInScreen(it)", "bounds(window.root)",
+        'vector.joinToString(",", "[", "]")', "catch (_: Exception) { null }",
+    ):
+        assert required in capture
+    for forbidden in (
+        "automation", "packageName", "text", "contentDescription", "viewIdResourceName",
+        "childCount", "getChild", "toString()", "shell(", "performAction", "layer",
+    ):
+        assert forbidden not in capture
+    success = source.split("private fun success(value: JSONObject)", 1)[1].split("private fun refused(", 1)[0]
+    assert 'if (value.optString("status") != "succeeded") bridgeWindowsDiagnostic()' in success
+    assert '" bridge_windows=$it"' in success
+    assert 'bridge_reason=$reason$windows' in success
+    assert '"succeeded", value.getString("status")' in success
+    assert '"Unsupported Clock collection item", "Unknown Clock collection rectangle" -> "CLOCK_COLLECTION_SCHEMA"' in success
+    assert '"Clock promotion popup is not a collection host" -> "CLOCK_POPUP"' in success
+    assert '"Clock window root unavailable"' in success
+
+
+def bridge_diagnostic_report(stack, outcome="failure", classname="org.nous.phonebridge.DebugControlInstrumentationTest"):
+    name = sorted(INSTRUMENTATION["org.nous.phonebridge.DebugControlInstrumentationTest"])[0]
+    report = ET.fromstring(raw_report(classname, [(name, outcome)]))
+    report.find("testcase/" + outcome).text = stack
+    return ET.tostring(report)
+
+
+def test_window_numeric_vector_preserves_geometry_null_roots_and_outcomes_without_private_data():
+    vectors = [
+        [42, 0, 63, 1080, 2214, 2,
+         42, 1, 1, 1, 0, 63, 1080, 2214, 0, 63, 1080, 2214,
+         43, 3, 0, 0, 0, 2214, 1080, 2280, -1, -1, -1, -1],
+        [-1, -1, -1, -1, -1, 0],
+        [42, -2147483648, -1, 2147483647, 0, 1,
+         42, 6, 0, 1, -2147483648, -1, 2147483647, 0, -1, -1, -1, -1],
+        [42, 0, 0, 1080, 2280, 16] + [value for window in range(16) for value in [window, 1, 0, 0, 0, 0, 1080, 2280, -1, -1, -1, -1]],
+    ]
+    for vector in vectors:
+        for outcome, reason in (("failure", "SYSTEM_WINDOW"), ("error", "PROTECTED_UI")):
+            stack = "java.lang.AssertionError: PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=" + reason + " bridge_windows=" + json.dumps(vector, separators=(",", ":")) + " expected:<succeeded> but was:<failed>\nPRIVATE_STACK"
+            xml, counts = sanitize_reports([bridge_diagnostic_report(stack, outcome)], INSTRUMENTATION)
+            assert_observed_totals(xml, counts, [outcome])
+            marker = ET.fromstring(xml).find("testcase/" + outcome)
+            assert json.loads(marker.text) == {
+                "bridge_code": "UNSUPPORTED", "bridge_reason": reason,
+                "bridge_windows": vector, "locations": [],
+            }
+            assert not counts["complete"]
+
+
+def test_window_numeric_vector_rejects_malformed_private_or_unbounded_markers():
+    vector = [42, 0, 0, 1080, 2280, 1, 42, 1, 1, 1, 0, 0, 1080, 2280, -1, -1, -1, -1]
+    token = json.dumps(vector, separators=(",", ":"))
+    malformed = [
+        "PRIVATE_TOKEN", "", "null", "{}", "[]", "[1,2]", token + "PRIVATE_TOKEN",
+        token + ",PRIVATE_TOKEN", token + ";PRIVATE_TOKEN", token + "\\PRIVATE_TOKEN",
+        token.replace("42", "PRIVATE_TOKEN", 1), token.replace("42", '"42"', 1),
+        token.replace("42", "true", 1), token.replace("42", "42.0", 1),
+        token.replace("42", "4.2e1", 1), token.replace("42", "+42", 1),
+        token.replace("42", "042", 1), token.replace("42", "４２", 1),
+        token.replace("42", "2147483648", 1), token.replace("42", "-2147483649", 1),
+        token.replace(",0,", ",-0,", 1), token.replace(",", ", ", 1),
+        token.replace(",", ",\n", 1), token.replace(",", ",\t", 1),
+        token[:-1] + ",0]", token[:-1], token + "]", "[" + "1," * 4096 + "1]",
+        token + " bridge_windows=" + token,
+        "PRIVATE_TOKEN bridge_windows=" + token,
+    ]
+    for index, value in ((0, -2), (5, -1), (5, 0), (5, 2), (5, 17), (6, -1), (7, 0), (7, 7), (8, -1), (8, 2), (9, 2)):
+        changed = vector.copy()
+        changed[index] = value
+        malformed.append(json.dumps(changed, separators=(",", ":")))
+    malformed.append(json.dumps([-1, 0, 0, 0, 0, 0], separators=(",", ":")))
+    malformed.append(json.dumps([42, 0, 0, 1080, 2280, 17] + vector[6:] * 17, separators=(",", ":")))
+    for token in malformed:
+        stack = "PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=SYSTEM_WINDOW bridge_windows=" + token
+        xml, counts = sanitize_reports([bridge_diagnostic_report(stack)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        marker = ET.fromstring(xml).find("testcase/failure")
+        assert json.loads(marker.text) == {"bridge_code": "UNSUPPORTED", "bridge_reason": "SYSTEM_WINDOW", "locations": []}
+        assert b"bridge_windows" not in xml
+        assert not counts["complete"]
+
+
+def test_clock_reason_categories_and_direct_source_frames_are_fixed_and_privacy_filtered():
+    source = TEST.read_text().split("private fun success(value: JSONObject)", 1)[1].split("private fun refused(", 1)[0]
+    reasons = {
+        "CLOCK_MISSING_ROOT", "CLOCK_POPUP", "CLOCK_WINDOW_GRAPH", "CLOCK_WINDOW_CHANGED",
+        "CLOCK_INCOMPLETE_TREE", "CLOCK_STALE_NODE", "CLOCK_FOREIGN_NODE", "CLOCK_DETAIL_OR_LOADING",
+        "CLOCK_COLLECTION_ANCHOR", "CLOCK_COLLECTION_COUNT", "CLOCK_COLLECTION_SCHEMA",
+        "CLOCK_COLLECTION_INCOMPLETE", "CLOCK_COLLECTION_GEOMETRY", "CLOCK_ALARM_IDENTITY",
+        "CLOCK_ALARM_SCHEMA", "CLOCK_ALARM_SCHEDULE",
+    }
+    assert set(re.findall(r'-> "(CLOCK_[A-Z_]+)"', source)) == reasons
+    for reason in reasons:
+        stack = (
+            "PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=" + reason + "\n"
+            "at org.nous.phonebridge.GoogleClockAdapter.requireSchema(GoogleClockAdapter.kt:26)\n"
+            "at org.nous.phonebridge.GoogleClockAdapter.index(GoogleClockAdapter.kt:116)\n"
+            "at org.nous.phonebridge.GoogleClockModalGraph.requireSingle(GoogleClockProfile.kt:88)\n"
+            "at org.nous.phonebridge.PRIVATE_TOKEN(PRIVATE_TOKEN.kt:123)\n"
+        )
+        xml, counts = sanitize_reports([bridge_diagnostic_report(stack)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        marker = ET.fromstring(xml).find("testcase/failure")
+        assert json.loads(marker.text) == {
+            "bridge_code": "UNSUPPORTED", "bridge_reason": reason,
+            "locations": ["GoogleClockAdapter.kt:26", "GoogleClockAdapter.kt:116", "GoogleClockProfile.kt:88"],
+        }
+    for reason in ("PRIVATE_TOKEN", "CLOCK_COLLECTION_SCHEMA_PRIVATE_TOKEN", "CLOCK_POPUP_PRIVATE", "CLOCK_UNRECOGNIZED"):
+        xml, counts = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN bridge_reason=" + reason)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        assert "bridge_reason" not in json.loads(ET.fromstring(xml).find("testcase/failure").text)
+
+
+def test_window_markers_from_unexpected_or_unit_cases_are_not_exported():
+    stack = "PRIVATE_TOKEN bridge_windows=[-1,-1,-1,-1,-1,0]"
+    for classname, required in (("PRIVATE_CLASS", INSTRUMENTATION), ("org.nous.phonebridge.DebugPayloadBoundsTest", UNIT)):
+        xml, counts = sanitize_reports([bridge_diagnostic_report(stack, classname=classname)], required, exact_names=False)
+        assert_observed_totals(xml, counts, ["failure"])
+        assert b"bridge_windows" not in xml
+
+
+def test_private_coordinator_failure_accepts_only_one_exact_enum_and_rejects_secrets(tmp_path):
+    codes = {"ADB_FAILURE", "DISPLAY_BOUNDS", "REQUEST_EXPIRED", "WRONG_FOCUS", "INVALID_HANDSHAKE", "DEADLINE", "INTERNAL"}
+    for code in codes:
+        assert restricted_coordinator_failure(json.dumps({"code": code}).encode()) == code
+    for payload in (
+        None, b"PRIVATE_TOKEN", b"{}", b"null", b"[]", b"[1]", b'[["code","ADB_FAILURE"]]',
+        b'[{"code":"ADB_FAILURE"}]', b'{"code":true}', b'{"code":1}', b'{"code":null}',
+        b'{"code":{"private":"PRIVATE_TOKEN"}}', b'{"code":["ADB_FAILURE"]}',
+        b'{"code":"PRIVATE_TOKEN"}', b'{"code":"ADB_FAILURE_PRIVATE_TOKEN"}',
+        b'{"code":"ADB_FAILURE","private":"PRIVATE_TOKEN"}',
+        b'{"private":"PRIVATE_TOKEN","code":"ADB_FAILURE"}',
+        b'{"code":"PRIVATE_TOKEN","code":"ADB_FAILURE"}',
+        b'{"code":"ADB_FAILURE","code":"ADB_FAILURE"}',
+        b'{"code":"ADB_FAILURE"} PRIVATE_TOKEN', b'\xff',
+        b'{"code":"ADB_FAILURE"}' + b" " * 256,
+    ):
+        assert restricted_coordinator_failure(payload) is None
+    path = tmp_path / "debug-wholeflow-diagnostic.json"
+    path.write_bytes(b'{"code":"ADB_FAILURE"}')
+    assert restricted_coordinator_failure(read_report(path, max_bytes=256)) == "ADB_FAILURE"
+    path.write_bytes(b'{"code":"ADB_FAILURE"}' + b" " * 256)
+    assert read_report(path, max_bytes=256) is None
+    assert restricted_coordinator_failure(read_report(path, max_bytes=256)) is None
+
+
+def test_coordinator_failure_is_optional_summary_only_without_changing_receipt_or_counts():
+    source = (ROOT / "ci/debug_evidence.py").read_text()
+    main = source.split("def main():", 1)[1]
+    assert '"debug-wholeflow-diagnostic.json", max_bytes=256' in main
+    assert 'coordinator_failure = restricted_coordinator_failure(read_report(' in main
+    assert 'if coordinator_failure is not None:\n        summary["coordinator_failure"] = coordinator_failure' in main
+    summary = evidence_summary({"complete": False}, {"complete": False}, 1, 0, {"complete": False})
+    assert "coordinator_failure" not in summary
+    receipt = restricted_wholeflow(json.dumps({"phases": [], "host_adb_taps": 0, "coordinator_error": True}).encode())
+    assert receipt["receipt_valid"]
+    assert receipt["coordinator_error"] and not receipt["complete"]
+    assert "coordinator_failure" not in receipt
