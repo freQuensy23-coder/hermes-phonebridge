@@ -185,8 +185,27 @@ try:
         time.sleep(0.3)
     if not stopping:
         raise RuntimeError("Host ADB coordinator deadline exceeded")
-except Exception:
+except Exception as error:
     receipt["coordinator_error"] = True
+    reasons = {
+        "Bounded host ADB command failed": "ADB_FAILURE",
+        "Host ADB display bounds unavailable": "DISPLAY_BOUNDS",
+        "Host ADB coordinates exceed actual display": "DISPLAY_BOUNDS",
+        "Host ADB tap request expired": "REQUEST_EXPIRED",
+        "Genuine Clock is not the host-observed focused window": "WRONG_FOCUS",
+        "Host ADB coordinator deadline exceeded": "DEADLINE",
+    }
+    handshake_errors = {
+        "App-private handshake exceeds bound", "Invalid restricted native-flow progress",
+        "Native-flow progress cannot rewrite observations", "Only one immutable host ADB tap request is allowed",
+        "Host ADB request schema mismatch", "Host ADB target is not allowlisted",
+        "Host ADB nonce/session binding is invalid", "Host ADB coordinates/deadline must be integers",
+        "Host ADB tap requested outside its native test phase", "Host ADB request changed before dispatch",
+    }
+    reason = reasons.get(str(error), "INVALID_HANDSHAKE" if str(error) in handshake_errors else "INTERNAL")
+    diagnostic = receipt_path.with_name("debug-wholeflow-diagnostic.json")
+    diagnostic.write_text(json.dumps({"code": reason}))
+    diagnostic.chmod(0o600)
     publish()
     raise
 finally:
