@@ -68,6 +68,12 @@ jobs:
               if boundary is not None:
                   assert any(case.attrib.get("name") == boundary for case in cases)
           PY
+      - name: Retrieve exact genuine Google Clock fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          timeout 120s gh release download phonebridge-ci-vendor-fixtures --repo freQuensy23-coder/hermes-phonebridge --pattern google-8.2.apk --dir "$RUNNER_TEMP/clock-fixture"
+          printf '%s  %s\n' 'cf71cbc0728bb44e37d5ad19772b6ae9b39aae07b46945e7cde3a930cbccd383' "$RUNNER_TEMP/clock-fixture/google-8.2.apk" | sha256sum --check --status
       - name: Allow ephemeral emulator KVM
         run: sudo chmod 666 /dev/kvm
       - name: Start synthetic public HTTPS and authenticated WSS server

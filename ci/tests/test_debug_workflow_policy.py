@@ -1,9 +1,10 @@
+import json
 import os
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
 
-from ci.debug_evidence import INSTRUMENTATION, MAX_REPORT_BYTES, UNIT, evidence_summary, read_report, sanitize_reports
+from ci.debug_evidence import INSTRUMENTATION, MAX_REPORT_BYTES, UNIT, WHOLEFLOW_PHASES, evidence_summary, read_report, restricted_wholeflow, sanitize_reports
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +21,7 @@ EXPECTED_TESTS = {
     "accessibilitySettingLossRevokesConsentAndPreventsEffects",
     "secureAndPasswordWindowsRefuseCaptureAndEffects",
     "serviceTeardownDoesNotRestoreIndefiniteConsent",
+    "realWholeFlowHttpWssGenuineClockHostAdbToggleAndRestartPreserveSurvivor",
 }
 PINS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -48,8 +50,8 @@ def test_automatic_read_only_matrix_uses_only_existing_pinned_actions():
         assert reference in old
     for forbidden in (
         "workflow_dispatch", "pull_request_target", "workflow_run", "self-hosted",
-        "secrets.", "github.token", "GH_TOKEN", "id-token:", "contents: write",
-        "continue-on-error", "testlab", "gcloud", "google-github-actions", "release download",
+        "secrets.", "id-token:", "contents: write",
+        "continue-on-error", "testlab", "gcloud", "google-github-actions",
     ):
         assert forbidden not in source
 
@@ -90,7 +92,7 @@ def test_required_unit_build_python_and_exact_instrumentation_route_are_not_opti
     assert "ci/prepare_emulator_server.py start" in workflow
     assert "ci/prepare_emulator_server.py stop" in workflow
     assert "ci/prepare_emulator_server.py stop" in script
-    for forbidden in ("run_android_instrumentation.sh", "google-8.2", "clock-fixture", "phonebridge pair", "logcat", "bugreport"):
+    for forbidden in ("run_android_instrumentation.sh", "phonebridge pair", "logcat", "bugreport"):
         assert forbidden not in workflow + script
 
 
@@ -233,7 +235,7 @@ def test_only_isolated_synthetic_server_helper_supplies_credentials_and_transpor
     assert '"$PHONEBRIDGE_CI_PUBLIC_URL" =~ ^https://' in script
     assert 'timeout --signal=TERM --kill-after=30s 18m ./gradlew' in script
     assert 'timeout 60s adb -s "$serial" install -r' in script
-    for forbidden in ("curl ", "wget ", "gh release", "aws ", "gcloud ", "firebase ", "oauth", "PHONEBRIDGE_KEYSTORE"):
+    for forbidden in ("curl ", "wget ", "aws ", "gcloud ", "firebase ", "oauth", "PHONEBRIDGE_KEYSTORE"):
         assert forbidden not in workflow + script
 
 
@@ -324,12 +326,13 @@ def test_evidence_complete_pass_counts_match_published_xml_and_fixed_summary():
     unit_reports = [raw_report(name, [(next(iter(required or {"realUnitMethod"})), None)]) for name, required in UNIT.items()]
     unit_xml, units = sanitize_reports(unit_reports, UNIT, exact_names=False)
     assert_observed_totals(unit_xml, units, ["pass"] * len(UNIT))
-    summary = evidence_summary(counts, units, 0, 0)
+    wholeflow = restricted_wholeflow(json.dumps({"phases": WHOLEFLOW_PHASES, "host_adb_taps": 1, "coordinator_error": False}).encode())
+    summary = evidence_summary(counts, units, 0, 0, wholeflow)
     assert summary["instrumentation"] == counts
     assert summary["unit"] == units
     assert summary["complete"]
     for primary, cleanup in ((1, 0), (0, 1), (143, 1)):
-        failed = evidence_summary(counts, units, primary, cleanup)
+        failed = evidence_summary(counts, units, primary, cleanup, wholeflow)
         assert not failed["complete"]
         assert failed["primary_process_exit"] == primary
         assert failed["cleanup_exit"] == cleanup
@@ -529,3 +532,72 @@ def test_report_loader_fifo_replacement_is_nonblocking_and_rejected_after_open(t
     assert read_report(path) is None
     assert opened == [path]
 
+
+
+def test_wholeflow_requires_exact_ninth_case_genuine_asset_and_observable_host_adb_transport():
+    workflow = WORKFLOW.read_text()
+    script = SCRIPT.read_text()
+    source = TEST.read_text()
+    assert len(EXPECTED_TESTS) == 9
+    assert "realWholeFlowHttpWssGenuineClockHostAdbToggleAndRestartPreserveSurvivor" in EXPECTED_TESTS
+    assert workflow.count("GH_TOKEN: ${{ github.token }}") == 1
+    assert "timeout 120s gh release download phonebridge-ci-vendor-fixtures --repo freQuensy23-coder/hermes-phonebridge --pattern google-8.2.apk" in workflow
+    assert "cf71cbc0728bb44e37d5ad19772b6ae9b39aae07b46945e7cde3a930cbccd383" in workflow
+    assert "sha256sum --check --status" in workflow
+    assert '-Pandroid.testInstrumentationRunnerArguments.genuineClockWholeFlow=true' in script
+    for required in (
+        'ro.product.cpu.abi', 'ro.build.version.sdk', 'shell pm clear com.google.android.deskclock',
+        '"$RUNNER_TEMP/clock-fixture/google-8.2.apk"',
+        '["adb", "-s", serial, *arguments]',
+        'adb("shell", "input", "tap", str(request["x"]), str(request["y"]))',
+        'adb("exec-out", "run-as", package', '"expires_elapsed_ms"',
+        '"expected_package"] != clock', '"debug_session"', '"nonce"',
+        'read_private("request.json") != request', 'if consumed is not None:',
+        'time.monotonic() + 18 * 60', 'timeout=10', 'len(result.stdout) > 4096',
+        'kill -TERM "$adb_coordinator_pid"', 'wait "$adb_coordinator_pid" || cleanup_status=1',
+        '"host_adb_shell_input"', '"host_adb_taps"] = 1',
+    ):
+        assert required in script
+    for required in (
+        'GoogleClockProfile.installed(context)', 'nativeClockNodes', 'automation.rootInActiveWindow',
+        '"alarm_recycler_view"', '"digital_clock"', '"onoff"',
+        'requestHostAdbToggle(session, target)', 'target.copy(enabled = false)',
+        '"clock.alarms.create"', '"clock.alarms.list"', '"clock.alarms.disable"', '"clock.alarms.enable"',
+        'genericClockTap(session, nativeAlarmCard(target.label))', 'genericClockTap(session, deletion)',
+        'expectNativeAlarms(baseline + survivor)', 'showNativeAlarms(restart = true)',
+        'shell("pidof $clockPackage").trim().isEmpty()',
+        'wholeFlowPhase("completed")', 'wholeFlowPhase("failed")',
+    ):
+        assert required in source
+    assert 'ClockAdapters(' not in source
+    assert 'NativeClocks(' not in source
+
+
+def test_wholeflow_receipt_is_bounded_private_and_never_substitutes_for_observed_junit():
+    observed = {"phases": WHOLEFLOW_PHASES, "host_adb_taps": 1, "coordinator_error": False}
+    receipt = restricted_wholeflow(json.dumps(observed).encode())
+    assert receipt["receipt_valid"] and receipt["complete"]
+    classname, names = next(iter(INSTRUMENTATION.items()))
+    _, missing = sanitize_reports([], INSTRUMENTATION)
+    _, present = sanitize_reports([raw_report(classname, [(name, None) for name in names])], INSTRUMENTATION)
+    _, unit = sanitize_reports([raw_report(name, [(next(iter(required or {"realUnitMethod"})), None)]) for name, required in UNIT.items()], UNIT, exact_names=False)
+    assert not evidence_summary(missing, unit, 0, 0, receipt)["complete"]
+    for value in (
+        None, b"PRIVATE", b"x" * 4097,
+        json.dumps(observed | {"private": "PRIVATE"}).encode(),
+        json.dumps(observed | {"phases": WHOLEFLOW_PHASES + ["PRIVATE"]}).encode(),
+        json.dumps(observed | {"phases": WHOLEFLOW_PHASES * 3}).encode(),
+        json.dumps(observed | {"host_adb_taps": True}).encode(),
+        json.dumps(observed | {"host_adb_taps": 2}).encode(),
+    ):
+        restricted = restricted_wholeflow(value)
+        assert not restricted["receipt_valid"]
+        assert "PRIVATE" not in json.dumps(restricted)
+        assert not evidence_summary(present, unit, 0, 0, restricted)["complete"]
+    for mutation in (
+        {"phases": WHOLEFLOW_PHASES[:-1]}, {"phases": WHOLEFLOW_PHASES + ["failed"]},
+        {"phases": list(reversed(WHOLEFLOW_PHASES))}, {"host_adb_taps": 0}, {"coordinator_error": True},
+    ):
+        restricted = restricted_wholeflow(json.dumps(observed | mutation).encode())
+        assert restricted["receipt_valid"] and not restricted["complete"]
+        assert not evidence_summary(present, unit, 0, 0, restricted)["complete"]

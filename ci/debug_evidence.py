@@ -16,6 +16,7 @@ INSTRUMENTATION = {
         "accessibilitySettingLossRevokesConsentAndPreventsEffects",
         "secureAndPasswordWindowsRefuseCaptureAndEffects",
         "serviceTeardownDoesNotRestoreIndefiniteConsent",
+        "realWholeFlowHttpWssGenuineClockHostAdbToggleAndRestartPreserveSurvivor",
     },
 }
 UNIT = {
@@ -28,6 +29,12 @@ MAX_REPORT_BYTES = 4 * 1024 * 1024
 MAX_REPORTS = 64
 MAX_CASES = 4096
 OUTCOMES = ("failure", "error", "skipped")
+WHOLEFLOW_PHASES = [
+    "clock_ready", "baseline_listed", "target_created", "survivor_created", "created_restarted",
+    "adb_requested", "adb_observed", "adb_restarted", "enabled_restarted", "disabled_restarted",
+    "reenabled_restarted", "debug_detail", "debug_deleted", "deleted_restarted", "completed",
+]
+WHOLEFLOW_OPTIONAL_PHASES = {"promotion_refused", "promotion_dismissed", "failed"}
 
 
 def sanitize_reports(reports, required, exact_names=True):
@@ -116,12 +123,33 @@ def sanitize_reports(reports, required, exact_names=True):
     return ET.tostring(clean, encoding="utf-8", xml_declaration=True), counts
 
 
-def evidence_summary(instrumentation, unit, primary_status, cleanup_status):
+def restricted_wholeflow(payload):
+    result = {"receipt_valid": False, "phases": [], "host_adb_taps": 0, "coordinator_error": None, "complete": False}
+    try:
+        if payload is None or len(payload) > 4096:
+            return result
+        value = json.loads(payload)
+        if not isinstance(value, dict) or set(value) != {"phases", "host_adb_taps", "coordinator_error"}:
+            return result
+        phases = value["phases"]
+        if not isinstance(phases, list) or len(phases) > 32 or any(not isinstance(phase, str) or phase not in WHOLEFLOW_PHASES + list(WHOLEFLOW_OPTIONAL_PHASES) for phase in phases):
+            return result
+        if type(value["host_adb_taps"]) is not int or value["host_adb_taps"] not in (0, 1) or type(value["coordinator_error"]) is not bool:
+            return result
+        result.update(value, receipt_valid=True)
+        result["complete"] = [phase for phase in phases if phase not in {"promotion_refused", "promotion_dismissed"}] == WHOLEFLOW_PHASES and value["host_adb_taps"] == 1 and not value["coordinator_error"]
+        return result
+    except (ValueError, UnicodeError):
+        return result
+
+
+def evidence_summary(instrumentation, unit, primary_status, cleanup_status, wholeflow):
     return {
         "suite": "DebugControlInstrumentationTest",
         "instrumentation": instrumentation,
         "unit": unit,
-        "complete": instrumentation["complete"] and unit["complete"] and primary_status == 0 and cleanup_status == 0,
+        "complete": instrumentation["complete"] and unit["complete"] and wholeflow["complete"] and primary_status == 0 and cleanup_status == 0,
+        "wholeflow": wholeflow,
         "primary_process_exit": primary_status,
         "cleanup_exit": cleanup_status,
         "physical_device_claim": False,
@@ -157,7 +185,8 @@ def main():
     instrumentation_xml, instrumentation = sanitize_reports((read_report(path) for path in instrumentation_paths), INSTRUMENTATION)
     unit_paths = (root / "android/app/build/test-results/testDebugUnitTest" / ("TEST-" + classname + ".xml") for classname in UNIT)
     unit_xml, unit = sanitize_reports((read_report(path) for path in unit_paths), UNIT, exact_names=False)
-    summary = evidence_summary(instrumentation, unit, int(os.environ["DEBUG_CONTROL_PRIMARY_STATUS"]), int(os.environ["DEBUG_CONTROL_CLEANUP_STATUS"]))
+    wholeflow = restricted_wholeflow(read_report(Path(os.environ["RUNNER_TEMP"]) / "debug-wholeflow-host.json"))
+    summary = evidence_summary(instrumentation, unit, int(os.environ["DEBUG_CONTROL_PRIMARY_STATUS"]), int(os.environ["DEBUG_CONTROL_CLEANUP_STATUS"]), wholeflow)
     for name, payload in (
         ("debug-control-junit.xml", instrumentation_xml),
         ("debug-control-unit-junit.xml", unit_xml),

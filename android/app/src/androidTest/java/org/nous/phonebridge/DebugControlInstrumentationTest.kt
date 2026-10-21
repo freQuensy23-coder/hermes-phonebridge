@@ -26,6 +26,10 @@ import org.junit.Test
 import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
+import java.io.File
+import java.util.Calendar
+import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
@@ -45,6 +49,11 @@ class DebugControlInstrumentationTest {
     private var originalEnabled: String? = null
     private var settingsCaptured = false
     private var originalAutomationFlags: Int? = null
+    private val clockPackage = "com.google.android.deskclock"
+    private var clockFixtureActive = false
+    private var originalTimeFormat: String? = null
+    private val wholeFlowDirectory get() = File(context.filesDir, "debug-wholeflow")
+    private val wholeFlowPhases = mutableListOf<String>()
 
     @get:Rule val cleanupRule = TestRule { base, _ ->
         object : Statement() {
@@ -66,6 +75,14 @@ class DebugControlInstrumentationTest {
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, originalServices) },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, originalEnabled) },
                     { shell("am force-stop $fixture"); Unit },
+                    {
+                        if (clockFixtureActive) {
+                            shell("am force-stop $clockPackage")
+                            assertTrue(shell("pm clear $clockPackage").contains("Success"))
+                            shell(if (originalTimeFormat == null) "settings delete system time_12_24" else "settings put system time_12_24 ${quote(originalTimeFormat!!)}")
+                            waitUntil { Settings.System.getString(context.contentResolver, Settings.System.TIME_12_24) == originalTimeFormat }
+                        }
+                    },
                     {
                         originalAutomationFlags?.let { flags ->
                             val serviceInfo = automation.serviceInfo ?: error("Independent automation service info unavailable during restore")
@@ -504,5 +521,262 @@ class DebugControlInstrumentationTest {
         assertFalse(debugStatus().getBoolean("enabled"))
         showFixture()
         unavailableConsentRefusal("screen.tree", args(old))
+    }
+
+    private class NativeClockNotReady : RuntimeException()
+    private data class NativeAlarm(val label: String, val time: String, val enabled: Boolean, val schedule: String)
+    private fun nativeClockNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+            check(depth <= 30 && result.size < 400 && node.childCount <= 100)
+            if (!node.refresh()) throw NativeClockNotReady()
+            check(node.packageName?.toString() == clockPackage && !node.isPassword)
+            result.add(node)
+            repeat(node.childCount) { visit(node.getChild(it) ?: throw NativeClockNotReady(), depth + 1) }
+        }
+        visit(root, 0)
+        return result
+    }
+    private fun nativeClockRoot(): AccessibilityNodeInfo = automation.rootInActiveWindow
+        ?.takeIf { it.packageName?.toString() == clockPackage } ?: throw NativeClockNotReady()
+    private fun nativeOne(nodes: List<AccessibilityNodeInfo>, id: String): AccessibilityNodeInfo =
+        nodes.single { it.viewIdResourceName == "$clockPackage:id/$id" && it.isVisibleToUser }
+    private fun nativeAlarmCard(label: String): AccessibilityNodeInfo {
+        var node = nativeClockNodes(nativeClockRoot()).single { it.viewIdResourceName == "$clockPackage:id/label" && it.text?.toString() == label && it.isVisibleToUser }
+        repeat(30) {
+            if (node.viewIdResourceName == "$clockPackage:id/alarm_card") return node
+            node = node.parent ?: error("Genuine Clock alarm card ancestry missing")
+        }
+        error("Genuine Clock alarm card ancestry exceeded bound")
+    }
+    private fun nativeAlarms(): List<NativeAlarm> {
+        val nodes = nativeClockNodes(nativeClockRoot())
+        val collection = nodes.singleOrNull { it.viewIdResourceName == "$clockPackage:id/alarm_recycler_view" && it.isVisibleToUser } ?: throw NativeClockNotReady()
+        val info = collection.collectionInfo ?: throw NativeClockNotReady()
+        val cards = nodes.filter { it.viewIdResourceName == "$clockPackage:id/alarm_card" && it.isVisibleToUser }
+        val count = info.rowCount * info.columnCount
+        check(count in 0..8)
+        if (cards.size != count) throw NativeClockNotReady()
+        val indexes = cards.map { card ->
+            var current = card
+            var index: Int? = null
+            repeat(30) {
+                if (index == null) {
+                    index = current.collectionItemInfo?.rowIndex
+                    if (index == null) current = current.parent ?: throw NativeClockNotReady()
+                }
+            }
+            index ?: throw NativeClockNotReady()
+        }
+        if (indexes.sorted() != (0 until count).toList()) throw NativeClockNotReady()
+        return cards.map { card ->
+            val row = nativeClockNodes(card)
+            val time = nativeOne(row, "digital_clock")
+            val toggle = nativeOne(row, "onoff")
+            check(toggle.isCheckable && toggle.isEnabled)
+            check(time.text?.toString() == time.contentDescription?.toString())
+            val labels = row.filter { it.viewIdResourceName == "$clockPackage:id/label" && it.isVisibleToUser }
+            val days = row.filter { it.viewIdResourceName == "$clockPackage:id/days_of_week" && it.isVisibleToUser }
+            check(labels.size <= 1 && days.size <= 1)
+            if (days.isEmpty()) check(nativeOne(row, "upcoming_instance_label").text?.toString() in setOf("Today", "Tomorrow", "Not scheduled"))
+            NativeAlarm(labels.singleOrNull()?.text?.toString().orEmpty(), time.text.toString(), toggle.isChecked,
+                days.singleOrNull()?.contentDescription?.toString().orEmpty())
+        }.sortedWith(compareBy({ it.time }, { it.label }))
+    }
+    private fun wholeFlowPhase(phase: String) {
+        wholeFlowPhases.add(phase)
+        check(wholeFlowPhases.size <= 32)
+        wholeFlowDirectory.mkdirs()
+        val pending = File(wholeFlowDirectory, "progress.pending")
+        pending.writeText(JSONObject().put("phases", org.json.JSONArray(wholeFlowPhases)).toString())
+        check(pending.renameTo(File(wholeFlowDirectory, "progress.json")))
+        waitUntil(15000) {
+            val ack = File(wholeFlowDirectory, "progress-ack.json")
+            ack.isFile && JSONObject(ack.readText()).optInt("observed_phases") == wholeFlowPhases.size
+        }
+    }
+    private fun nativeHostIdentity(nodes: List<AccessibilityNodeInfo>): List<String> = nodes.filter {
+        it.isVisibleToUser && it.viewIdResourceName?.substringAfter(":id/") in setOf("label", "digital_clock", "onoff", "days_of_week", "clock", "alarm_label", "repeat_days", "day_button_0", "day_button_1", "day_button_2", "day_button_3", "day_button_4", "day_button_5", "day_button_6")
+    }.map { "${it.viewIdResourceName}|${it.text}|${it.contentDescription}|${it.isChecked}" }.sorted()
+    private fun dismissKnownClockFixturePromotion() {
+        repeat(3) {
+            val applications = automation.windows.filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+            if (applications.size == 1) return
+            assertEquals("Only a single exact genuine Clock promotion may be dismissed by fixture setup", 2, applications.size)
+            assertTrue(applications.all { it.root?.packageName?.toString() == clockPackage })
+            val host = applications.single { it.id == nativeClockRoot().windowId && it.isActive && it.isFocused }
+            val popup = applications.single { it.id != host.id }
+            assertFalse(popup.isActive || popup.isFocused)
+            assertTrue(popup.layer > host.layer)
+            val popupNodes = nativeClockNodes(popup.root ?: error("Clock promotion root missing"))
+            val body = nativeOne(popupNodes, "body")
+            val text = body.text?.toString().orEmpty()
+            val music = Regex("You can now choose music from (Calm|Spotify|Pandora|YouTube Music), (Calm|Spotify|Pandora|YouTube Music), (Calm|Spotify|Pandora|YouTube Music), & (Calm|Spotify|Pandora|YouTube Music)").matchEntire(text)
+            assertTrue(text in setOf("Set a consistent bedtime for better sleep", "You can find the privacy policy here") ||
+                (music != null && music.groupValues.drop(1).toSet() == setOf("Calm", "Spotify", "Pandora", "YouTube Music") && nativeOne(popupNodes, "header").text?.toString() == "Wake up to music"))
+            assertEquals("android.widget.TextView", body.className?.toString())
+            assertFalse(popupNodes.any { it.isVisibleToUser && it.viewIdResourceName?.substringAfter(":id/") in setOf("alarm_card", "onoff", "delete_button", "save_button", "alarm_recycler_view", "clock", "alarm_label") })
+            val before = nativeHostIdentity(nativeClockNodes(host.root ?: error("Clock host missing")))
+            assertTrue(before.isNotEmpty())
+            refused(command("clock.alarms.list", JSONObject().put("package", clockPackage)), "UNSUPPORTED")
+            wholeFlowPhase("promotion_refused")
+            val freshPopup = automation.windows.single { it.id == popup.id }
+            val dismissal = nativeOne(nativeClockNodes(freshPopup.root ?: error("Clock popup disappeared")), "dismiss_button")
+            assertEquals("Dismiss", dismissal.text?.toString())
+            assertEquals("android.widget.TextView", dismissal.className?.toString())
+            assertTrue(dismissal.isEnabled && dismissal.isClickable)
+            val popupBounds = Rect().also { freshPopup.getBoundsInScreen(it) }
+            val hostBounds = Rect().also { host.getBoundsInScreen(it) }
+            val bounds = Rect().also { dismissal.getBoundsInScreen(it) }
+            assertTrue(!bounds.isEmpty && popupBounds.contains(bounds) && hostBounds.contains(popupBounds))
+            assertTrue(dismissal.performAction(AccessibilityNodeInfo.ACTION_CLICK))
+            waitUntil { automation.windows.none { it.id == popup.id } }
+            assertEquals("Explicit fixture dismissal must preserve native host alarm identities", before, nativeHostIdentity(nativeClockNodes(nativeClockRoot())))
+            wholeFlowPhase("promotion_dismissed")
+        }
+        fail("Genuine Clock promotion did not settle after bounded exact fixture dismissals")
+    }
+    private fun showNativeAlarms(restart: Boolean = false) {
+        if (restart) {
+            shell("am force-stop $clockPackage")
+            assertTrue("Clock process must actually stop before persistence readback", shell("pidof $clockPackage").trim().isEmpty())
+        }
+        dispatched(success(command("clock.alarms.show", JSONObject().put("package", clockPackage))))
+        waitUntil { automation.rootInActiveWindow?.packageName?.toString() == clockPackage }
+        Thread.sleep(500)
+        dismissKnownClockFixturePromotion()
+        waitUntil { try { nativeAlarms().size >= 2 } catch (_: NativeClockNotReady) { false } }
+    }
+    private fun httpNativeAlarms(): List<NativeAlarm> {
+        val listed = success(command("clock.alarms.list", JSONObject().put("package", clockPackage)))
+        assertTrue(listed.getBoolean("complete"))
+        assertEquals("ui", listed.getString("backend"))
+        val items = listed.getJSONArray("alarms")
+        val result = (0 until items.length()).map { index ->
+            val item = items.getJSONObject(index)
+            NativeAlarm(item.getString("label"), item.getString("time"), item.getBoolean("enabled"), item.getString("schedule"))
+        }.sortedWith(compareBy({ it.time }, { it.label }))
+        assertEquals("HTTP adapter list must agree with independent genuine Clock UI/model readback", nativeAlarms(), result)
+        return result
+    }
+    private fun expectNativeAlarms(expected: List<NativeAlarm>) {
+        val sorted = expected.sortedWith(compareBy({ it.time }, { it.label }))
+        waitUntil { try { nativeAlarms() == sorted } catch (_: NativeClockNotReady) { false } }
+        assertEquals(sorted, httpNativeAlarms())
+    }
+    private fun genericClockTap(session: String, node: AccessibilityNodeInfo) {
+        assertEquals(clockPackage, success(command("screen.tree", args(session, clockPackage))).getString("package"))
+        assertTrue(node.refresh() && node.isVisibleToUser && node.isEnabled && !node.isPassword)
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        assertTrue(!bounds.isEmpty)
+        val result = success(command("screen.tap", args(session, clockPackage).put("x", bounds.centerX()).put("y", bounds.centerY())))
+        dispatched(result)
+        assertTrue(result.getBoolean("gesture_completed"))
+    }
+    private fun requestHostAdbToggle(session: String, target: NativeAlarm) {
+        wholeFlowPhase("adb_requested")
+        assertEquals(session, debugStatus().getString("debug_session"))
+        val toggle = nativeOne(nativeClockNodes(nativeAlarmCard(target.label)), "onoff")
+        assertTrue(toggle.isChecked == target.enabled && toggle.isVisibleToUser && toggle.isEnabled)
+        val bounds = Rect().also { toggle.getBoundsInScreen(it) }
+        val nonce = UUID.randomUUID().toString()
+        val request = JSONObject().put("version", 1).put("nonce", nonce).put("debug_session", session)
+            .put("expected_package", clockPackage).put("x", bounds.centerX()).put("y", bounds.centerY())
+            .put("expires_elapsed_ms", SystemClock.elapsedRealtime() + 20000)
+        val pending = File(wholeFlowDirectory, "request.pending")
+        pending.writeText(request.toString())
+        check(pending.renameTo(File(wholeFlowDirectory, "request.json")))
+        val ack = File(wholeFlowDirectory, "ack.json")
+        waitUntil(20000) { ack.isFile }
+        val observed = JSONObject(ack.readText())
+        assertEquals(nonce, observed.getString("nonce"))
+        assertEquals(session, observed.getString("debug_session"))
+        assertTrue(observed.getBoolean("dispatched"))
+        assertEquals("host_adb_shell_input", observed.getString("transport"))
+        assertEquals(session, debugStatus().getString("debug_session"))
+        File(wholeFlowDirectory, "request.json").delete()
+    }
+
+    @Test fun realWholeFlowHttpWssGenuineClockHostAdbToggleAndRestartPreserveSurvivor() {
+        assertEquals("true", InstrumentationRegistry.getArguments().getString("genuineClockWholeFlow"))
+        wholeFlowDirectory.mkdirs()
+        wholeFlowDirectory.listFiles()?.forEach { check(it.delete()) }
+        originalTimeFormat = Settings.System.getString(context.contentResolver, Settings.System.TIME_12_24)
+        clockFixtureActive = true
+        try {
+            assertTrue(shell("pm clear $clockPackage").contains("Success"))
+            shell("settings put system time_12_24 24")
+            shell("cmd appops set $clockPackage SCHEDULE_EXACT_ALARM allow")
+            if (Build.VERSION.SDK_INT >= 33) shell("pm grant $clockPackage android.permission.POST_NOTIFICATIONS")
+            assertTrue("Genuine pinned installed Google Clock bytes/version/signer are mandatory", GoogleClockProfile.installed(context))
+            val session = localEnable("debug_enable_10")
+            wholeFlowPhase("clock_ready")
+            showNativeAlarms()
+            val baseline = httpNativeAlarms()
+            assertEquals(2, baseline.size)
+            assertEquals(setOf("08:30", "09:00"), baseline.map { it.time }.toSet())
+            assertTrue(baseline.all { !it.enabled && it.label.isEmpty() })
+            wholeFlowPhase("baseline_listed")
+            val suffix = UUID.randomUUID().toString().take(8)
+            val future = Calendar.getInstance().apply { add(Calendar.HOUR_OF_DAY, 12) }
+            val hour = future.get(Calendar.HOUR_OF_DAY)
+            val target = NativeAlarm("PB target $suffix", String.format(Locale.US, "%02d:31", hour), true, "every day")
+            val survivor = NativeAlarm("PB survivor $suffix", String.format(Locale.US, "%02d:43", hour), true, "every day")
+            for ((alarm, phase) in listOf(target to "target_created", survivor to "survivor_created")) {
+                val create = success(command("clock.alarms.create", JSONObject().put("package", clockPackage).put("hour", hour)
+                    .put("minute", alarm.time.substringAfter(':').toInt()).put("label", alarm.label).put("days", org.json.JSONArray(listOf(1, 2, 3, 4, 5, 6, 7)))))
+                dispatched(create)
+                assertEquals("native_intent", create.getString("backend"))
+                showNativeAlarms()
+                expectNativeAlarms(baseline + target + if (alarm == survivor) listOf(survivor) else emptyList())
+                wholeFlowPhase(phase)
+            }
+            val created = baseline + target + survivor
+            showNativeAlarms(restart = true)
+            expectNativeAlarms(created)
+            wholeFlowPhase("created_restarted")
+            requestHostAdbToggle(session, target)
+            val disabled = baseline + target.copy(enabled = false) + survivor
+            expectNativeAlarms(disabled)
+            wholeFlowPhase("adb_observed")
+            showNativeAlarms(restart = true)
+            expectNativeAlarms(disabled)
+            wholeFlowPhase("adb_restarted")
+            for ((op, enabled, phase) in listOf(Triple("clock.alarms.enable", true, "enabled_restarted"), Triple("clock.alarms.disable", false, "disabled_restarted"), Triple("clock.alarms.enable", true, "reenabled_restarted"))) {
+                val effect = success(command(op, JSONObject().put("package", clockPackage).put("label", target.label).put("time", target.time)))
+                assertEquals("changed", effect.getString("outcome"))
+                assertTrue("Only the actual Clock adapter may report its own verified readback", effect.getBoolean("verified"))
+                expectNativeAlarms(baseline + target.copy(enabled = enabled) + survivor)
+                showNativeAlarms(restart = true)
+                expectNativeAlarms(baseline + target.copy(enabled = enabled) + survivor)
+                wholeFlowPhase(phase)
+            }
+            genericClockTap(session, nativeAlarmCard(target.label))
+            waitUntil { try { nativeClockNodes(nativeClockRoot()).any { it.viewIdResourceName == "$clockPackage:id/alarm_label" && it.isVisibleToUser } } catch (_: NativeClockNotReady) { false } }
+            Thread.sleep(500)
+            dismissKnownClockFixturePromotion()
+            val detail = nativeClockNodes(nativeClockRoot())
+            assertEquals(target.label, nativeOne(detail, "alarm_label").text?.toString())
+            assertEquals(target.time, nativeOne(detail, "clock").text?.toString())
+            for (day in 0..6) {
+                val button = nativeOne(detail, "day_button_$day")
+                assertTrue(button.isCheckable && button.isChecked)
+            }
+            wholeFlowPhase("debug_detail")
+            val deletion = nativeOne(nativeClockNodes(nativeClockRoot()), "delete_button")
+            assertEquals("Delete", deletion.text?.toString())
+            genericClockTap(session, deletion)
+            expectNativeAlarms(baseline + survivor)
+            wholeFlowPhase("debug_deleted")
+            showNativeAlarms(restart = true)
+            expectNativeAlarms(baseline + survivor)
+            wholeFlowPhase("deleted_restarted")
+            wholeFlowPhase("completed")
+        } catch (error: Throwable) {
+            try { wholeFlowPhase("failed") } catch (evidenceError: Throwable) { error.addSuppressed(evidenceError) }
+            throw error
+        } finally {
+            File(wholeFlowDirectory, "request.json").delete()
+        }
     }
 }
