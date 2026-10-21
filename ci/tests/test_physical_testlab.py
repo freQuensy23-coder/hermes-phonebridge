@@ -533,11 +533,15 @@ class PhysicalTestLabSourceTest(unittest.TestCase):
             self.assertEqual("ALLOWLISTED_TYPE_NOT_UTF8_TEXT", omitted["invalid.log"])
             self.assertEqual("ALLOWLISTED_TYPE_CONTAINS_BINARY_CONTROL_BYTES", omitted["binary.txt"])
         self.assertEqual(original_sources, {name: api.objects[name] for name in original_sources})
+        result_reads = []
         for method, url, body in api.requests:
-            if "/storage/v1/" in url and method == "GET":
-                query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
-                if "projection" in query or "alt" in query and "generation" in query:
+            parsed = urllib.parse.urlsplit(url)
+            if "/storage/v1/" in parsed.path and "/results/" in urllib.parse.unquote(parsed.path) and method == "GET":
+                query = urllib.parse.parse_qs(parsed.query)
+                if "projection" in query or query.get("alt") == ["media"]:
                     self.assertEqual(["12345"], query["generation"])
+                    result_reads.append(url)
+        self.assertEqual(2 * len(original_sources), len(result_reads))
         self.assertFalse(any(method != "GET" and "/storage/v1/" in url and "/upload/" not in url for method, url, body in api.requests))
 
     def test_identical_direct_and_archive_reports_dedupe_but_conflicts_block(self):
