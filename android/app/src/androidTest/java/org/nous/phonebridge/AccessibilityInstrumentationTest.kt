@@ -168,16 +168,23 @@ internal object ForegroundFixture {
             flags = flags or android.accessibilityservice.AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         }
     }
-    fun shell(command: String): String = automation.executeShellCommand(command).use { parcel ->
-        android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { reader ->
-            val buffer = CharArray(32768)
-            var count = 0
-            while (count < buffer.size) {
-                val read = reader.read(buffer, count, buffer.size - count)
-                if (read < 0) break
-                count += read
+    fun shell(command: String): String {
+        val descriptors = automation.executeShellCommandRw("sh")
+        return android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).use { output ->
+            android.os.ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).bufferedWriter().use { input ->
+                input.write(command)
+                input.newLine()
             }
-            String(buffer, 0, count)
+            output.bufferedReader().use { reader ->
+                val buffer = CharArray(32768)
+                var count = 0
+                while (count < buffer.size) {
+                    val read = reader.read(buffer, count, buffer.size - count)
+                    if (read < 0) break
+                    count += read
+                }
+                String(buffer, 0, count)
+            }
         }
     }
     fun wake() {

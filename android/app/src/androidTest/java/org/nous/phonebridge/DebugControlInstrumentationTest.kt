@@ -103,8 +103,15 @@ class DebugControlInstrumentationTest {
         }
     }
 
-    private fun shell(command: String): String = automation.executeShellCommand(command).use { parcel ->
-        ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { it.readText() }
+    private fun shell(command: String): String {
+        val descriptors = automation.executeShellCommandRw("sh")
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptors[0]).use { output ->
+            ParcelFileDescriptor.AutoCloseOutputStream(descriptors[1]).bufferedWriter().use { input ->
+                input.write(command)
+                input.newLine()
+            }
+            output.bufferedReader().use { it.readText() }
+        }
     }
     private fun quote(value: String) = "'${value.replace("'", "'\\''")}'"
     private fun restoreSetting(key: String, value: String?) {
@@ -484,14 +491,16 @@ class DebugControlInstrumentationTest {
         val session = localEnable()
         showFixture()
         val point = center(treeNode(tree(session), "increment"))
-        shell("settings put secure accessibility_enabled 0")
+        val enabledServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        val withoutBridge = enabledServices.orEmpty().split(':').filter { it.isNotEmpty() && it != component && it != "org.nous.phonebridge/.BridgeAccessibility" }.joinToString(":")
+        restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, withoutBridge.takeIf { it.isNotEmpty() })
         waitUntil { BridgeAccessibility.current == null }
         val status = debugStatus()
         assertFalse(status.getBoolean("enabled"))
         assertTrue(status.isNull("debug_session"))
         unavailableConsentRefusal("screen.tap", args(session).put("x", point.first).put("y", point.second))
         assertEquals("Counter: 0", localText("counter"))
-        shell("settings put secure accessibility_enabled 1")
+        restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, enabledServices)
         waitUntil { BridgeAccessibility.current != null }
         assertFalse(debugStatus().getBoolean("enabled"))
         unavailableConsentRefusal("screen.tap", args(session).put("x", point.first).put("y", point.second))
