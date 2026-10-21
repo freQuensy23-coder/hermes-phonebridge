@@ -5,11 +5,15 @@ import android.app.UiAutomation
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
+import android.view.Display
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -189,6 +193,46 @@ class DebugControlInstrumentationTest {
         if (Build.VERSION.SDK_INT == 31) serverEnqueueUnsupported("screen.screenshot", args(session, pkg))
         else refused(command("screen.screenshot", args(session, pkg)), "UNSUPPORTED")
     }
+    private fun bridgeBarProofDiagnostic(): String? = try {
+        UiThread.call {
+            val service = BridgeAccessibility.current ?: return@call null
+            fun geometry(): List<Int>? = try {
+                val display = service.getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)
+                if (display == null || !display.isValid) null else {
+                    val windowContext = service.createWindowContext(display, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)
+                    val metrics = if (windowContext.display?.displayId == Display.DEFAULT_DISPLAY)
+                        windowContext.getSystemService(WindowManager::class.java)?.maximumWindowMetrics else null
+                    metrics?.let {
+                        val bounds = it.bounds
+                        val values = mutableListOf(bounds.left, bounds.top, bounds.right, bounds.bottom)
+                        for (type in listOf(WindowInsets.Type.statusBars(), WindowInsets.Type.navigationBars(), WindowInsets.Type.displayCutout())) {
+                            val insets = it.windowInsets.getInsetsIgnoringVisibility(type)
+                            values.addAll(listOf(insets.left, insets.top, insets.right, insets.bottom))
+                        }
+                        values
+                    }
+                }
+            } catch (_: Exception) { null }
+            val geometry = geometry()
+            val selectedOwner = service.rootInActiveWindow?.packageName?.toString()
+            val windows = service.windows.take(16)
+            val vector = mutableListOf(if (geometry == null) 0 else 1)
+            vector.addAll(geometry ?: List(16) { 0 })
+            vector.add(windows.size)
+            for (window in windows) {
+                val owner = window.root?.packageName?.toString()
+                val category = when (owner) {
+                    null -> 0
+                    "com.android.systemui" -> 1
+                    "android" -> 2
+                    selectedOwner -> 3
+                    else -> 4
+                }
+                vector.addAll(listOf(window.id, category))
+            }
+            vector.joinToString(",", "[", "]")
+        }
+    } catch (_: Exception) { null }
     private fun bridgeWindowsDiagnostic(): String? = try {
         UiThread.call {
             val service = BridgeAccessibility.current ?: return@call null
@@ -245,7 +289,8 @@ class DebugControlInstrumentationTest {
             else -> "UNCLASSIFIED"
         }
         val windows = if (value.optString("status") != "succeeded") bridgeWindowsDiagnostic()?.let { " bridge_windows=$it" }.orEmpty() else ""
-        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason$windows", "succeeded", value.getString("status"))
+        val barproof = if (value.optString("status") != "succeeded") bridgeBarProofDiagnostic()?.let { " bridge_barproof=$it" }.orEmpty() else ""
+        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason$windows$barproof", "succeeded", value.getString("status"))
         return value.getJSONObject("data")
     }
     private fun refused(value: JSONObject, code: String) {

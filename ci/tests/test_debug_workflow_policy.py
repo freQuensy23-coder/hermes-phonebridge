@@ -842,3 +842,138 @@ def test_coordinator_failure_is_optional_summary_only_without_changing_receipt_o
     assert receipt["receipt_valid"]
     assert receipt["coordinator_error"] and not receipt["complete"]
     assert "coordinator_failure" not in receipt
+
+
+def test_barproof_diagnostic_uses_independent_native_metrics_and_live_categorized_service_owners():
+    source = TEST.read_text()
+    capture = source.split("private fun bridgeBarProofDiagnostic(): String?", 1)[1].split("private fun bridgeWindowsDiagnostic()", 1)[0]
+    for required in (
+        "UiThread.call {", "BridgeAccessibility.current ?: return@call null",
+        "service.getSystemService(DisplayManager::class.java)?.getDisplay(Display.DEFAULT_DISPLAY)",
+        "!display.isValid", "service.createWindowContext(display, WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, null)",
+        "windowContext.display?.displayId == Display.DEFAULT_DISPLAY",
+        "windowContext.getSystemService(WindowManager::class.java)?.maximumWindowMetrics",
+        "bounds.left, bounds.top, bounds.right, bounds.bottom",
+        "WindowInsets.Type.statusBars(), WindowInsets.Type.navigationBars(), WindowInsets.Type.displayCutout()",
+        "it.windowInsets.getInsetsIgnoringVisibility(type)",
+        "insets.left, insets.top, insets.right, insets.bottom",
+        "service.rootInActiveWindow?.packageName?.toString()", "service.windows.take(16)",
+        "window.root?.packageName?.toString()", "if (geometry == null) 0 else 1",
+        "geometry ?: List(16) { 0 }", "vector.add(windows.size)",
+        'null -> 0', '"com.android.systemui" -> 1', '"android" -> 2',
+        "selectedOwner -> 3", "else -> 4", "vector.addAll(listOf(window.id, category))",
+        'vector.joinToString(",", "[", "]")', "catch (_: Exception) { null }",
+    ):
+        assert required in capture
+    for forbidden in (
+        "automation", "nativeWindowGeometry(", "RemoteWindowPolicy", "RemoteWindowGeometry",
+        "contentDescription", "viewIdResourceName", ".text", "childCount", "getChild",
+        "shell(", "performAction", "assert", "failure(", "metrics.toString", "owner.toString",
+    ):
+        assert forbidden not in capture
+    success = source.split("private fun success(value: JSONObject)", 1)[1].split("private fun refused(", 1)[0]
+    assert 'if (value.optString("status") != "succeeded") bridgeBarProofDiagnostic()' in success
+    assert '" bridge_barproof=$it"' in success
+    assert 'bridge_reason=$reason$windows$barproof' in success
+    assert success.index("bridgeWindowsDiagnostic()") < success.index("bridgeBarProofDiagnostic()") < success.index("assertEquals(")
+
+
+def test_barproof_vectors_preserve_available_geometry_owner_categories_and_actual_outcomes():
+    geometry = [0, 0, 1080, 2400, 0, 63, 0, 0, 0, 0, 0, 126, 0, 0, 0, 0]
+    vectors = [
+        [1] + geometry + [5, 42, 3, 43, 1, 44, 2, 45, 0, 46, 4],
+        [0] + [0] * 16 + [0],
+        [0] + [0] * 16 + [2, 42, 3, 43, 2],
+        [1, -2147483648, -1, 2147483647, 0] + [2147483647] * 12 + [1, 2147483647, 4],
+        [1] + geometry + [16] + [value for window in range(16) for value in [window, window % 5]],
+    ]
+    windows = [42, 0, 0, 1080, 2400, 2,
+               43, 3, 0, 0, 0, 0, 1080, 63, 0, 0, 1080, 2400,
+               42, 1, 1, 1, 0, 0, 1080, 2400, 0, 0, 1080, 2400]
+    for vector in vectors:
+        for outcome in ("failure", "error"):
+            base = "PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=SYSTEM_WINDOW bridge_windows=" + json.dumps(windows, separators=(",", ":"))
+            _, baseline = sanitize_reports([bridge_diagnostic_report(base, outcome)], INSTRUMENTATION)
+            stack = base + " bridge_barproof=" + json.dumps(vector, separators=(",", ":")) + " expected:<succeeded> but was:<failed>\nPRIVATE_STACK"
+            xml, counts = sanitize_reports([bridge_diagnostic_report(stack, outcome)], INSTRUMENTATION)
+            assert_observed_totals(xml, counts, [outcome])
+            assert counts == baseline
+            marker = ET.fromstring(xml).find("testcase/" + outcome)
+            assert marker is not None and marker.text is not None
+            diagnostic = json.loads(marker.text)
+            assert diagnostic == {
+                "bridge_code": "UNSUPPORTED", "bridge_reason": "SYSTEM_WINDOW",
+                "bridge_windows": windows, "bridge_barproof": vector, "locations": [],
+            }
+            if vector == vectors[0]:
+                owners = dict(zip(diagnostic["bridge_barproof"][18::2], diagnostic["bridge_barproof"][19::2]))
+                assert [(windows[offset], owners[windows[offset]]) for offset in range(6, len(windows), 12)] == [(43, 1), (42, 3)]
+
+
+def test_barproof_rejects_malformed_duplicate_noninteger_secret_and_oversize_vectors_without_changing_counts():
+    vector = [1, 0, 0, 1080, 2400, 0, 63, 0, 0, 0, 0, 0, 126, 0, 0, 0, 0, 1, 42, 2]
+    token = json.dumps(vector, separators=(",", ":"))
+    malformed = [
+        "", "PRIVATE_TOKEN", "null", "{}", "[]", "[1,2]",
+        token + "PRIVATE_TOKEN", token + ",PRIVATE_TOKEN", token + ";PRIVATE_TOKEN", token + "\\PRIVATE_TOKEN",
+        token.replace("42", '"42"'), token.replace("42", "true"), token.replace("42", "false"),
+        token.replace("42", "null"), token.replace("42", "42.0"), token.replace("42", "4.2e1"),
+        token.replace("42", "+42"), token.replace("42", "042"), token.replace("42", "４２"),
+        token.replace("42", "PRIVATE_TOKEN"), token.replace("42", "com.android.systemui"),
+        token.replace("42", "android:id/PRIVATE_TOKEN"), token.replace("42", "2147483648"),
+        token.replace("42", "-2147483649"), token.replace(",0,", ",-0,", 1),
+        token.replace(",", ", ", 1), token.replace(",", ",\n", 1), token.replace(",", ",\t", 1),
+        token[:-1], token + "]", token[:-1] + ",0]", "[" + "1," * 1024 + "1]",
+        token + " bridge_barproof=" + token, "PRIVATE_TOKEN bridge_barproof=" + token,
+    ]
+    for index, value in (
+        (0, -1), (0, 2), (0, 0), (1, -2147483649), (4, 2147483648),
+        (17, -1), (17, 0), (17, 2), (17, 17), (18, -1), (19, -1), (19, 5),
+    ):
+        changed = vector.copy()
+        changed[index] = value
+        malformed.append(json.dumps(changed, separators=(",", ":")))
+    for index in range(5, 17):
+        changed = vector.copy()
+        changed[index] = -1
+        malformed.append(json.dumps(changed, separators=(",", ":")))
+    malformed.extend([
+        json.dumps(vector[:17] + [2, 42, 2, 42, 3], separators=(",", ":")),
+        json.dumps(vector[:17] + [17] + [value for window in range(17) for value in [window, 1]], separators=(",", ":")),
+    ])
+    _, baseline = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=SYSTEM_WINDOW")], INSTRUMENTATION)
+    for token in malformed:
+        stack = "PRIVATE_TOKEN bridge_code=UNSUPPORTED bridge_reason=SYSTEM_WINDOW bridge_barproof=" + token
+        xml, counts = sanitize_reports([bridge_diagnostic_report(stack)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        assert counts == baseline
+        marker = ET.fromstring(xml).find("testcase/failure")
+        assert marker is not None and marker.text is not None
+        assert json.loads(marker.text) == {
+            "bridge_code": "UNSUPPORTED", "bridge_reason": "SYSTEM_WINDOW", "locations": [],
+        }
+        assert b"bridge_barproof" not in xml
+        assert b"com.android.systemui" not in xml
+        assert b"android:id/" not in xml
+
+
+def test_barproof_is_not_exported_for_passes_skips_unit_or_unexpected_cases():
+    token = "bridge_barproof=" + json.dumps([0] + [0] * 16 + [1, 42, 2], separators=(",", ":"))
+    classname, names = next(iter(INSTRUMENTATION.items()))
+    passed = ET.fromstring(raw_report(classname, [(sorted(names)[0], None)]))
+    output = passed.find("system-out")
+    assert output is not None
+    output.text = "PRIVATE_TOKEN " + token
+    xml, counts = sanitize_reports([ET.tostring(passed)], INSTRUMENTATION)
+    assert_observed_totals(xml, counts, ["pass"])
+    assert b"bridge_barproof" not in xml
+    for outcome, classname, required in (
+        ("skipped", classname, INSTRUMENTATION),
+        ("failure", "PRIVATE_CLASS", INSTRUMENTATION),
+        ("error", "PRIVATE_CLASS", INSTRUMENTATION),
+        ("failure", "org.nous.phonebridge.DebugPayloadBoundsTest", UNIT),
+        ("error", "org.nous.phonebridge.DebugPayloadBoundsTest", UNIT),
+    ):
+        xml, counts = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN " + token, outcome, classname)], required, exact_names=False)
+        assert_observed_totals(xml, counts, [outcome])
+        assert b"bridge_barproof" not in xml

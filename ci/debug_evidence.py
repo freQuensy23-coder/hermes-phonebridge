@@ -57,6 +57,26 @@ def restricted_bridge_windows(stack):
     return vector
 
 
+def restricted_bridge_barproof(stack):
+    markers = re.findall(r"(?<!\S)bridge_barproof=(\S*)", stack)
+    if len(markers) != 1:
+        return None
+    marker = markers[0]
+    if len(marker) > 1024 or re.fullmatch(r"\[(?:0|-?[1-9][0-9]{0,9})(?:,(?:0|-?[1-9][0-9]{0,9}))*\]", marker) is None:
+        return None
+    vector = [int(value) for value in marker[1:-1].split(",")]
+    if any(value < -2147483648 or value > 2147483647 for value in vector):
+        return None
+    if len(vector) < 18 or vector[0] not in (0, 1) or not 0 <= vector[17] <= 16 or len(vector) != 18 + 2 * vector[17]:
+        return None
+    if any(value < 0 for value in vector[5:17]) or (vector[0] == 0 and vector[1:17] != [0] * 16):
+        return None
+    identifiers = vector[18::2]
+    if len(set(identifiers)) != len(identifiers) or any(value < 0 for value in identifiers) or any(value not in range(5) for value in vector[19::2]):
+        return None
+    return vector
+
+
 def sanitize_reports(reports, required, exact_names=True):
     clean = ET.Element("testsuite", {"name": "Restricted observed debug tests"})
     counts = {
@@ -145,6 +165,9 @@ def sanitize_reports(reports, required, exact_names=True):
                         windows = restricted_bridge_windows(stack)
                         if windows is not None:
                             diagnostic["bridge_windows"] = windows
+                        barproof = restricted_bridge_barproof(stack)
+                        if barproof is not None:
+                            diagnostic["bridge_barproof"] = barproof
                         local = re.findall(r"(?<!\S)bridge_local=(\S*)", stack)
                         if len(local) == 1 and re.fullmatch(r"\[[01],[01],[01],[0-3],[0-3],[01],[0-2]\]", local[0]):
                             diagnostic["bridge_local"] = [int(value) for value in local[0][1:-1].split(",")]
