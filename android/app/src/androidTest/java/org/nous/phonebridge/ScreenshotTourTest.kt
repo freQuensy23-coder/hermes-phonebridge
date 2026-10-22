@@ -194,7 +194,9 @@ class ScreenshotTourTest {
         snap("01-not-paired")
 
         scenario!!.onActivity { activity -> activity.findViewById<android.widget.EditText>(R.id.pairing_code).setText(pairingCode) }
-        tap(reveal("org.nous.phonebridge:id/pair_with_code"))
+        val connect = reveal("org.nous.phonebridge:id/pair_with_code")
+        snap("01b-code-pasted")
+        tap(connect)
         waitUntil { nodes().any { it.viewIdResourceName == "android:id/button1" && it.isVisibleToUser } }
         allowCapture()
         snap("02-pair-with-code")
