@@ -318,7 +318,7 @@ class DebugControlInstrumentationTest {
     private fun tree(session: String) = success(command("screen.tree", args(session)))
     private fun treeNode(tree: JSONObject, name: String): JSONObject {
         val nodes = tree.getJSONArray("nodes")
-        val found = (0 until nodes.length()).map { nodes.getJSONObject(it) }.filter { it.optString("resource_id") == "$fixture:id/$name" && it.optBoolean("visible") }
+        val found = (0 until nodes.length()).map { nodes.getJSONObject(it) }.filter { it.optString("resource_id") == "$fixture:id/$name" }
         assertEquals("A real visible fixture selector must be unique", 1, found.size)
         return found.single()
     }

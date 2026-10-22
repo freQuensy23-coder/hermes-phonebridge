@@ -51,7 +51,11 @@ class Credentials(context: Context) {
                 val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP))) }
                 val obj = JSONObject(String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP))))
                 DeviceCredentials(obj.getString("id"), obj.getString("token"), obj.getString("server"), obj.getString("ws")).also { cached = encrypted to it }
-            } catch (_: javax.crypto.AEADBadTagException) {
+            } catch (_: javax.crypto.BadPaddingException) {
+                clear(); null
+            } catch (_: javax.crypto.IllegalBlockSizeException) {
+                clear(); null
+            } catch (_: java.security.InvalidKeyException) {
                 clear(); null
             } catch (_: org.json.JSONException) {
                 clear(); null
