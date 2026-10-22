@@ -1,7 +1,6 @@
 package org.nous.phonebridge
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import android.view.View
 import android.view.WindowManager
@@ -13,7 +12,6 @@ import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.ByteArrayOutputStream
 
 /** Real Android view screenshots with synthetic state, no server or personal credentials. */
 @RunWith(AndroidJUnit4::class)
@@ -27,12 +25,7 @@ class OwnerUiTourTest {
     private fun capture(name: String) {
         instrumentation.waitForIdleSync()
         Thread.sleep(600)
-        val bitmap = automation.takeScreenshot() ?: error("Screenshot unavailable")
-        val bytes = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
-        bitmap.recycle()
-        val pipes = automation.executeShellCommandRw("cat > $directory/$name.png")
-        ParcelFileDescriptor.AutoCloseOutputStream(pipes[1]).use { it.write(bytes) }
-        ParcelFileDescriptor.AutoCloseInputStream(pipes[0]).use { it.readBytes() }
+        shell("screencap -p $directory/$name.png")
     }
     @Test fun captureSetupConnectedActiveAndPaused() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("ownerUiTour") == "true")

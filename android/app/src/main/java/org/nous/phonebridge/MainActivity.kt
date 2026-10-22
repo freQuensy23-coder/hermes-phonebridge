@@ -29,9 +29,13 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = android.graphics.Color.rgb(18, 35, 44)
+        window.setDecorFitsSystemWindows(false)
+        window.statusBarColor = android.graphics.Color.rgb(245, 247, 246)
         window.navigationBarColor = android.graphics.Color.rgb(245, 247, 246)
-        window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.insetsController?.setSystemBarsAppearance(
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        )
         // Credentials and one-time pairing codes must not appear in Recents or screenshots.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         ui = OwnerUi(this, ::action)
@@ -53,6 +57,7 @@ class MainActivity : Activity() {
                     requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
                     confirmPairing(PairingQr.parseInput(code.text.toString(), BuildConfig.DEBUG))
                 }
+                "cancel_pair" -> cancelPairing()
                 "connection" -> {
                     if (getSharedPreferences("connection", MODE_PRIVATE).getBoolean("enabled", false)) {
                         cancelPairing(); BridgeService.stop(this)

@@ -86,7 +86,9 @@ class OwnerUi(private val activity: Activity, private val action: (String) -> Un
     private val filesStatus = label("", 14f, muted)
     private val connect = button("Connect to server", "pair", true, R.id.pair_with_code)
     private val scan = button("Scan QR code instead", "scan")
+    private val cancel = button("Cancel connection", "cancel_pair").apply { visibility = View.GONE }
     fun pairing(inProgress: Boolean) {
+        cancel.visibility = if (inProgress) View.VISIBLE else View.GONE
         connect.isEnabled = !inProgress; scan.isEnabled = !inProgress
         name.isEnabled = !inProgress; code.isEnabled = !inProgress
         connect.text = if (inProgress) "Connecting…" else "Connect to server"
@@ -114,7 +116,7 @@ class OwnerUi(private val activity: Activity, private val action: (String) -> Un
             addView(label("On your server, run phonebridge pair --name 'My phone' --code. Paste the code below, or scan its QR.", 14f, muted))
             addView(label("Phone name", 12f, muted, true)); addView(name)
             addView(label("Connection code", 12f, muted, true)); addView(code)
-            addView(connect); addView(scan)
+            addView(connect); addView(cancel); addView(scan)
             addView(label("Only pair with your own server. Confirm its address before connecting. A code works once.", 12f, muted), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(12) })
         }
         screen = section(content).apply {
@@ -129,7 +131,7 @@ class OwnerUi(private val activity: Activity, private val action: (String) -> Un
             addView(label("FILE DELIVERY", 11f, accent, true))
             addView(label("Files from your agent", 20f, ink, true)); addView(filesStatus)
             addView(button("Open Downloads", "files")); addView(notifications)
-            addView(label("Documents → Download/PhoneBridge\\nImages → Pictures/PhoneBridge (Gallery)", 12f, muted))
+            addView(label("Documents → Download/PhoneBridge\nImages → Pictures/PhoneBridge (Gallery)", 12f, muted))
         }
         section(content).apply {
             addView(label("NEED A HAND?", 11f, muted, true))
@@ -137,7 +139,7 @@ class OwnerUi(private val activity: Activity, private val action: (String) -> Un
             addView(button("Android app settings", "settings"))
             addView(button("Forget server…", "disconnect").also { forget = it; it.setTextColor(danger); it.background = shape(Color.rgb(251, 238, 237), 14) })
         }
-        content.addView(label("PHONEBRIDGE  /  ${BuildConfig.VERSION_NAME}\\nA private connection to your Hermes server.", 11f, muted).apply { gravity = android.view.Gravity.CENTER; setPadding(0, dp(24), 0, 0) })
+        content.addView(label("PHONEBRIDGE  /  ${BuildConfig.VERSION_NAME}\nA private connection to your Hermes server.", 11f, muted).apply { gravity = android.view.Gravity.CENTER; setPadding(0, dp(24), 0, 0) })
     }
     fun render(credentials: DeviceCredentials?, permissions: JSONObject, prefs: SharedPreferences, remaining: Long?) {
         val paired = credentials != null

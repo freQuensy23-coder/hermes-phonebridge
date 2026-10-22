@@ -324,4 +324,5 @@ def test_device_list_shows_only_connected_phones(store_factory):
     assert store.device(offline_id)["online"] is False
     device_id, session = store.connect(offline_claim["device_token"])
     store.hello(device_id, session, HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={}))
-    assert [device["id"] for device in store.devices()["devices"]] == [online_id, offline_id]
+    # Both devices share the fixture timestamp; UUID order is not creation order.
+    assert {device["id"] for device in store.devices()["devices"]} == {online_id, offline_id}

@@ -312,14 +312,16 @@ class ScreenControlInstrumentationTest {
         } finally { bitmap.recycle() }
     }
 
-    @Test fun phoneBridgeOwnScreenCanBeReadAndOperated() {
+    @Test fun phoneBridgeOwnScreenIsReadableButRemoteConsentChangesAreRefused() {
         scenario!!.onActivity { it.findViewById<android.widget.EditText>(R.id.device_name).setText("Before") }
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() == context.packageName }
         val own = tree()
         assertEquals(context.packageName, own.getString("package"))
-        success(command("screen.input", JSONObject().put("resource_id", "${context.packageName}:id/device_name").put("text", "Renamed remotely")))
-        var name = ""
-        waitUntil { scenario!!.onActivity { name = it.findViewById<android.widget.EditText>(R.id.device_name).text.toString() }; name == "Renamed remotely" }
+        refused(command("screen.input", JSONObject().put("resource_id", "${context.packageName}:id/device_name").put("text", "Renamed remotely")), "PERMISSION_REQUIRED")
+        refused(command("screen.tap", JSONObject().put("x", 100).put("y", 100)), "PERMISSION_REQUIRED")
+        refused(command("screen.global", JSONObject().put("action", "notifications")), "PERMISSION_REQUIRED")
+        scenario!!.onActivity { assertEquals("Before", it.findViewById<android.widget.EditText>(R.id.device_name).text.toString()) }
+
     }
 
     @Test fun stopButtonRemovesScreenOperationsAndTimedEnableRestoresThem() {

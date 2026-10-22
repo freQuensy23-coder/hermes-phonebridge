@@ -17,7 +17,7 @@ Screenshots from the Android app with synthetic example connection states. [Capt
 
 | Connect your phone | Everyday use | Screen access on |
 | --- | --- | --- |
-| ![Connection setup](docs/screenshots/01-setup.png) | ![Connected](docs/screenshots/02-connected.png) | ![Screen control active](docs/screenshots/03-screen-active.png) |
+| <img src="docs/screenshots/01-setup.png" width="240" alt="Connection setup"> | <img src="docs/screenshots/02-connected.png" width="240" alt="Connected"> | <img src="docs/screenshots/03-screen-active.png" width="240" alt="Screen control active"> |
 
 ## Connect it
 
@@ -65,14 +65,14 @@ Allow notifications to see connection status and received files. For screen cont
 
 ```sh
 phonebridge install-skill
-phonebridge devices
+phonebridge devices list
 ```
 
 Use `phonebridge install-skill --replace` to update an existing installation. The skill teaches Hermes the available CLI commands and their limits.
 
 ## Try it from the terminal
 
-Replace `DEVICE` with the ID printed by `phonebridge devices`.
+Replace `DEVICE` with the ID printed by `phonebridge devices list`.
 
 ```sh
 phonebridge files send DEVICE ./report.pdf

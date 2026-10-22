@@ -103,3 +103,26 @@ async def test_slow_send_has_timeout(settings):
     peer = Peer.create(SlowSocket(), replace(settings, send_timeout=0.01))
     with pytest.raises(TimeoutError):
         await peer.send({"type": "ack", "id": "a"})
+
+
+@pytest.mark.parametrize("authorization", [[], [(b"authorization", b"Bearer wrong")],
+    [(b"authorization", b"Bearer wrong"), (b"authorization", b"Bearer wrong")]])
+async def test_unauthorized_upload_rejected_before_reading_any_body(settings, authorization):
+    async def app(scope, receive, send):
+        raise AssertionError("Unauthorized upload reached the application")
+
+    async def receive():
+        raise AssertionError("Unauthorized upload body must not be read")
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/devices/example/files",
+             "headers": authorization + [(b"content-type", b"application/octet-stream"),
+                                           (b"content-length", str(settings.max_file_bytes).encode())],
+             "client": ("127.0.0.1", 12345)}
+    await RequestBoundary(app, settings, RateLimiter(4))(scope, receive, send)
+    assert sent[0]["status"] == 401
+    assert (b"www-authenticate", b"Bearer") in sent[0]["headers"]

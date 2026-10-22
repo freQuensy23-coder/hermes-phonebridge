@@ -272,7 +272,10 @@ class BridgeService : Service() {
             val hello = JSONObject().put("type", "hello").put("version", BuildConfig.VERSION_NAME).put("capabilities", Access.capabilities(this)).put("permissions", Access.permissions(this))
             val text = hello.toString()
             val now = android.os.SystemClock.elapsedRealtime()
-            if ((text != helloState || now - lastHello >= 25000) && socket?.send(text) == true) { helloState = text; lastHello = now }
+            if ((text != helloState || now - lastHello >= 25000) && socket?.send(text) == true) {
+                if (text != helloState) getSystemService(NotificationManager::class.java).notify(18940, notification(prefs.getString("status", "Connected") ?: "Connected"))
+                helloState = text; lastHello = now
+            }
         } catch (_: Exception) { state("Permission discovery unavailable") }
     }
     private fun takeCredit(): Boolean {
@@ -303,7 +306,7 @@ class BridgeService : Service() {
     private fun notification(status: String): Notification {
         val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 2, Intent(this, BridgeService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText(status).setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE)
+        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText(if (ScreenControl.enabled(this)) "${ScreenControl.describe(this)} · $status" else status).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
             .addAction(Notification.Action.Builder(null, "Stop connection", stop).build()).build()
     }
     private fun halt(message: String, erase: Boolean) {

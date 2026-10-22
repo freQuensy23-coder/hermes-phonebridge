@@ -107,6 +107,7 @@ class BridgeAccessibility : AccessibilityService() {
     }
     private fun input(resourceId: String?, text: String): JSONObject {
         val node = UiThread.call {
+            checkScreenAccess(true)
             val root = root()
             if (resourceId == null) root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: failure("NOT_FOUND", "No text field has focus; tap the field first or pass resource_id")
             else nodes(root).filter { it.viewIdResourceName == resourceId && it.isEditable }.let { matches -> matches.firstOrNull { it.isFocused } ?: matches.firstOrNull() } ?: failure("NOT_FOUND", "No editable field with resource_id $resourceId on screen")
