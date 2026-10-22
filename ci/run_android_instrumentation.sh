@@ -1,4 +1,13 @@
 set -euo pipefail
+# CI splits the instrumentation classes into two parts that run on separate emulators.
+part1=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest
+part2=org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest
+case "${PHONEBRIDGE_TEST_PART:-all}" in
+  1) classes=$part1 ;;
+  2) classes=$part2 ;;
+  all) classes=$part1,$part2 ;;
+  *) echo "PHONEBRIDGE_TEST_PART must be 1, 2 or all" >&2; exit 2 ;;
+esac
 : "${PHONEBRIDGE_CI_PUBLIC_URL:?CI must supply the public HTTPS origin}"
 : "${PHONEBRIDGE_CI_ADMIN_TOKEN_FILE:?CI must supply the admin token file}"
 IFS= read -r admin_token < "$PHONEBRIDGE_CI_ADMIN_TOKEN_FILE"
@@ -59,7 +68,7 @@ cd android
   "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
   "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \
   -Pandroid.testInstrumentationRunnerArguments.emulatorCi=true \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest \
+  "-Pandroid.testInstrumentationRunnerArguments.class=$classes" \
   -Pandroid.testInstrumentationRunnerArguments.screenshotTour=true \
   "-Pandroid.testInstrumentationRunnerArguments.pairingCode=$pairing_code" \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
