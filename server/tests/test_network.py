@@ -78,6 +78,7 @@ async def test_real_http_websocket_pair_result_dedup_revocation(live_server):
             events = (await client.get(f"/v1/devices/{claim['device_id']}/events?after=0&limit=50", headers=ADMIN)).json()
             assert len(events["events"]) == 1
             assert (await client.delete(f"/v1/devices/{claim['device_id']}", headers=ADMIN)).status_code == 204
+            assert await receive(phone) == {"type": "revoked"}
             with pytest.raises(ConnectionClosed) as closed:
                 await receive(phone)
-            assert closed.value.rcvd.code == 1008
+            assert closed.value.rcvd.code == 4401

@@ -118,15 +118,14 @@ def test_result_requires_delivery_ownership_and_correlation(store_factory):
 def test_native_intent_is_unverified(store_factory):
     store = store_factory()
     _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create", args={"hour": 8, "minute": 0}))
+    command = store.enqueue(device_id, CommandRequest(op="device.info"))
     store.dispatch(device_id, session, command["id"])
-    result = ResultFrame(type="result", id=command["id"], ok=True,
-                         data={"outcome": "dispatched", "verified": True, "package": "com.google.android.deskclock"})
+    result = ResultFrame(type="result", id=command["id"], ok=True, data={"outcome": "dispatched", "verified": True})
     store.result(device_id, session, result)
     store.result(device_id, session, result)
     value = store.command(command["id"])
     assert value["status"] == "succeeded"
-    assert value["data"] == {"outcome": "dispatched", "verified": False, "package": "com.google.android.deskclock"}
+    assert value["data"] == {"outcome": "dispatched", "verified": False}
 
 
 def test_failure_preserves_structured_error(store_factory):
@@ -157,8 +156,8 @@ def test_reconnect_replays_sent_and_rejects_old_session(store_factory):
 def test_capability_changes_prevent_stale_dispatch(store_factory):
     store = store_factory()
     _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="notifications.list"))
-    store.hello(device_id, session, HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={"notifications": False}))
+    command = store.enqueue(device_id, CommandRequest(op="debug.status"))
+    store.hello(device_id, session, HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={"accessibility": False}))
     assert store.dispatch(device_id, session, command["id"]) is None
     assert store.command(command["id"])["error"]["code"] == "UNSUPPORTED"
     with pytest.raises(BridgeError):
@@ -179,8 +178,26 @@ def test_event_receipts_are_durable_bounded_and_content_correlated(store_factory
     with pytest.raises(BridgeError) as changed:
         other.event(device_id, session, first.model_copy(update={"data": {"text": "changed"}}))
     assert changed.value.code == "EVENT_CONFLICT"
+    assert other.event(device_id, session, first.model_copy(update={"id": "third"})) == {"type": "ack", "id": "third"}
+    receipts = other.connection.execute("SELECT id FROM event_receipts ORDER BY rowid").fetchall()
+    assert [row["id"] for row in receipts] == ["second", "third"]
+
+
+def test_command_history_is_pruned_instead_of_blocking_new_commands(store_factory):
+    store = store_factory(max_command_records=3, max_pending_commands=2, command_batch_size=1)
+    _, _, device_id, session = provision(store)
+    completed = []
+    for _ in range(5):
+        command = store.enqueue(device_id, CommandRequest(op="device.info"))
+        store.dispatch(device_id, session, command["id"])
+        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={}))
+        completed.append(command["id"])
+    assert store.connection.execute("SELECT count(*) FROM commands").fetchone()[0] == 3
+    assert store.command(completed[-1])["status"] == "succeeded"
+    store.enqueue(device_id, CommandRequest(op="device.info"))
+    store.enqueue(device_id, CommandRequest(op="device.info"))
     with pytest.raises(BridgeError) as full:
-        other.event(device_id, session, first.model_copy(update={"id": "third"}))
+        store.enqueue(device_id, CommandRequest(op="device.info"))
     assert full.value.code == "QUEUE_FULL"
 
 
@@ -294,30 +311,5 @@ def test_failed_result_cannot_contain_success_data(store_factory):
                       error=ResultError(code="VALIDATION_ERROR", message="Invalid"))
     with pytest.raises(BridgeError) as invalid:
         store.result(device_id, session, bad)
-    assert invalid.value.code == "INVALID_RESULT"
-    assert store.command(command["id"])["status"] == "sent"
-
-
-def test_native_clock_results_cannot_assert_verified_changes(store_factory):
-    store = store_factory()
-    _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create", args={"hour": 8, "minute": 0}))
-    store.dispatch(device_id, session, command["id"])
-    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True,
-                                               data={"outcome": "changed", "verified": True, "package": "com.sec.android.app.clockpackage"}))
-    data = store.command(command["id"])["data"]
-    assert data["outcome"] == "dispatched"
-    assert data["verified"] is False
-    assert data["package"] == "com.sec.android.app.clockpackage"
-
-
-def test_native_clock_dispatch_requires_package_identity(store_factory):
-    store = store_factory()
-    _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create", args={"hour": 8, "minute": 0}))
-    store.dispatch(device_id, session, command["id"])
-    with pytest.raises(BridgeError) as invalid:
-        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True,
-                                                   data={"outcome": "dispatched", "verified": False}))
     assert invalid.value.code == "INVALID_RESULT"
     assert store.command(command["id"])["status"] == "sent"

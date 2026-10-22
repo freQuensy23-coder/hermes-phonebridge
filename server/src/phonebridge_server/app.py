@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
 import hmac
+import os
 import sqlite3
+import tempfile
 import time
 from contextlib import asynccontextmanager, suppress
 from typing import Annotated
@@ -12,12 +14,13 @@ from fastapi import Depends, FastAPI, Query, Request, WebSocket
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
 from . import __version__
 from .config import Settings
 from .protocol import (
+    IMAGE_SIGNATURES,
     TOKEN_PATTERN,
     BridgeError,
     ClaimRequest,
@@ -27,6 +30,7 @@ from .protocol import (
     PairingRequest,
     ResultFrame,
     decode_json,
+    upload_metadata,
 )
 from .store import Store
 from .transport import Hub, Peer, RateLimiter, RequestBoundary
@@ -158,6 +162,51 @@ def create_app(settings: Settings | None = None, clock=time.time):
     async def get_command(command_id: str):
         return await execute("command", command_id)
 
+    @application.post("/v1/devices/{device_id}/files", dependencies=[Depends(admin)])
+    async def upload_file(device_id: str, request: Request):
+        metadata = upload_metadata(request.scope.get("query_string", b""), request.headers)
+        body = await request.body()
+        if hashlib.sha256(body).hexdigest() != metadata["sha256"]:
+            raise BridgeError("VALIDATION_ERROR", "X-Content-SHA256 does not match the uploaded bytes", 422)
+        metadata["size"] = len(body)
+        metadata["signature_ok"] = metadata["kind"] != "image" or IMAGE_SIGNATURES[metadata["mime"]](body)
+        store = application.state.store
+
+        def stage():
+            descriptor, path = tempfile.mkstemp(prefix="upload-", dir=store.transfers)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                os.unlink(path)
+                raise
+            return path
+
+        staged = await asyncio.to_thread(stage)
+        return await execute("create_transfer", device_id, metadata, staged)
+
+    @application.get("/v1/device/files/{transfer_id}")
+    async def download_file(transfer_id: str, request: Request):
+        if request.url.query:
+            raise BridgeError("UNAUTHORIZED", "Query-string authorization is not accepted", 401)
+        token = bearer(request.headers)
+        if not TOKEN_PATTERN.fullmatch(token):
+            raise BridgeError("UNAUTHORIZED", "Device bearer authorization required", 401)
+        handle = await execute("open_transfer", token, transfer_id)
+        size = os.fstat(handle.fileno()).st_size
+
+        async def chunks():
+            try:
+                while chunk := await asyncio.to_thread(handle.read, 65536):
+                    yield chunk
+            finally:
+                handle.close()
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream",
+                                 headers={"Content-Length": str(size)})
+
     @application.get("/v1/devices/{device_id}/events", dependencies=[Depends(admin)])
     async def get_events(device_id: str, after: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
                          limit: Annotated[int, Query(ge=1, le=100)] = 50):
@@ -231,27 +280,39 @@ def create_app(settings: Settings | None = None, clock=time.time):
     async def device_socket(websocket: WebSocket):
         device_id = session_id = peer = None
         tasks = []
-        accepted = False
-        hello_ready = False
+        address = websocket.client.host if websocket.client else "unknown"
         try:
             if websocket.url.query:
                 raise BridgeError("UNAUTHORIZED", "Query-string authorization is not accepted", 401)
             token = bearer(websocket.headers)
-            if not TOKEN_PATTERN.fullmatch(token):
-                raise BridgeError("UNAUTHORIZED", "Device bearer authorization required", 401)
             origins = websocket.headers.getlist("origin")
             public = urlsplit(settings.public_url)
-            if len(origins) > 1 or (origins and origins[0] != f"{public.scheme}://{public.netloc}"):
-                raise BridgeError("UNAUTHORIZED", "WebSocket origin is not allowed", 403)
-            address = websocket.client.host if websocket.client else "unknown"
-            if not limiter.take(("connect", address), settings.claim_rate):
-                raise BridgeError("RATE_LIMITED", "Connection attempt rate limit exceeded", 429)
-            peer = Peer.create(websocket, settings)
+            if (not TOKEN_PATTERN.fullmatch(token) or len(origins) > 1
+                    or (origins and origins[0] != f"{public.scheme}://{public.netloc}")):
+                raise BridgeError("UNAUTHORIZED", "Device bearer authorization required", 401)
+        except BridgeError:
+            limiter.take(("denied", address), settings.claim_rate)
+            with suppress(RuntimeError, OSError):
+                await websocket.close(code=1008)
+            return
+        peer = Peer.create(websocket, settings)
+        try:
+            await asyncio.wait_for(websocket.accept(), settings.send_timeout)
+            try:
+                device_id = await execute("authorize", token)
+            except BridgeError as error:
+                if error.code != "UNAUTHORIZED":
+                    raise
+                if limiter.take(("denied", address), settings.claim_rate):
+                    await peer.revoke()
+                else:
+                    await peer.close(1013)
+                return
+            if not limiter.take(("connect", device_id), settings.claim_rate):
+                raise BridgeError("RATE_LIMITED", "Reconnecting too often; retry later", 429)
             device_id, session_id = await hub.connect(token, peer, execute)
             if peer.closed:
                 raise BridgeError("AUTH_REVOKED", "Connection is closed", 401)
-            await asyncio.wait_for(websocket.accept(), settings.send_timeout)
-            accepted = True
             await hub.add(device_id, session_id, peer, execute)
             await hub.check_current(device_id, session_id, peer, execute)
             first = await read_frame(websocket, settings.hello_timeout)
@@ -260,43 +321,41 @@ def create_app(settings: Settings | None = None, clock=time.time):
             except ValidationError as error:
                 raise BridgeError("INVALID_FRAME", "A valid hello must be the first frame", 422) from error
             await execute("hello", device_id, session_id, hello)
-            hello_ready = True
             tasks = [asyncio.create_task(sender(peer, device_id, session_id)),
                      asyncio.create_task(receiver(peer, device_id, session_id))]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
         except BridgeError as error:
-            if accepted and peer is not None and not peer.closed:
-                with suppress(RuntimeError, WebSocketDisconnect, TimeoutError, OSError, BridgeError):
-                    await peer.send({"type": "error", "code": error.code, "message": error.message})
-            if peer is not None:
+            if error.code == "UNAUTHORIZED":
+                await peer.revoke()
+            else:
+                if not peer.closed:
+                    with suppress(RuntimeError, WebSocketDisconnect, TimeoutError, OSError, BridgeError):
+                        await peer.send({"type": "error", "code": error.code, "message": error.message})
                 code = 1013 if error.code in {"QUEUE_FULL", "RATE_LIMITED"} else 1009 if error.code == "TOO_LARGE" else 1008
                 await peer.close(code)
-            else:
-                with suppress(RuntimeError, OSError):
-                    await websocket.close(code=1008)
         except TimeoutError:
-            if peer is not None:
-                await peer.close(1013 if hello_ready else 1008)
+            await peer.close(1013)
         except (WebSocketDisconnect, RuntimeError, OSError):
             pass
         except sqlite3.Error:
-            if peer is not None:
-                await peer.close(1011)
+            if not peer.closed:
+                with suppress(RuntimeError, WebSocketDisconnect, TimeoutError, OSError, BridgeError):
+                    await peer.send({"type": "error", "code": "UNAVAILABLE", "message": "Server storage temporarily unavailable"})
+            await peer.close(1011)
         finally:
             with CancelScope(shield=True):
                 for task in tasks:
                     task.cancel()
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
-                if peer is not None:
-                    if peer.device_id is not None:
-                        device_id, session_id = peer.device_id, peer.session_id
-                    if device_id is not None:
-                        await hub.remove(device_id, session_id, peer)
-                    await peer.close(1000)
-                if device_id is not None:
+                if peer.device_id is not None:
+                    device_id, session_id = peer.device_id, peer.session_id
+                if device_id is not None and session_id is not None:
+                    await hub.remove(device_id, session_id, peer)
+                await peer.close(1000)
+                if device_id is not None and session_id is not None:
                     await execute("disconnect", device_id, session_id)
 
     return application

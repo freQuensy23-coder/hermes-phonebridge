@@ -1,10 +1,12 @@
 import asyncio
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from starlette.responses import JSONResponse
+from starlette.websockets import WebSocketDisconnect
 
 from .protocol import BridgeError, decode_json, encode_json
 
@@ -31,6 +33,13 @@ class RateLimiter:
             allowed = tokens >= 1
             self.entries[key] = (tokens - 1 if allowed else tokens, now)
             return allowed
+
+
+UPLOAD_PATH = re.compile(r"^/v1/devices/[^/]+/files$")
+
+
+def public_path(path):
+    return path == "/v1/pair/claim" or path.startswith("/v1/device/files/")
 
 
 class RequestBoundary:
@@ -81,22 +90,32 @@ class RequestBoundary:
 
         address = scope.get("client")
         address = address[0] if address else "unknown"
-        if scope["path"] != "/healthz" and not self.limiter.take(("http", address), self.settings.http_rate):
+        if public_path(scope["path"]) and not self.limiter.take(("http", address), self.settings.http_rate):
             await respond("RATE_LIMITED", "Request rate limit exceeded", 429)
             return
         if scope["path"] == "/v1/pair/claim" and not self.limiter.take(("claim", address), self.settings.claim_rate):
             await respond("RATE_LIMITED", "Pairing attempt rate limit exceeded", 429)
             return
+        upload = scope.get("method") == "POST" and UPLOAD_PATH.fullmatch(scope["path"]) is not None
+        limit = self.settings.max_file_bytes if upload else self.settings.max_body_bytes
         lengths = [value for key, value in scope["headers"] if key == b"content-length"]
         if len(lengths) > 1:
             await respond("VALIDATION_ERROR", "Invalid Content-Length", 400)
             return
+        if upload:
+            content_types = [value for key, value in scope["headers"] if key == b"content-type"]
+            if len(content_types) != 1 or content_types[0].strip().lower() != b"application/octet-stream":
+                await respond("VALIDATION_ERROR", "Content-Type must be application/octet-stream", 415)
+                return
+            if not lengths:
+                await respond("VALIDATION_ERROR", "Content-Length is required", 411)
+                return
         if lengths:
             try:
                 if not lengths[0].isdigit():
                     raise ValueError
                 length = int(lengths[0])
-                if length > self.settings.max_body_bytes:
+                if length > limit:
                     await respond("TOO_LARGE", "Request body limit exceeded", 413)
                     return
             except ValueError:
@@ -116,7 +135,7 @@ class RequestBoundary:
             if message["type"] == "http.disconnect":
                 return
             body.extend(message.get("body", b""))
-            if len(body) > self.settings.max_body_bytes:
+            if len(body) > limit:
                 await respond("TOO_LARGE", "Request body limit exceeded", 413)
                 return
             if not message.get("more_body", False):
@@ -124,7 +143,7 @@ class RequestBoundary:
         if lengths and int(lengths[0]) != len(body):
             await respond("VALIDATION_ERROR", "Content-Length does not match body", 400)
             return
-        if body:
+        if body and not upload:
             content_types = [value for key, value in scope["headers"] if key == b"content-type"]
             if len(content_types) != 1 or content_types[0].split(b";")[0].strip().lower() != b"application/json":
                 await respond("VALIDATION_ERROR", "Content-Type must be application/json", 415)
@@ -176,6 +195,18 @@ class Peer:
             if len(encoded.encode()) > self.settings.max_frame_bytes:
                 raise BridgeError("TOO_LARGE", "Outgoing frame limit exceeded", 413)
             await asyncio.wait_for(self.websocket.send_text(encoded), self.settings.send_timeout)
+
+    async def revoke(self):
+        self.closed = True
+        async with self.lock:
+            if self.close_sent:
+                return
+            self.close_sent = True
+            try:
+                await asyncio.wait_for(self.websocket.send_text(encode_json({"type": "revoked"})), self.settings.send_timeout)
+                await asyncio.wait_for(self.websocket.close(code=4401), self.settings.send_timeout)
+            except (WebSocketDisconnect, RuntimeError, TimeoutError, OSError):
+                pass
 
     async def close(self, code=1008):
         self.closed = True
@@ -293,7 +324,7 @@ class Hub:
             self.peers.pop(device_id, None)
             for peer in peers:
                 peer.closed = True
-        await asyncio.gather(*(peer.close(1008) for peer in peers))
+        await asyncio.gather(*(peer.revoke() for peer in peers))
 
     async def close(self):
         async with self.lock:

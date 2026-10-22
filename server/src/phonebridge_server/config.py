@@ -26,6 +26,9 @@ class Settings:
     max_command_records: int = 10000
     max_events: int = 10000
     max_event_receipts: int = 50000
+    max_file_bytes: int = 33554432
+    max_transfer_bytes: int = 134217728
+    max_device_transfers: int = 16
     outbound_queue_size: int = 32
     command_batch_size: int = 16
     http_rate: int = 240

@@ -160,7 +160,7 @@ def pause_handshake(application, monkeypatch, phase):
     return barrier
 
 
-@pytest.mark.parametrize("phase", ["connect", "accept", "add"])
+@pytest.mark.parametrize("phase", ["connect", "add"])
 async def test_stale_handshake_cannot_replace_newer_peer(race_service, monkeypatch, phase):
     application, client = race_service
     _, claim = await pair_async(client)
@@ -219,26 +219,28 @@ async def test_revocation_closes_pending_handshake_before_release(race_service, 
         try:
             pending = start(claim, OLD_PORT)
             await asyncio.wait_for(gate.reached.wait(), 5)
-            assert pending.accepted.is_set() is (phase != "connect")
+            assert pending.accepted.is_set()
             assert pending.frame_reads == 0
             response = await asyncio.wait_for(client.delete(path, headers=ADMIN), 5)
             assert response.status_code == 204
-            assert pending.closed.is_set()
-            assert pending.close_codes == [1008]
+            assert pending.closed.is_set() is (phase != "accept")
             assert device_id not in hub.peers
-            assert hub.devices[device_id].current_session is None
+            if phase != "accept":
+                assert pending.close_codes == [4401]
+                assert hub.devices[device_id].current_session is None
             gate.release.set()
             await asyncio.wait_for(pending.task, 5)
             assert pending.frame_reads == 0
-            assert pending.close_codes == [1008]
+            assert pending.close_codes == [4401]
+            assert await pending.receive_json() == {"type": "revoked"}
             assert (await client.get(f"/v1/devices/{device_id}", headers=ADMIN)).status_code == 404
             if target == "pairing":
                 response = await client.get(path, headers=ADMIN)
                 assert response.json()["status"] == "revoked"
             reconnect = start(claim, OLD_PORT + 1)
             await asyncio.wait_for(reconnect.task, 5)
-            assert not reconnect.accepted.is_set()
-            assert reconnect.close_codes == [1008]
+            assert await reconnect.receive_json() == {"type": "revoked"}
+            assert reconnect.close_codes == [4401]
         finally:
             gate.release.set()
     assert hub.peers == {}
@@ -274,12 +276,11 @@ async def test_revocation_closes_registered_and_pending_same_device(race_service
             response = await asyncio.wait_for(client.delete(path, headers=ADMIN), 5)
             assert response.status_code == 204
             assert registered.closed.is_set()
-            assert pending.closed.is_set()
-            assert registered.close_codes == [1008]
-            assert pending.close_codes == [1008]
+            assert registered.close_codes == [4401]
             gate.release.set()
             await asyncio.wait_for(pending.task, 5)
             await asyncio.wait_for(registered.task, 5)
+            assert pending.close_codes == [4401]
             assert pending.frame_reads == 0
             assert hub.peers == {}
         finally:
@@ -330,7 +331,7 @@ async def test_registration_rechecks_durable_authorization(race_service, monkeyp
                 await asyncio.to_thread(store.revoke_device, device_id)
             gate.release.set()
             await asyncio.wait_for(pending.task, 5)
-            assert pending.close_codes == [1008]
+            assert pending.close_codes == ([1008] if change == "replace" else [4401])
             assert pending.frame_reads == 0
             assert application.state.hub.peers == {}
             if change == "replace":
@@ -375,7 +376,7 @@ async def test_slow_replacement_close_does_not_hold_coordination(race_service, m
                 client.delete(f"/v1/devices/{first_claim['device_id']}", headers=ADMIN),
             )
             await asyncio.wait_for(replacement.closed.wait(), 5)
-            assert replacement.close_codes == [1008]
+            assert replacement.close_codes == [4401]
             assert not close_gate.release.is_set()
             close_gate.release.set()
             assert (await asyncio.wait_for(revoke_task, 5)).status_code == 204

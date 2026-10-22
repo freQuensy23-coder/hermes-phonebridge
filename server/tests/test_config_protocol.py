@@ -88,9 +88,11 @@ def test_nested_and_oversized_json_is_rejected():
         EventFrame(type="event", id="1", name="notification", data={"a": "x" * 16000, "b": "y" * 1000}, time=1)
 
 
-def test_hello_rejects_arbitrary_operations_and_fake_permissions():
+def test_hello_ignores_unknown_operations_and_rejects_fake_permissions():
+    hello = HelloFrame(type="hello", version="0.2.0", capabilities=["shell.exec", "device.info"], permissions={})
+    assert hello.capabilities == ["device.info"]
     with pytest.raises(ValidationError):
-        HelloFrame(type="hello", version="0.1.0", capabilities=["shell.exec"], permissions={})
+        HelloFrame(type="hello", version="0.1.0", capabilities=["bad op"], permissions={})
     with pytest.raises(ValidationError):
         HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={"sms": "true"})
     with pytest.raises(ValidationError):

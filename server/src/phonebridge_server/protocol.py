@@ -11,21 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 
 OPERATIONS = frozenset({
     "device.info", "capabilities", "device.capabilities", "debug.status",
-    "notifications.list", "notifications.dismiss", "notifications.reply", "notifications.action",
-    "apps.list", "apps.open", "audio.get", "audio.set", "contacts.list",
-    "calendar.list", "calendar.create", "calendar.delete", "clipboard.get", "clipboard.set",
-    "location.get", "torch.set", "calls.dial", "sms.list", "sms.send",
     "screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global",
-    "clock.providers", "clock.alarms.create", "clock.alarms.dismiss", "clock.alarms.snooze",
-    "clock.alarms.show", "clock.alarms.list", "clock.alarms.enable", "clock.alarms.disable",
-    "clock.alarms.delete", "clock.timers.create", "clock.timers.dismiss", "clock.timers.show",
-    "clock.timers.list", "clock.timers.cancel", "clock.timers.pause", "clock.timers.resume",
+    "files.receive",
 })
-NATIVE_CLOCK_OPERATIONS = frozenset({
-    "clock.alarms.create", "clock.alarms.dismiss", "clock.alarms.snooze", "clock.alarms.show",
-    "clock.timers.create", "clock.timers.dismiss", "clock.timers.show",
-})
-PACKAGE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\Z")
+FILE_OPERATIONS = frozenset({"files.receive"})
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}\Z")
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 SCREEN_OPERATIONS = frozenset({
@@ -193,9 +182,9 @@ class HelloFrame(Model):
     @field_validator("capabilities")
     @classmethod
     def valid_capabilities(cls, value):
-        if len(set(value)) != len(value) or any(op not in OPERATIONS for op in value):
+        if len(set(value)) != len(value) or any(not IDENTIFIER_PATTERN.fullmatch(op) for op in value):
             raise ValueError("Invalid capabilities")
-        return value
+        return [op for op in value if op in OPERATIONS]
 
     @field_validator("permissions")
     @classmethod
@@ -234,3 +223,58 @@ class EventFrame(Model):
     @classmethod
     def valid_data(cls, value):
         return validate_json(value, 16384)
+
+
+IMAGE_SIGNATURES = {
+    "image/png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
+    "image/jpeg": lambda data: data.startswith(b"\xff\xd8\xff"),
+    "image/gif": lambda data: data[:6] in (b"GIF87a", b"GIF89a"),
+    "image/webp": lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP",
+}
+MIME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\Z")
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}\Z")
+MAX_FILE_NAME_BYTES = 180
+
+
+def valid_file_name(name):
+    if not isinstance(name, str) or name in ("", ".", ".."):
+        return False
+    if any(character in "/\\" or ord(character) < 32 or ord(character) == 127 or 0xD800 <= ord(character) <= 0xDFFF
+           for character in name):
+        return False
+    return len(name.encode("utf-8")) <= MAX_FILE_NAME_BYTES
+
+
+def upload_metadata(query, headers, max_ttl=900):
+    from urllib.parse import parse_qsl
+
+    try:
+        pairs = parse_qsl(query.decode("ascii"), keep_blank_values=True, strict_parsing=bool(query),
+                          encoding="utf-8", errors="strict")
+    except (UnicodeError, ValueError) as error:
+        raise BridgeError("VALIDATION_ERROR", "Upload query is not valid UTF-8", 422) from error
+    fields = {}
+    for key, value in pairs:
+        if key not in {"name", "mime", "kind", "ttl_seconds"} or key in fields:
+            raise BridgeError("VALIDATION_ERROR", f"Unexpected or repeated query field {key!r}", 422)
+        fields[key] = value
+    name, mime, kind = fields.get("name"), fields.get("mime"), fields.get("kind")
+    if not valid_file_name(name):
+        raise BridgeError("VALIDATION_ERROR", "name must be a plain file name of at most 180 UTF-8 bytes", 422)
+    if mime is None or not MIME_PATTERN.fullmatch(mime):
+        raise BridgeError("VALIDATION_ERROR", "mime must be a type/subtype media type", 422)
+    if kind not in ("file", "image"):
+        raise BridgeError("VALIDATION_ERROR", "kind must be file or image", 422)
+    if kind == "image" and mime not in IMAGE_SIGNATURES:
+        raise BridgeError("VALIDATION_ERROR", "Images must be PNG, JPEG, WebP or GIF", 422)
+    ttl = fields.get("ttl_seconds", "300")
+    if not ttl.isascii() or not ttl.isdigit() or not 1 <= int(ttl) <= max_ttl:
+        raise BridgeError("VALIDATION_ERROR", f"ttl_seconds must be an integer 1..{max_ttl}", 422)
+    digests = headers.getlist("x-content-sha256")
+    if len(digests) != 1 or not SHA256_PATTERN.fullmatch(digests[0]):
+        raise BridgeError("VALIDATION_ERROR", "Exactly one lowercase hex X-Content-SHA256 header is required", 422)
+    keys = headers.getlist("idempotency-key")
+    if len(keys) > 1 or (keys and not IDENTIFIER_PATTERN.fullmatch(keys[0])):
+        raise BridgeError("VALIDATION_ERROR", "Idempotency-Key must be 1..128 characters [A-Za-z0-9_.:-]", 422)
+    return {"name": name, "mime": mime, "kind": kind, "ttl_seconds": int(ttl), "sha256": digests[0],
+            "idempotency_key": keys[0] if keys else None}

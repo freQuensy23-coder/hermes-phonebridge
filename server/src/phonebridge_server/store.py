@@ -4,16 +4,17 @@ import secrets
 import sqlite3
 import stat
 import threading
+import time
 from contextlib import contextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from .protocol import (
+    FILE_OPERATIONS,
     IDENTIFIER_PATTERN,
     MAX_RESULT_DATA_BYTES,
     MAX_RESULT_STRING_CHARS,
-    NATIVE_CLOCK_OPERATIONS,
     OPERATIONS,
-    PACKAGE_PATTERN,
     SCREEN_OPERATIONS,
     BridgeError,
     digest,
@@ -87,6 +88,14 @@ CREATE TABLE IF NOT EXISTS event_receipts (
     PRIMARY KEY(device_id,id)
 );
 CREATE INDEX IF NOT EXISTS receipts_retention ON event_receipts(received_at);
+CREATE TABLE IF NOT EXISTS transfers (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL REFERENCES devices(id),
+    command_id TEXT NOT NULL UNIQUE REFERENCES commands(id),
+    size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS transfers_device ON transfers(device_id);
 PRAGMA user_version=1;
 """
 
@@ -132,6 +141,13 @@ class Store:
             if version not in (0, 1):
                 raise ValueError("Unsupported PhoneBridge database version")
             self.connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + "COMMIT;")
+            self.transfers = path.parent / "transfers"
+            if self.transfers.is_symlink():
+                raise ValueError("Transfer directory must not be a symbolic link")
+            self.transfers.mkdir(mode=0o700, exist_ok=True)
+            metadata = self.transfers.stat()
+            if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise ValueError("Transfer directory must be private to this user")
         except BaseException:
             self.connection.close()
             raise
@@ -169,6 +185,19 @@ class Store:
             (now, encode_json({"code": "EXPIRED", "message": "Command TTL elapsed"}), now),
         )
 
+    def _reap(self, db):
+        rows = db.execute(
+            "SELECT t.id FROM transfers t JOIN commands c ON c.id=t.command_id "
+            "WHERE c.status NOT IN ('queued','sent')"
+        ).fetchall()
+        for row in rows:
+            db.execute("DELETE FROM transfers WHERE id=?", (row["id"],))
+        return [row["id"] for row in rows]
+
+    def _unlink(self, transfer_ids):
+        for transfer_id in transfer_ids:
+            (self.transfers / transfer_id).unlink(missing_ok=True)
+
     def _device(self, db, device_id):
         row = db.execute("SELECT * FROM devices WHERE id=? AND revoked_at IS NULL", (device_id,)).fetchone()
         if row is None:
@@ -176,7 +205,9 @@ class Store:
         return row
 
     def _session(self, db, device_id, session_id):
-        row = self._device(db, device_id)
+        row = db.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+        if row is None or row["revoked_at"] is not None:
+            raise BridgeError("UNAUTHORIZED", "Device authorization was revoked", 401)
         if row["session_id"] != session_id:
             raise BridgeError("AUTH_REVOKED", "Device session is no longer authorized", 401)
         return row
@@ -267,7 +298,9 @@ class Store:
             db.execute("UPDATE pairings SET status='revoked' WHERE id=?", (pairing_id,))
             if row["device_id"]:
                 self._revoke_device(db, row["device_id"])
-            return row["device_id"]
+            reaped = self._reap(db)
+        self._unlink(reaped)
+        return row["device_id"]
 
     def revoke_device(self, device_id):
         with self.transaction() as db:
@@ -275,6 +308,8 @@ class Store:
             if row is None:
                 raise BridgeError("NOT_FOUND", "Device not found", 404)
             self._revoke_device(db, device_id)
+            reaped = self._reap(db)
+        self._unlink(reaped)
 
     def health(self):
         with self.lock:
@@ -336,6 +371,8 @@ class Store:
             db.execute("UPDATE devices SET last_seen=? WHERE id=?", (self.clock(), device_id))
 
     def enqueue(self, device_id, request):
+        if request.op in FILE_OPERATIONS:
+            raise BridgeError("VALIDATION_ERROR", "File delivery requires the authenticated upload endpoint", 422)
         self._bounded(request.args, 32768)
         if request.op in SCREEN_OPERATIONS:
             debug_session = request.args.get("debug_session")
@@ -354,21 +391,33 @@ class Store:
                         raise BridgeError("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to another request", 409)
                     return {"id": existing["id"], "status": "queued", "expires_at": existing["expires_at"]}
             if request.op not in OPERATIONS or request.op not in json.loads(device["capabilities"]):
-                raise BridgeError("UNSUPPORTED", "Operation is not advertised by this device", 422)
-            pending = db.execute("SELECT count(*) FROM commands WHERE device_id=? AND status IN ('queued','sent')",
-                                 (device_id,)).fetchone()[0]
-            records = db.execute("SELECT count(*) FROM commands WHERE device_id=?", (device_id,)).fetchone()[0]
-            if pending >= self.settings.max_pending_commands or records >= self.settings.max_command_records:
-                raise BridgeError("QUEUE_FULL", "Device command queue limit reached", 429)
-            command_id = str(uuid4())
-            expires_at = now + request.ttl_seconds
-            db.execute(
-                "INSERT INTO commands(id,device_id,op,args,status,created_at,expires_at,idempotency_key,request_hash) "
-                "VALUES(?,?,?,?,'queued',?,?,?,?)",
-                (command_id, device_id, request.op, encode_json(request.args), now, expires_at,
-                 request.idempotency_key, request_hash),
-            )
+                raise BridgeError("UNSUPPORTED", f"Operation {request.op} is not advertised by this device", 422)
+            command_id, expires_at = self._insert_command(db, device_id, request.op, request.args,
+                                                          request.ttl_seconds, request.idempotency_key,
+                                                          request_hash, now)
             return {"id": command_id, "status": "queued", "expires_at": expires_at}
+
+    def _insert_command(self, db, device_id, op, args, ttl_seconds, idempotency_key, request_hash, now):
+        pending = db.execute("SELECT count(*) FROM commands WHERE device_id=? AND status IN ('queued','sent')",
+                             (device_id,)).fetchone()[0]
+        if pending >= self.settings.max_pending_commands:
+            raise BridgeError("QUEUE_FULL", "Too many undelivered commands for this device", 429)
+        records = db.execute("SELECT count(*) FROM commands WHERE device_id=?", (device_id,)).fetchone()[0]
+        if records >= self.settings.max_command_records:
+            db.execute(
+                "DELETE FROM commands WHERE id IN (SELECT id FROM commands WHERE device_id=? "
+                "AND status NOT IN ('queued','sent') AND id NOT IN (SELECT command_id FROM transfers) "
+                "ORDER BY completed_at, rowid LIMIT ?)",
+                (device_id, records - self.settings.max_command_records + 1),
+            )
+        command_id = str(uuid4())
+        expires_at = now + ttl_seconds
+        db.execute(
+            "INSERT INTO commands(id,device_id,op,args,status,created_at,expires_at,idempotency_key,request_hash) "
+            "VALUES(?,?,?,?,'queued',?,?,?,?)",
+            (command_id, device_id, op, encode_json(args), now, expires_at, idempotency_key, request_hash),
+        )
+        return command_id, expires_at
 
     def command(self, command_id):
         with self.transaction() as db:
@@ -428,25 +477,22 @@ class Store:
                     validate_screenshot_data(data)
                 except ValueError as error:
                     raise BridgeError("INVALID_RESULT", "Invalid or oversized JPEG screenshot", 422) from error
-            if frame.ok and row["op"] in NATIVE_CLOCK_OPERATIONS:
-                package = data.get("package") if data is not None else None
-                if not isinstance(package, str) or len(package) > 255 or not PACKAGE_PATTERN.fullmatch(package):
-                    raise BridgeError("INVALID_RESULT", "Native clock dispatch requires its resolved package", 422)
-                data["outcome"] = "dispatched"
-                data["verified"] = False
-                self._bounded(data, MAX_RESULT_DATA_BYTES, MAX_RESULT_STRING_CHARS)
             result_hash = fingerprint({"ok": frame.ok, "data": data,
                                        "error": frame.error.model_dump() if frame.error else None})
             if row["status"] in ("succeeded", "failed"):
                 if row["result_hash"] != result_hash:
                     raise BridgeError("RESULT_CONFLICT", "Terminal command result cannot be changed", 409)
                 return
-            if row["status"] != "sent":
-                raise BridgeError("RESULT_UNCORRELATED", "Command is not awaiting a result", 409)
+            if row["status"] == "queued":
+                raise BridgeError("RESULT_UNCORRELATED", "Command was never delivered to this device", 409)
+            if row["status"] == "expired" and (row["op"] in SCREEN_OPERATIONS or row["op"] == "debug.status"):
+                return
             db.execute("UPDATE commands SET status=?,completed_at=?,result_hash=?,data=?,error=? WHERE id=?",
                        ("succeeded" if frame.ok else "failed", now, result_hash,
                         encode_json(data) if data is not None else None,
                         encode_json(frame.error.model_dump()) if frame.error else None, frame.id))
+            reaped = self._reap(db)
+        self._unlink(reaped)
 
     def event(self, device_id, session_id, frame):
         self._bounded(frame.data, 16384)
@@ -462,7 +508,9 @@ class Store:
                 return {"type": "ack", "id": frame.id}
             count = db.execute("SELECT count(*) FROM event_receipts WHERE device_id=?", (device_id,)).fetchone()[0]
             if count >= self.settings.max_event_receipts:
-                raise BridgeError("QUEUE_FULL", "Device event receipt limit reached", 429)
+                db.execute("DELETE FROM event_receipts WHERE rowid IN (SELECT rowid FROM event_receipts "
+                           "WHERE device_id=? ORDER BY received_at, rowid LIMIT ?)",
+                           (device_id, count - self.settings.max_event_receipts + 1))
             db.execute("INSERT INTO event_receipts(device_id,id,content_hash,received_at) VALUES(?,?,?,?)",
                        (device_id, frame.id, content_hash, now))
             db.execute("INSERT INTO events(device_id,id,name,data,time,received_at) VALUES(?,?,?,?,?,?)",
@@ -487,7 +535,78 @@ class Store:
         now = int(self.clock())
         with self.transaction() as db:
             self._expire(db)
+            reaped = self._reap(db)
             db.execute("DELETE FROM pairings WHERE status<>'pending' AND expires_at<?", (now - self.settings.retention_seconds,))
-            db.execute("DELETE FROM commands WHERE completed_at<?", (now - self.settings.receipt_retention_seconds,))
+            db.execute("DELETE FROM commands WHERE completed_at<? AND id NOT IN (SELECT command_id FROM transfers)",
+                       (now - self.settings.receipt_retention_seconds,))
             db.execute("DELETE FROM events WHERE received_at<?", (now - self.settings.retention_seconds,))
             db.execute("DELETE FROM event_receipts WHERE received_at<?", (now - self.settings.receipt_retention_seconds,))
+            known = {row["id"] for row in db.execute("SELECT id FROM transfers").fetchall()}
+        self._unlink(reaped)
+        for path in self.transfers.iterdir():
+            staging = path.name.startswith("upload-")
+            if path.name not in known and (not staging or time.time() - path.stat().st_mtime > 3600):
+                path.unlink(missing_ok=True)
+
+    def create_transfer(self, device_id, upload, staged):
+        now = int(self.clock())
+        request_hash = fingerprint({"op": "files.receive", "name": upload["name"], "mime": upload["mime"],
+                                    "kind": upload["kind"], "size": upload["size"], "sha256": upload["sha256"],
+                                    "ttl_seconds": upload["ttl_seconds"]})
+        transfer_id = str(uuid4())
+        try:
+            with self.transaction() as db:
+                self._expire(db)
+                device = self._device(db, device_id)
+                key = upload["idempotency_key"]
+                if key is not None:
+                    existing = db.execute("SELECT * FROM commands WHERE device_id=? AND idempotency_key=?",
+                                          (device_id, key)).fetchone()
+                    if existing is not None:
+                        if existing["request_hash"] != request_hash:
+                            raise BridgeError("IDEMPOTENCY_CONFLICT", "Idempotency key belongs to another request", 409)
+                        return {"id": existing["id"], "status": "queued", "expires_at": existing["expires_at"]}
+                if not upload["signature_ok"]:
+                    raise BridgeError("VALIDATION_ERROR", "Image bytes do not match the declared image type", 422)
+                if "files.receive" not in json.loads(device["capabilities"]):
+                    raise BridgeError("UNSUPPORTED", "Device does not advertise files.receive", 422)
+                live = "SELECT {} FROM transfers t JOIN commands c ON c.id=t.command_id WHERE c.status IN ('queued','sent')"
+                count = db.execute(live.format("count(*)") + " AND t.device_id=?", (device_id,)).fetchone()[0]
+                if count >= self.settings.max_device_transfers:
+                    raise BridgeError("QUEUE_FULL", "Too many undelivered files for this device", 429)
+                total = db.execute(live.format("COALESCE(SUM(t.size),0)")).fetchone()[0]
+                if total + upload["size"] > self.settings.max_transfer_bytes:
+                    raise BridgeError("QUEUE_FULL", "Pending file storage quota reached", 429)
+                args = {"transfer_id": transfer_id, "name": upload["name"], "mime": upload["mime"],
+                        "kind": upload["kind"], "size": upload["size"], "sha256": upload["sha256"]}
+                command_id, expires_at = self._insert_command(db, device_id, "files.receive", args,
+                                                              upload["ttl_seconds"], key, request_hash, now)
+                db.execute("INSERT INTO transfers(id,device_id,command_id,size,created_at) VALUES(?,?,?,?,?)",
+                           (transfer_id, device_id, command_id, upload["size"], now))
+                os.replace(staged, self.transfers / transfer_id)
+                return {"id": command_id, "status": "queued", "expires_at": expires_at}
+        except BaseException:
+            (self.transfers / transfer_id).unlink(missing_ok=True)
+            raise
+        finally:
+            Path(staged).unlink(missing_ok=True)
+
+    def open_transfer(self, token, transfer_id):
+        with self.transaction() as db:
+            self._expire(db)
+            device = db.execute("SELECT id FROM devices WHERE token_hash=? AND revoked_at IS NULL",
+                                (digest(token),)).fetchone()
+            if device is None:
+                raise BridgeError("UNAUTHORIZED", "Device authorization required", 401)
+            row = db.execute("SELECT t.id, t.device_id, c.status FROM transfers t JOIN commands c ON c.id=t.command_id "
+                             "WHERE t.id=?", (transfer_id,)).fetchone()
+            if row is None or row["device_id"] != device["id"]:
+                raise BridgeError("NOT_FOUND", "Transfer not found", 404)
+            if row["status"] == "queued":
+                raise BridgeError("NOT_DISPATCHED", "Transfer has not been delivered to the device yet", 409)
+            if row["status"] != "sent":
+                raise BridgeError("GONE", "Transfer is no longer available", 410)
+            try:
+                return open(self.transfers / transfer_id, "rb")
+            except FileNotFoundError as error:
+                raise BridgeError("GONE", "Transfer is no longer available", 410) from error

@@ -51,16 +51,19 @@ async def test_same_event_id_is_scoped_to_device(store_factory):
     assert store.events(second, 0, 50)["events"][0]["data"] == {"second": True}
 
 
-async def test_expired_results_cannot_change_terminal_status(store_factory, clock):
+async def test_late_result_after_expiry_records_actual_outcome(store_factory, clock):
     store = store_factory()
     _, _, device_id, session = provision(store)
     command = store.enqueue(device_id, CommandRequest(op="device.info", ttl_seconds=1))
     store.dispatch(device_id, session, command["id"])
     clock.advance(1)
-    with pytest.raises(BridgeError) as expired:
-        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={}))
-    assert expired.value.code == "RESULT_UNCORRELATED"
     assert store.command(command["id"])["status"] == "expired"
+    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={"late": True}))
+    assert store.command(command["id"])["status"] == "succeeded"
+    assert store.command(command["id"])["data"] == {"late": True}
+    with pytest.raises(BridgeError) as changed:
+        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={"other": 1}))
+    assert changed.value.code == "RESULT_CONFLICT"
 
 
 async def test_screenshot_sized_result_is_bounded_and_preserved(store_factory):
@@ -81,7 +84,7 @@ async def test_hello_has_deadline(settings, clock):
         with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {claim['device_token']}"}) as socket:
             with pytest.raises(WebSocketDisconnect) as closed:
                 socket.receive_json()
-            assert closed.value.code == 1008
+            assert closed.value.code == 1013
 
 
 async def test_frame_rate_is_bounded(settings, clock):
@@ -112,10 +115,12 @@ async def test_external_worker_revocation_closes_active_socket(settings, clock):
         _, claim = pair(first_client)
         with connected(first_client, claim) as socket:
             assert second_client.delete(f"/v1/devices/{claim['device_id']}", headers=ADMIN).status_code == 204
+            frames = []
             with pytest.raises(WebSocketDisconnect) as closed:
                 while True:
-                    socket.receive_json()
-            assert closed.value.code == 1008
+                    frames.append(socket.receive_json())
+            assert closed.value.code == 4401
+            assert frames[-1] == {"type": "revoked"}
 
 
 async def test_event_receipt_survives_application_restart(settings, clock):

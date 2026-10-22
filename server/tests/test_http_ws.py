@@ -188,21 +188,48 @@ def test_revocation_closes_active_socket_and_prevents_reconnect(client):
     with connected(client, claim) as socket:
         response = client.delete(f"/v1/devices/{claim['device_id']}", headers=ADMIN)
         assert response.status_code == 204
+        assert socket.receive_json() == {"type": "revoked"}
         with pytest.raises(WebSocketDisconnect) as closed:
             socket.receive_json()
-        assert closed.value.code == 1008
+        assert closed.value.code == 4401
     assert client.get(f"/v1/devices/{claim['device_id']}", headers=ADMIN).status_code == 404
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {claim['device_token']}"}):
+    with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {claim['device_token']}"}) as socket:
+        assert socket.receive_json() == {"type": "revoked"}
+        with pytest.raises(WebSocketDisconnect) as closed:
+            socket.receive_json()
+        assert closed.value.code == 4401
+
+
+def test_unknown_token_is_told_revoked_but_malformed_credentials_are_refused(client):
+    with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {'a' * 43}"}) as socket:
+        assert socket.receive_json() == {"type": "revoked"}
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect("/v1/device/ws", headers={"Authorization": "Bearer short"}):
             pass
+    assert refused.value.code == 1008
+
+
+def test_failed_device_authentication_cannot_lock_out_paired_phone(settings, clock):
+    with TestClient(create_app(replace(settings, claim_rate=2), clock)) as client:
+        _, claim = pair(client)
+        for _ in range(5):
+            with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {'b' * 43}"}) as socket:
+                try:
+                    socket.receive_json()
+                except WebSocketDisconnect:
+                    pass
+        with connected(client, claim) as socket:
+            assert client.get(f"/v1/devices/{claim['device_id']}", headers=ADMIN).json()["online"] is True
 
 
 def test_claimed_pairing_revocation_closes_device(client):
     pairing, claim = pair(client)
     with connected(client, claim) as socket:
         assert client.delete(f"/v1/pairings/{pairing['id']}", headers=ADMIN).status_code == 204
-        with pytest.raises(WebSocketDisconnect):
+        assert socket.receive_json() == {"type": "revoked"}
+        with pytest.raises(WebSocketDisconnect) as closed:
             socket.receive_json()
+        assert closed.value.code == 4401
 
 
 @pytest.mark.parametrize("frame", [{"type": "result", "id": "unknown", "ok": True},

@@ -325,8 +325,7 @@ def test_mock_phone_debug_auth_missing_operation_and_no_enable_endpoint(service)
 
 @pytest.mark.parametrize("op", ["debug.enable", "debug.renew"])
 def test_remote_consent_operations_cannot_be_advertised(op):
-    with pytest.raises(ValidationError):
-        HelloFrame(type="hello", version="0.1.0", capabilities=[op], permissions={})
+    assert HelloFrame(type="hello", version="0.1.0", capabilities=[op, "debug.status"], permissions={}).capabilities == ["debug.status"]
 
 @pytest.mark.parametrize("op", SCREEN_OPERATIONS)
 @pytest.mark.parametrize("args", [{}, {"debug_session": None}, {"debug_session": ""}, {"debug_session": 7},
@@ -492,10 +491,9 @@ def test_debug_expiry_and_revoked_device_results_remain_fail_closed(store_factor
     command = store.enqueue(device_id, CommandRequest(op="debug.status", ttl_seconds=1))
     store.dispatch(device_id, session, command["id"])
     clock.advance(1)
-    with pytest.raises(BridgeError) as expired:
-        store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={}))
-    assert expired.value.code == "RESULT_UNCORRELATED"
+    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={}))
     assert store.command(command["id"])["status"] == "expired"
+    assert store.command(command["id"])["data"] is None
     next_command = store.enqueue(device_id, CommandRequest(op="debug.status"))
     store.revoke_device(device_id)
     with pytest.raises(BridgeError):
@@ -544,9 +542,9 @@ def test_other_operations_preserve_opaque_phone_data(store_factory):
 def test_result_budget_applies_after_server_normalization(store_factory):
     store = store_factory()
     _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="clock.alarms.create"))
+    command = store.enqueue(device_id, CommandRequest(op="device.info"))
     store.dispatch(device_id, session, command["id"])
-    data = {"package": "com.example.clock", "a": "x" * 196000, "b": ""}
+    data = {"outcome": "dispatched", "a": "x" * 196000, "b": ""}
     data["b"] = "y" * (384 * 1024 - len(encode_json(data).encode()))
     with pytest.raises(BridgeError) as oversized:
         store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data=data))

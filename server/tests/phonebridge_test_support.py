@@ -7,7 +7,7 @@ from phonebridge_server.protocol import ClaimRequest, HelloFrame, PairingRequest
 
 ADMIN_TOKEN = "ci-phonebridge-test-admin-token-000000000000000000"
 ADMIN = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
-CAPABILITIES = ["device.info", "clock.alarms.create", "notifications.list"]
+CAPABILITIES = ["device.info", "debug.status", "files.receive"]
 
 
 class Clock:
@@ -42,6 +42,20 @@ def provision(store, capabilities=None):
     return pairing, claim, device_id, session_id
 
 
+class BufferedSocket:
+    def __init__(self, socket):
+        self.socket = socket
+        self.pending = []
+
+    def receive_json(self):
+        if self.pending:
+            return self.pending.pop(0)
+        return self.socket.receive_json()
+
+    def __getattr__(self, name):
+        return getattr(self.socket, name)
+
+
 @contextmanager
 def connected(client, claim, capabilities=None):
     with client.websocket_connect("/v1/device/ws", headers={"Authorization": f"Bearer {claim['device_token']}"}) as socket:
@@ -50,5 +64,8 @@ def connected(client, claim, capabilities=None):
                           "permissions": {"notifications": True}})
         ready_id = str(uuid4())
         socket.send_json({"type": "event", "id": ready_id, "name": "connection.ready", "data": {}, "time": 0})
-        assert socket.receive_json() == {"type": "ack", "id": ready_id}
-        yield socket
+        buffered = BufferedSocket(socket)
+        while (frame := socket.receive_json()) != {"type": "ack", "id": ready_id}:
+            assert frame.get("type") == "command"
+            buffered.pending.append(frame)
+        yield buffered
