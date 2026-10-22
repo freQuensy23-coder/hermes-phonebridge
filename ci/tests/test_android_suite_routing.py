@@ -3,7 +3,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[2]
 HARDWARE_CLASSES = {"PhoneOemInstrumentationTest", "SamsungClockInstrumentationTest"}
-SEPARATELY_ROUTED_CLASSES = {"DebugControlInstrumentationTest"}
+SEPARATELY_ROUTED_CLASSES = {"DebugControlInstrumentationTest", "FileDeliveryInstrumentationTest"}
 
 
 def test_emulator_suite_routes_every_nonhardware_nonisolated_instrumentation_class():
