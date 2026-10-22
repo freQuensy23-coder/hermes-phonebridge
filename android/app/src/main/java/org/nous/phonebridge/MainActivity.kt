@@ -32,14 +32,15 @@ class MainActivity : Activity() {
         window.setDecorFitsSystemWindows(false)
         window.statusBarColor = android.graphics.Color.rgb(245, 247, 246)
         window.navigationBarColor = android.graphics.Color.rgb(245, 247, 246)
-        window.insetsController?.setSystemBarsAppearance(
-            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        )
+
         // Credentials and one-time pairing codes must not appear in Recents or screenshots.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         ui = OwnerUi(this, ::action)
         setContentView(ui.root)
+        window.insetsController?.setSystemBarsAppearance(
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        )
         status = ui.status
         name = ui.name
         code = ui.code
@@ -90,7 +91,12 @@ class MainActivity : Activity() {
           catch (_: Exception) { message("Android could not open this action. Check app permissions in Settings.") }
     }
     private fun cancelPairing() {
-        synchronized(MainActivity) { pairingGeneration++; pairing = false }
+        synchronized(MainActivity) {
+            pairingGeneration++
+            // A response may have saved credentials just before its UI callback ran.
+            if (pairing) BridgeService.stop(this, true)
+            pairing = false
+        }
     }
     private fun scan() {
         if (pairing) return
