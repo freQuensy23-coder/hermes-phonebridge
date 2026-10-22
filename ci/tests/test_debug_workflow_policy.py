@@ -844,6 +844,28 @@ def test_coordinator_failure_is_optional_summary_only_without_changing_receipt_o
     assert "coordinator_failure" not in receipt
 
 
+def test_recents_verification_has_narrow_home_package_visibility_and_boolean_diagnostics():
+    manifest = ET.parse(ROOT / "android/app/src/main/AndroidManifest.xml").getroot()
+    ns = "{http://schemas.android.com/apk/res/android}"
+    intents = manifest.findall("queries/intent")
+    assert any(
+        any(action.get(ns + "name") == "android.intent.action.MAIN" for action in item.findall("action"))
+        and any(category.get(ns + "name") == "android.intent.category.HOME" for category in item.findall("category"))
+        for item in intents
+    )
+    for vector in ([0] * 10, [1] * 10, [1, 1, 0, 0, 0, 0, 0, 0, 0, 0]):
+        token = json.dumps(vector, separators=(",", ":"))
+        xml, counts = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN bridge_navproof=" + token)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        observed = ET.fromstring(xml).find("testcase/failure")
+        assert observed is not None and observed.text is not None
+        assert json.loads(observed.text)["bridge_navproof"] == vector
+    for token in ("PRIVATE_TOKEN", "[]", "[1,1,1,1,1,1,1,1,1,2]", "[1,1,1,1,1,1,1,1,1]", "[1,1,1,1,1,1,1,1,1,1]PRIVATE_TOKEN", "[1,1,1,1,1,1,1,1,1,1] bridge_navproof=[1,1,1,1,1,1,1,1,1,1]"):
+        xml, counts = sanitize_reports([bridge_diagnostic_report("PRIVATE_TOKEN bridge_navproof=" + token)], INSTRUMENTATION)
+        assert_observed_totals(xml, counts, ["failure"])
+        assert b"bridge_navproof" not in xml and b"PRIVATE_TOKEN" not in xml
+
+
 def test_navigation_owner_proof_requires_exact_enabled_framework_recents_authority():
     source = (ROOT / "android/app/src/main/java/org/nous/phonebridge/BridgeAccessibility.kt").read_text()
     proof = source.split("private fun verifiedNavigationOwner(): String?", 1)[1].split("private fun nativeWindowGeometry()", 1)[0]

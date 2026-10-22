@@ -168,6 +168,9 @@ def sanitize_reports(reports, required, exact_names=True):
                         barproof = restricted_bridge_barproof(stack)
                         if barproof is not None:
                             diagnostic["bridge_barproof"] = barproof
+                        navigation = re.findall(r"(?<!\S)bridge_navproof=(\S*)", stack)
+                        if len(navigation) == 1 and re.fullmatch(r"\[[01](?:,[01]){9}\]", navigation[0]):
+                            diagnostic["bridge_navproof"] = [int(value) for value in navigation[0][1:-1].split(",")]
                         local = re.findall(r"(?<!\S)bridge_local=(\S*)", stack)
                         if len(local) == 1 and re.fullmatch(r"\[[01],[01],[01],[0-3],[0-3],[01],[0-2]\]", local[0]):
                             diagnostic["bridge_local"] = [int(value) for value in local[0][1:-1].split(",")]

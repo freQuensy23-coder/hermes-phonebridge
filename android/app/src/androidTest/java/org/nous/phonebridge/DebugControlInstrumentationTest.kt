@@ -193,6 +193,33 @@ class DebugControlInstrumentationTest {
         if (Build.VERSION.SDK_INT == 31) serverEnqueueUnsupported("screen.screenshot", args(session, pkg))
         else refused(command("screen.screenshot", args(session, pkg)), "UNSUPPORTED")
     }
+    private fun bridgeNavigationProofDiagnostic(): String? = try {
+        UiThread.call {
+            val service = BridgeAccessibility.current ?: return@call null
+            val flags = MutableList(10) { 0 }
+            fun probe() {
+                val resource = service.resources.getIdentifier("config_recentsComponentName", "string", "android")
+                if (resource == 0) return
+                flags[0] = 1
+                val component = android.content.ComponentName.unflattenFromString(service.resources.getString(resource)) ?: return
+                flags[1] = 1
+                val manager = service.packageManager
+                val activity = manager.getActivityInfo(component, android.content.pm.PackageManager.MATCH_SYSTEM_ONLY)
+                flags[2] = 1
+                val application = activity.applicationInfo ?: return
+                flags[3] = if (activity.packageName == component.packageName && application.packageName == component.packageName) 1 else 0
+                flags[4] = if (activity.enabled && application.enabled) 1 else 0
+                flags[5] = if (application.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0) 1 else 0
+                val enabled = setOf(android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED)
+                flags[6] = if (manager.getApplicationEnabledSetting(component.packageName) in enabled) 1 else 0
+                flags[7] = if (manager.getComponentEnabledSetting(component) in enabled) 1 else 0
+                flags[8] = if (manager.checkPermission("android.permission.STATUS_BAR_SERVICE", component.packageName) == android.content.pm.PackageManager.PERMISSION_GRANTED) 1 else 0
+                flags[9] = if (service.windows.any { it.root?.packageName?.toString() == component.packageName }) 1 else 0
+            }
+            try { probe() } catch (_: Exception) { }
+            flags.joinToString(",", "[", "]")
+        }
+    } catch (_: Exception) { null }
     private fun bridgeBarProofDiagnostic(): String? = try {
         UiThread.call {
             val service = BridgeAccessibility.current ?: return@call null
@@ -290,7 +317,8 @@ class DebugControlInstrumentationTest {
         }
         val windows = if (value.optString("status") != "succeeded") bridgeWindowsDiagnostic()?.let { " bridge_windows=$it" }.orEmpty() else ""
         val barproof = if (value.optString("status") != "succeeded") bridgeBarProofDiagnostic()?.let { " bridge_barproof=$it" }.orEmpty() else ""
-        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason$windows$barproof", "succeeded", value.getString("status"))
+        val navigation = if (value.optString("status") != "succeeded") bridgeNavigationProofDiagnostic()?.let { " bridge_navproof=$it" }.orEmpty() else ""
+        assertEquals("Command must succeed through the production HTTP and WSS path; bridge_code=$code bridge_reason=$reason$windows$barproof$navigation", "succeeded", value.getString("status"))
         return value.getJSONObject("data")
     }
     private fun refused(value: JSONObject, code: String) {
