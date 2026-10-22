@@ -2,11 +2,10 @@
 
 One-way delivery accepts a local path on the agent's machine. Ordinary files appear in `Download/PhoneBridge`; images appear in `Pictures/PhoneBridge` and the gallery. No phone filesystem listing, reading, arbitrary-path writes, remote execution or automatic opening is exposed. Accessibility and experimental debug consent are not required.
 
-`phonebridge files send DEVICE /path/report.pdf --wait`
+    phonebridge files send DEVICE /path/report.pdf --wait
+    phonebridge images send DEVICE /path/photo.png --wait
 
-`phonebridge images send DEVICE /path/photo.png --wait`
-
-Use `--name` for a different phone filename and `--mime` for an explicit media type. Images support PNG, JPEG, WebP and GIF. Maximum file size is 32 MiB. Existing files are never overwritten. The phone may assign a collision-safe name. A notification is posted when Android notifications are allowed; delivery still works when notifications are disabled.
+`images send` (or `files send --image`) saves to the gallery. Use `--name` for a different phone filename and `--mime` for an explicit media type. Images support PNG, JPEG, WebP and GIF. Maximum file size is 32 MiB. Existing files are never overwritten. The phone may assign a collision-safe name. A notification is posted when Android notifications are allowed; delivery still works when notifications are disabled.
 
 Without `--wait`, output acknowledges queueing only. With `--wait`, success requires a completed Android result including the published MediaStore URI, actual display name, byte size and SHA-256. A timeout does not establish failure or permit blind resubmission: inspect the original command ID. Same idempotency key and identical payload return the same command; conflicting content is rejected.
 
@@ -18,6 +17,6 @@ The paired phone downloads only its own dispatched, unexpired transfer from `GET
 
 Android streams into an unpublished MediaStore item, verifies byte size and SHA-256, validates image contents for gallery delivery, and publishes only after verification. Failed, expired or interrupted writes remove the pending item. Native command journaling prevents automatic replay of uncertain effects.
 
-## Automatic acceptance
+## Tests
 
-GitHub CI exercises the installed CLI against the real backend and authenticated Android WSS connection on API 31 and 35. Independent instrumentation reads saved MediaStore bytes and verifies binary files, images, empty files and same-name collisions. Unit and transport checks do not replace this whole-flow test.
+`server/tests/test_file_delivery.py` and `cli/tests/test_file_delivery_cli.py` cover the HTTP contract and the CLI. `ServerInstrumentationTest` uploads binary, empty, image and same-name files through the real server on API 31 and 35 emulators and reads the saved MediaStore bytes back.

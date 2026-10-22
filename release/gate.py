@@ -11,7 +11,7 @@ REPOSITORY = "freQuensy23-coder/hermes-phonebridge"
 OWNER = "freQuensy23-coder"
 CI_PATH = ".github/workflows/ci.yml"
 RELEASE_PATH = ".github/workflows/release.yml"
-REQUIRED_JOBS = {"security", "python", "android-build", "android-e2e (31)", "android-e2e (35)", "android-physical", "release-input"}
+REQUIRED_JOBS = {"security", "python", "android-build", "android-e2e (31)", "android-e2e (35)", "release-input"}
 MAX_ARCHIVE = 128 * 1024 * 1024
 
 

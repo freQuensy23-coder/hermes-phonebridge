@@ -114,11 +114,13 @@ def provision(domain):
     location = /healthz {{
         limit_except GET {{ deny all; }}
         proxy_pass http://127.0.0.1:18940;
+        proxy_set_header X-Forwarded-For $remote_addr;
     }}
     location = /v1/pair/claim {{
         limit_except POST {{ deny all; }}
         proxy_pass http://127.0.0.1:18940;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
     }}
     location = /v1/device/ws {{
@@ -127,9 +129,19 @@ def provision(domain):
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 90s;
         proxy_send_timeout 90s;
+    }}
+    location ^~ /v1/device/files/ {{
+        limit_except GET {{ deny all; }}
+        proxy_pass http://127.0.0.1:18940;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
     }}
     location / {{ return 403; }}
 }}
