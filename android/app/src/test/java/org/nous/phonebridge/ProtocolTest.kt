@@ -32,6 +32,8 @@ class ProtocolTest {
         assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(" $wrapped \n", false, 1000))
         assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(code(qr()).removePrefix(PairingQr.CODE_PREFIX), false, 1000))
         assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(qr(), false, 1000))
+        val standard = java.util.Base64.getEncoder().encodeToString(qr("https://phone.example").toByteArray())
+        assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(standard, false, 1000))
     }
     @Test fun connectionCodeKeepsEveryQrCheck() {
         rejected { PairingQr.parseInput(code(qr(expiry = 1000)), false, 1000) }

@@ -56,7 +56,8 @@ data class PairingQr(val server: HttpUrl, val token: String, val expiresAt: Long
             requireBridge(compact.isNotEmpty() && compact.length <= 8192, "Paste the whole connection code")
             if (compact.startsWith("{")) return parse(compact, allowEmulator, now)
             val body = compact.removePrefix(CODE_PREFIX)
-            val json = try { String(java.util.Base64.getUrlDecoder().decode(body), Charsets.UTF_8) } catch (_: IllegalArgumentException) {
+            val decoder = if (body.any { it == '+' || it == '/' }) java.util.Base64.getDecoder() else java.util.Base64.getUrlDecoder()
+            val json = try { String(decoder.decode(body), Charsets.UTF_8) } catch (_: IllegalArgumentException) {
                 failure("VALIDATION_ERROR", "The connection code is damaged; copy it again")
             }
             requireBridge(json.startsWith("{"), "This is not a PhoneBridge connection code")
