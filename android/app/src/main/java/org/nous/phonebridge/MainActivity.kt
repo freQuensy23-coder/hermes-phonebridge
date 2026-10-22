@@ -36,15 +36,16 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         val density = resources.displayMetrics.density
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding((20 * density).toInt(), (24 * density).toInt(), (20 * density).toInt(), (24 * density).toInt()) }
-        val scroll = ScrollView(this).apply {
-            addView(layout)
+        val scroll = ScrollView(this).apply { addView(layout) }
+        val root = android.widget.FrameLayout(this).apply {
+            addView(scroll)
             setOnApplyWindowInsetsListener { view, insets ->
                 val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
                 insets
             }
         }
-        setContentView(scroll)
+        setContentView(root)
         fun text(value: String) { layout.addView(TextView(this).apply { text = value; setPadding(0, 12, 0, 12) }) }
         fun button(label: String, action: () -> Unit) { layout.addView(Button(this).apply { text = label; setOnClickListener { try { action() } catch (e: BridgeFailure) { message(e.message) } catch (_: Exception) { message("Android refused this action. Open system settings to grant access.") } } }) }
         text("PhoneBridge ${BuildConfig.VERSION_NAME}")

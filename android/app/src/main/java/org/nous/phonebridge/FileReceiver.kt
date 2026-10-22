@@ -117,7 +117,7 @@ class FileReceiver(private val context: Context, private val credentials: Device
         const val MAX_BYTES = 33554432L
         const val CHANNEL = "phonebridge.files"
         private const val NOTIFICATION_BASE = 200000
-        private val client = BridgeHttp.client.newBuilder().readTimeout(60, TimeUnit.SECONDS).callTimeout(10, TimeUnit.MINUTES).build()
+        private val client = BridgeHttp.client.newBuilder().connectionPool(okhttp3.ConnectionPool(1, 30, TimeUnit.SECONDS)).retryOnConnectionFailure(true).readTimeout(60, TimeUnit.SECONDS).callTimeout(10, TimeUnit.MINUTES).build()
         private val IDENTIFIER = Regex("[A-Za-z0-9_.:-]{1,128}")
         private val MIME = Regex("[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}")
         private val SHA256 = Regex("[0-9a-f]{64}")

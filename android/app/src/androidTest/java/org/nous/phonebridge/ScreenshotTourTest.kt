@@ -49,6 +49,7 @@ class ScreenshotTourTest {
     private var deviceId: String? = null
     private var originalServices: String? = null
     private var scenario: ActivityScenario<MainActivity>? = null
+    private val admin = BridgeHttp.client.newBuilder().connectionPool(okhttp3.ConnectionPool(0, 1, java.util.concurrent.TimeUnit.SECONDS)).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
 
     private fun shell(command: String): String = automation.executeShellCommand(command).use { ParcelFileDescriptor.AutoCloseInputStream(it).bufferedReader().use { reader -> reader.readText() } }
     private fun writeFile(path: String, bytes: ByteArray) {
@@ -70,9 +71,9 @@ class ScreenshotTourTest {
         fail("Screenshot tour condition was not reached")
     }
     private fun http(method: String, path: String, body: JSONObject? = null): JSONObject {
-        val request = Request.Builder().url(server + path).header("Authorization", "Bearer $adminToken")
+        val request = Request.Builder().url(server + path).header("Authorization", "Bearer $adminToken").header("Connection", "close")
             .method(method, body?.toString()?.toRequestBody("application/json".toMediaType())).build()
-        return BridgeHttp.client.newCall(request).execute().use { response ->
+        return admin.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) fail("HTTP $method $path returned ${response.code}: $text")
             if (text.isEmpty()) JSONObject() else JSONObject(text)
@@ -90,9 +91,9 @@ class ScreenshotTourTest {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         val url = "$server/v1/devices/$deviceId/files".toHttpUrl().newBuilder().addQueryParameter("name", name)
             .addQueryParameter("mime", mime).addQueryParameter("kind", kind).build()
-        val request = Request.Builder().url(url).header("Authorization", "Bearer $adminToken").header("X-Content-SHA256", digest)
+        val request = Request.Builder().url(url).header("Authorization", "Bearer $adminToken").header("Connection", "close").header("X-Content-SHA256", digest)
             .header("Idempotency-Key", UUID.randomUUID().toString()).post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
-        val queued = BridgeHttp.client.newCall(request).execute().use { JSONObject(it.body!!.string()) }
+        val queued = admin.newCall(request).execute().use { JSONObject(it.body!!.string()) }
         return finished(queued.getString("id"))
     }
     private fun nodes(): List<AccessibilityNodeInfo> {
