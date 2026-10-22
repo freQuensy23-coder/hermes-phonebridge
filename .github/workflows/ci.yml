@@ -60,7 +60,7 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install './server[test]' './cli[test]' ruff==0.11.13
       - run: python -m ruff check server cli deploy ci release
-      - run: python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests -q --junitxml=python-results.xml
+      - run: python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests -q -n auto --junitxml=python-results.xml
       - run: python -m build server --outdir dist && python -m build cli --outdir dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -84,7 +84,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
-      - run: chmod +x gradlew && ./gradlew --no-daemon --refresh-dependencies testDebugUnitTest assembleDebug assembleDebugAndroidTest assembleRelease
+        with:
+          cache-read-only: false
+      - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest assembleRelease
         working-directory: android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -115,11 +117,17 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+        with:
+          cache-read-only: false
       - name: Prepare isolated Android runner capacity and KVM
         run: |
-          sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/dotnet
-          df -h "$HOME"
           sudo chmod 666 /dev/kvm
+          nohup sudo rm -rf /usr/local/lib/android/sdk/ndk /usr/share/dotnet > /dev/null 2>&1 &
+      - name: Build app, test and fixture APKs while the emulator starts
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          nohup bash -c './gradlew assembleDebug assembleDebugAndroidTest :debugfixture:assembleDebug > "$RUNNER_TEMP/gradle-build.log" 2>&1; echo $? > "$RUNNER_TEMP/gradle-build.status"' > /dev/null 2>&1 &
       - run: python -m pip install ./server ./cli
       - name: Start isolated HTTPS test server
         env:

@@ -315,9 +315,12 @@ def test_failed_result_cannot_contain_success_data(store_factory):
     assert store.command(command["id"])["status"] == "sent"
 
 
-def test_device_list_shows_only_connected_phones(store_factory):
+def test_device_list_shows_only_connected_phones(store_factory, clock):
     store = store_factory()
     _, _, online_id, _ = provision(store)
+    # The list is ordered by created_at, then by random UUID; give the second phone a later
+    # creation second so the expected order below is deterministic instead of a coin flip.
+    clock.advance(1)
     _, offline_claim, offline_id, offline_session = provision(store)
     store.disconnect(offline_id, offline_session)
     assert [device["id"] for device in store.devices()["devices"]] == [online_id]

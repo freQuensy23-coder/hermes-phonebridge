@@ -57,7 +57,7 @@ class ServerInstrumentationTest {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (predicate()) return
-            Thread.sleep(650)
+            Thread.sleep(50)
         }
         fail("Condition not met within bounded timeout")
     }
@@ -99,8 +99,12 @@ class ServerInstrumentationTest {
         val bitmap = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff336699.toInt()) }
         return ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
     }
-    private fun deliver(id: String, name: String, mime: String, kind: String, bytes: ByteArray): JSONObject {
-        val result = terminal(upload(id, name, mime, kind, bytes).getString("id"))
+    private class Delivery(val command: String, val kind: String, val bytes: ByteArray)
+    private fun queueDelivery(id: String, name: String, mime: String, kind: String, bytes: ByteArray) = Delivery(upload(id, name, mime, kind, bytes).getString("id"), kind, bytes)
+    private fun deliver(delivery: Delivery): JSONObject {
+        val kind = delivery.kind
+        val bytes = delivery.bytes
+        val result = terminal(delivery.command)
         assertEquals("files.receive", result.getString("op"))
         assertEquals("succeeded", result.getString("status"))
         val data = result.getJSONObject("data")
@@ -182,14 +186,21 @@ class ServerInstrumentationTest {
         assertEquals(Build.VERSION.SDK_INT, result.getJSONObject("data").getInt("sdk"))
         val prefix = "ci-${UUID.randomUUID().toString().take(8)}"
         val binary = ByteArray(300_000) { ((it * 31 + 7) and 255).toByte() }
-        deliver(id, "$prefix-binary.bin", "application/octet-stream", "file", binary)
-        deliver(id, "$prefix-empty.txt", "text/plain", "file", byteArrayOf())
         val image = png()
-        deliver(id, "$prefix-image.png", "image/png", "image", image)
+        // Queue every delivery up front. The phone still receives them one at a time and in this order (the server
+        // dispatches by queue order and the service runs commands serially), so the second same-name file still
+        // arrives after the first is published; only the server dispatch delay and the polling no longer add up.
+        val deliveries = listOf(
+            queueDelivery(id, "$prefix-binary.bin", "application/octet-stream", "file", binary),
+            queueDelivery(id, "$prefix-empty.txt", "text/plain", "file", byteArrayOf()),
+            queueDelivery(id, "$prefix-image.png", "image/png", "image", image),
+            queueDelivery(id, "$prefix-same.bin", "application/octet-stream", "file", "first".toByteArray()),
+            queueDelivery(id, "$prefix-same.bin", "application/octet-stream", "file", "second, different".toByteArray())
+        ).map { deliver(it) }
         val decoded = BitmapFactory.decodeByteArray(image, 0, image.size)
         assertEquals(3, decoded.width)
-        val first = deliver(id, "$prefix-same.bin", "application/octet-stream", "file", "first".toByteArray())
-        val second = deliver(id, "$prefix-same.bin", "application/octet-stream", "file", "second, different".toByteArray())
+        val first = deliveries[3]
+        val second = deliveries[4]
         assertNotEquals(first.getString("uri"), second.getString("uri"))
         assertNotEquals(first.getString("name"), second.getString("name"))
         assertArrayEquals("first".toByteArray(), read(Uri.parse(first.getString("uri"))))
@@ -208,7 +219,7 @@ class ServerInstrumentationTest {
         scenario!!.onActivity { BridgeService.stop(it) }
         waitUntil { BridgeService.current == null && !http("GET", "/v1/devices/$id").getBoolean("online") }
         val expired = enqueue(id, "device.info", ttl = 1)
-        Thread.sleep(1500)
+        // The phone is offline, so only the 1 s TTL can make this command terminal; terminal() waits exactly that long.
         assertEquals("expired", terminal(expired.getString("id")).getString("status"))
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { online(id) }

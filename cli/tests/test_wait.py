@@ -128,6 +128,7 @@ def test_slow_response_is_bounded_without_retry(wire):
         wire.client.wait("cmd", timeout=0.1)
     assert caught.value.code == "TRANSPORT_ERROR"
     assert caught.value.details["command_id"] == "cmd"
+    assert wire.wait_for_requests(1)
     assert [request["method"] for request in wire.requests] == ["GET"]
 
 

@@ -17,7 +17,7 @@ import pytest
 from PIL import Image
 
 from phonebridge.cli import main
-from phonebridge.client import MAX_RESPONSE
+from phonebridge.client import MAX_RESPONSE, Client
 
 
 MAX_FILE_SIZE = 32 * 1024 * 1024
@@ -28,6 +28,7 @@ ADMIN_TOKEN = "file-test-admin-credential-00000000000000000000"
 def file_wire(environment, monkeypatch):
     responses = deque()
     requests = []
+    recorded = threading.Condition()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -36,9 +37,11 @@ def file_wire(environment, monkeypatch):
         def respond(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
-            requests.append({"method": self.command, "path": self.path,
-                             "headers": {key.lower(): value for key, value in self.headers.items()},
-                             "raw_body": body})
+            with recorded:
+                requests.append({"method": self.command, "path": self.path,
+                                 "headers": {key.lower(): value for key, value in self.headers.items()},
+                                 "raw_body": body})
+                recorded.notify_all()
             if not responses:
                 self.send_response(500)
                 self.send_header("Content-Length", "0")
@@ -76,7 +79,7 @@ def file_wire(environment, monkeypatch):
         do_DELETE = respond
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     worker.start()
 
     class FileWire:
@@ -87,6 +90,11 @@ def file_wire(environment, monkeypatch):
 
         def respond(self, content, status=200, **headers):
             responses.append((status, content, headers))
+
+        def wait_for_requests(self, count, timeout=5):
+            # See the wire fixture in conftest.py: recording can lag a client that already gave up.
+            with recorded:
+                return recorded.wait_for(lambda: len(requests) >= count, timeout)
 
     wire = FileWire()
     monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
@@ -388,7 +396,11 @@ def test_invalid_delivery_flags_are_rejected_without_upload(file_wire, tmp_path,
 
 
 @pytest.mark.parametrize("group", ["files", "images"])
-def test_wait_uploads_once_then_only_polls_original_command_for_confirmed_result(file_wire, tmp_path, capsys, group):
+def test_wait_uploads_once_then_only_polls_original_command_for_confirmed_result(file_wire, tmp_path, capsys,
+                                                                            monkeypatch, group):
+    sleeps = []
+    # Record the poll pause instead of really sleeping the default 0.5 s between the two reads.
+    monkeypatch.setattr("phonebridge.cli.Client", lambda settings: Client(settings, sleep=sleeps.append))
     path = local_file(tmp_path, "photo.png", image_bytes("PNG"))
     queued = command_resource()
     confirmed = {"uri": "content://downloads/my_downloads/42", "name": "phone-confirmed.bin",
@@ -404,6 +416,7 @@ def test_wait_uploads_once_then_only_polls_original_command_for_confirmed_result
         ("GET", "/v1/commands/file-command")]
     assert file_wire.requests[0]["raw_body"] == path.read_bytes()
     assert all(request["raw_body"] == b"" for request in file_wire.requests[1:])
+    assert sleeps == [0.5]
 
 
 @pytest.mark.parametrize("status", ["failed", "expired"])
@@ -496,6 +509,7 @@ def test_ambiguous_upload_transport_failure_is_never_retried(file_wire, tmp_path
     error = read_error(capsys, {"TRANSPORT_ERROR"})
     assert error["idempotency_key"] == "original-upload-key"
     assert error["may_have_been_submitted"] is True
+    assert file_wire.wait_for_requests(1)
     assert len(file_wire.requests) == 1
 
 
