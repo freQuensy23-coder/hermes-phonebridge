@@ -19,6 +19,10 @@ class DurabilityInstrumentationTest {
     private fun command(id: String = UUID.randomUUID().toString(), expires: Long = System.currentTimeMillis() / 1000 + 60) = JSONObject().put("type", "command").put("id", id).put("op", "device.info").put("args", JSONObject()).put("expires_at", expires)
     @Before fun setup() {
         BridgeService.stop(context, true)
+        // A service left by an earlier class stops asynchronously; it must be gone before these checks touch its database.
+        val deadline = android.os.SystemClock.elapsedRealtime() + 5000
+        while (BridgeService.current != null && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(10)
+        assertNull("BridgeService must be stopped before durability checks", BridgeService.current)
         store = DurableStore(context)
         store.clearAll()
     }

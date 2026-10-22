@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = ["qrcode==8.2", "Pillow==13.0.0", "colorama==0.4.6; platform_system == 'Windows'"]
 
 [project.optional-dependencies]
-test = ["pytest==8.3.5", "zxing-cpp==2.3.0", "build==1.2.2.post1", "packaging==25.0", "pyproject-hooks==1.2.0", "pluggy==1.6.0", "iniconfig==2.1.0"]
+test = ["pytest==8.3.5", "pytest-xdist==3.8.0", "execnet==2.1.2", "zxing-cpp==2.3.0", "build==1.2.2.post1", "packaging==25.0", "pyproject-hooks==1.2.0", "pluggy==1.6.0", "iniconfig==2.1.0"]
 
 [project.scripts]
 phonebridge = "phonebridge.cli:main"

@@ -226,7 +226,7 @@ class QrPipelineInstrumentationTest {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (predicate()) return
-            Thread.sleep(250)
+            Thread.sleep(50)
         }
         fail("Real QR pairing pipeline did not complete within its bounded timeout")
     }

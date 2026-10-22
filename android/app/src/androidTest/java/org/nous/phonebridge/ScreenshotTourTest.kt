@@ -47,6 +47,8 @@ class ScreenshotTourTest {
     private lateinit var pairingCode: String
     private var deviceId: String? = null
     private var originalServices: String? = null
+    private var originalEnabled: String? = null
+    private val delivered = mutableListOf<android.net.Uri>()
     private var scenario: ActivityScenario<MainActivity>? = null
     private val admin = BridgeHttp.client.newBuilder().connectionPool(okhttp3.ConnectionPool(0, 1, java.util.concurrent.TimeUnit.SECONDS)).callTimeout(60, java.util.concurrent.TimeUnit.SECONDS).build()
 
@@ -58,14 +60,24 @@ class ScreenshotTourTest {
     }
     private fun snap(name: String) {
         instrumentation.waitForIdleSync()
-        Thread.sleep(900)
+        // Capture once the UI has settled: no accessibility event for 300 ms (bounded, so a busy screen still gets captured).
+        try { automation.waitForIdle(300, 3000) } catch (_: java.util.concurrent.TimeoutException) { }
         shell("screencap -p $directory/$name.png")
+    }
+    /** Waits (bounded) until [pkg] owns the active window; the tour continues either way, as it did with fixed delays. */
+    private fun awaitActiveWindow(pkg: String) {
+        val deadline = SystemClock.elapsedRealtime() + 3000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (try { automation.rootInActiveWindow?.packageName?.toString() == pkg } catch (_: Exception) { false }) return
+            Thread.sleep(50)
+        }
+        android.util.Log.w("ScreenshotTour", "Active window did not become $pkg within 3 s")
     }
     private fun waitUntil(timeoutMs: Long = 45000, predicate: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (try { predicate() } catch (_: Exception) { false }) return
-            Thread.sleep(250)
+            Thread.sleep(50)
         }
         fail("Screenshot tour condition was not reached")
     }
@@ -86,15 +98,18 @@ class ScreenshotTourTest {
     }
     private fun command(op: String, args: JSONObject): JSONObject =
         finished(http("POST", "/v1/devices/$deviceId/commands", JSONObject().put("op", op).put("args", args).put("ttl_seconds", 60)).getString("id"))
-    private fun send(name: String, mime: String, kind: String, bytes: ByteArray): JSONObject {
+    /** Queues a file for the phone and returns the command ID; [received] waits for the phone's result. */
+    private fun send(name: String, mime: String, kind: String, bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         val url = "$server/v1/devices/$deviceId/files".toHttpUrl().newBuilder().addQueryParameter("name", name)
             .addQueryParameter("mime", mime).addQueryParameter("kind", kind).build()
         val request = Request.Builder().url(url).header("Authorization", "Bearer $adminToken").header("Connection", "close").header("X-Content-SHA256", digest)
             .header("Idempotency-Key", UUID.randomUUID().toString()).post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
         val queued = admin.newCall(request).execute().use { JSONObject(it.body!!.string()) }
-        return finished(queued.getString("id"))
+        return queued.getString("id")
     }
+    private fun received(command: String): JSONObject =
+        finished(command).also { result -> result.optString("uri").takeIf { it.isNotEmpty() }?.let { delivered += android.net.Uri.parse(it) } }
     private fun nodes(): List<AccessibilityNodeInfo> {
         val result = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
@@ -136,10 +151,10 @@ class ScreenshotTourTest {
     }
     private fun notificationShade(name: String) {
         shell("cmd statusbar expand-notifications")
-        Thread.sleep(1500)
+        awaitActiveWindow("com.android.systemui")
         snap(name)
         shell("cmd statusbar collapse")
-        Thread.sleep(800)
+        awaitActiveWindow(context.packageName)
     }
     private fun sampleImage(): ByteArray {
         val bitmap = Bitmap.createBitmap(960, 640, Bitmap.Config.ARGB_8888)
@@ -161,6 +176,7 @@ class ScreenshotTourTest {
         BridgeService.stop(context, true)
         waitUntil { BridgeService.current == null }
         originalServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        originalEnabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED)
         shell("settings delete secure enabled_accessibility_services")
         waitUntil { BridgeAccessibility.current == null }
         shell("input keyevent KEYCODE_WAKEUP")
@@ -173,13 +189,29 @@ class ScreenshotTourTest {
 
     @After fun cleanup() {
         if (!::server.isInitialized) return
-        deviceId?.let { id -> try { http("DELETE", "/v1/devices/$id") } catch (_: Throwable) { } }
-        BridgeService.stop(context, true)
-        ScreenControl.stop(context)
-        val services = originalServices
-        shell(if (services.isNullOrEmpty()) "settings delete secure enabled_accessibility_services" else "settings put secure enabled_accessibility_services $services")
-        shell("am force-stop $fixture")
-        scenario?.close()
+        var failure: Throwable? = null
+        val actions: List<() -> Unit> = listOf(
+            { deviceId?.let { id -> try { http("DELETE", "/v1/devices/$id") } catch (_: Throwable) { } }; Unit },
+            { BridgeService.stop(context, true) },
+            { ScreenControl.stop(context) },
+            {
+                val services = originalServices
+                shell(if (services.isNullOrEmpty()) "settings delete secure enabled_accessibility_services" else "settings put secure enabled_accessibility_services $services")
+                val enabled = originalEnabled
+                shell(if (enabled == null) "settings delete secure accessibility_enabled" else "settings put secure accessibility_enabled $enabled")
+                Unit
+            },
+            { shell("am force-stop $fixture"); Unit },
+            { scenario?.close(); scenario = null },
+            { delivered.forEach { context.contentResolver.delete(it, null, null) }; delivered.clear() },
+            { context.getSystemService(android.app.NotificationManager::class.java).cancelAll() }
+        )
+        for (action in actions) {
+            try { action() } catch (error: Throwable) {
+                if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
+            }
+        }
+        failure?.let { throw it }
     }
 
     @Test fun captureOwnerAndAgentViews() {
@@ -213,8 +245,11 @@ class ScreenshotTourTest {
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         notificationShade("06-ongoing-notification")
 
-        val image = send("hermes-photo.png", "image/png", "image", sampleImage())
-        val document = send("meeting-notes.txt", "text/plain", "file", "Agenda\n1. Ship PhoneBridge MVP\n2. Review screenshots\n".toByteArray())
+        // Both files are queued before waiting; the phone still receives them one after the other.
+        val imageCommand = send("hermes-photo.png", "image/png", "image", sampleImage())
+        val documentCommand = send("meeting-notes.txt", "text/plain", "file", "Agenda\n1. Ship PhoneBridge MVP\n2. Review screenshots\n".toByteArray())
+        val image = received(imageCommand)
+        val document = received(documentCommand)
         writeFile("$directory/07-delivery-results.json", JSONObject().put("image", image).put("document", document).toString(2).toByteArray())
         notificationShade("07-files-received")
 

@@ -24,11 +24,25 @@ settle_emulator() {
   adb shell input keyevent KEYCODE_HOME || true
 }
 settle_emulator
-(
-  cd android
-  chmod +x gradlew
-  ./gradlew --no-daemon assembleDebug assembleDebugAndroidTest :debugfixture:assembleDebug
-)
+if [ -n "${RUNNER_TEMP:-}" ] && [ -e "$RUNNER_TEMP/gradle-build.log" ]; then
+  # CI starts this build before the emulator boots; wait for it here.
+  waited=0
+  until [ -s "$RUNNER_TEMP/gradle-build.status" ]; do
+    waited=$((waited + 1))
+    if [ "$waited" -gt 1500 ]; then tail -n 200 "$RUNNER_TEMP/gradle-build.log"; exit 1; fi
+    sleep 1
+  done
+  if [ "$(cat "$RUNNER_TEMP/gradle-build.status")" != 0 ]; then
+    tail -n 200 "$RUNNER_TEMP/gradle-build.log"
+    exit 1
+  fi
+else
+  (
+    cd android
+    chmod +x gradlew
+    ./gradlew assembleDebug assembleDebugAndroidTest :debugfixture:assembleDebug
+  )
+fi
 adb install -r android/debugfixture/build/outputs/apk/debug/debugfixture-debug.apk
 curl --fail --silent --show-error --max-time 20 "$PHONEBRIDGE_CI_PUBLIC_URL/healthz"
 umask 077
@@ -41,7 +55,7 @@ fixture_pid=$!
 settle_emulator
 (
 cd android
-./gradlew --no-daemon :app:connectedDebugAndroidTest \
+./gradlew :app:connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 \
   "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
   "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \

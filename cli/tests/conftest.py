@@ -14,6 +14,7 @@ from phonebridge.client import Client, Settings
 def wire():
     responses = deque()
     requests = []
+    recorded = threading.Condition()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
@@ -22,8 +23,10 @@ def wire():
         def respond(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
-            requests.append({"method": self.command, "path": self.path,
-                             "headers": dict(self.headers), "body": json.loads(body) if body else None, "raw_body": body})
+            with recorded:
+                requests.append({"method": self.command, "path": self.path,
+                                 "headers": dict(self.headers), "body": json.loads(body) if body else None, "raw_body": body})
+                recorded.notify_all()
             if not responses:
                 self.send_response(500)
                 self.end_headers()
@@ -58,7 +61,9 @@ def wire():
         do_DELETE = respond
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # serve_forever only notices shutdown() between polls; the 0.5 s default made every
+    # teardown sleep half a second.
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}"
     client = Client(Settings(url, "test-admin-credential-00000000000000000000", 2))
@@ -71,6 +76,12 @@ def wire():
 
         def respond(self, content, status=200, **headers):
             responses.append((status, content, headers))
+
+        def wait_for_requests(self, count, timeout=5):
+            # The server thread records a request on its own schedule; a client that gives up
+            # before any response arrives can return before that happens on a loaded machine.
+            with recorded:
+                return recorded.wait_for(lambda: len(requests) >= count, timeout)
 
     try:
         yield Wire()

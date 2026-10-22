@@ -30,16 +30,12 @@ def test_package_metadata_and_direct_dependency_pins():
 
 def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path, wire):
     artifacts = tmp_path / "artifacts"
-    run([sys.executable, "-m", "build", str(CLI_ROOT), "--outdir", str(artifacts)], cwd=tmp_path)
-    wheel = next(artifacts.glob("phonebridge_cli-0.1.0-*.whl"))
+    # A plain `python -m build <dir>` already builds its wheel from the sdist, so building that and
+    # then a second wheel from the extracted sdist paid for the same isolated build twice. Build the
+    # sdist once and the wheel once from the extracted, repository-free sdist, and check that wheel.
+    run([sys.executable, "-m", "build", "--sdist", str(CLI_ROOT), "--outdir", str(artifacts)], cwd=tmp_path)
     sdist = next(artifacts.glob("phonebridge_cli-0.1.0.tar.gz"))
     canonical = CLI_ROOT.parent / "skills" / "phonebridge" / "SKILL.md"
-    with zipfile.ZipFile(wheel) as archive:
-        assert archive.read("phonebridge/resources/SKILL.md") == canonical.read_bytes()
-        entries = archive.read("phonebridge_cli-0.1.0.dist-info/entry_points.txt").decode()
-        assert "phonebridge = phonebridge.cli:main" in entries
-        assert archive.read("phonebridge/_resolve.py")
-        assert archive.read("phonebridge/transport.py")
     extracted = tmp_path / "sdist"
     extracted.mkdir()
     with tarfile.open(sdist) as archive:
@@ -47,9 +43,13 @@ def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path, wire):
     standalone = next(extracted.iterdir())
     standalone_wheels = tmp_path / "standalone-wheels"
     run([sys.executable, "-m", "build", "--wheel", str(standalone), "--outdir", str(standalone_wheels)], cwd=tmp_path)
-    standalone_wheel = next(standalone_wheels.glob("*.whl"))
+    standalone_wheel = next(standalone_wheels.glob("phonebridge_cli-0.1.0-*.whl"))
     with zipfile.ZipFile(standalone_wheel) as archive:
         assert archive.read("phonebridge/resources/SKILL.md") == canonical.read_bytes()
+        entries = archive.read("phonebridge_cli-0.1.0.dist-info/entry_points.txt").decode()
+        assert "phonebridge = phonebridge.cli:main" in entries
+        assert archive.read("phonebridge/_resolve.py")
+        assert archive.read("phonebridge/transport.py")
     installed = tmp_path / "installed"
     run([sys.executable, "-m", "pip", "install", "--no-deps", "--no-index", "--target", str(installed), str(standalone_wheel)], cwd=tmp_path)
     env = dict(os.environ)
