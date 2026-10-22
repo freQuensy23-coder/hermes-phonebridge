@@ -8,7 +8,6 @@ from starlette.testclient import TestClient, WebSocketTestSession
 from phonebridge_test_support import CAPABILITIES
 
 
-DEBUG_SESSION = "debug-session-test-1"
 SCREEN_OPERATIONS = ["screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global"]
 
 

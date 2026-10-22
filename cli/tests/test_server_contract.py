@@ -56,7 +56,7 @@ def enroll(store, name="CI phone", capabilities=None, permissions=None, version=
     claim = store.claim(ClaimRequest(token=pairing["qr_payload"]["token"], name=name, platform="android"))
     device_id, session = store.connect(claim["device_token"])
     store.hello(device_id, session, HelloFrame(type="hello", version=version,
-                                             capabilities=capabilities or ["device.info", "debug.status"],
+                                             capabilities=capabilities or ["device.info", "screen.tree"],
                                              permissions=permissions or {}))
     return device_id, session
 

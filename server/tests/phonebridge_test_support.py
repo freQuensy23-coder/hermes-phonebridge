@@ -7,7 +7,7 @@ from phonebridge_server.protocol import ClaimRequest, HelloFrame, PairingRequest
 
 ADMIN_TOKEN = "ci-phonebridge-test-admin-token-000000000000000000"
 ADMIN = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
-CAPABILITIES = ["device.info", "debug.status", "files.receive"]
+CAPABILITIES = ["device.info", "files.receive"]
 
 
 class Clock:

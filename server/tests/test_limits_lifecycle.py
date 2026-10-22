@@ -9,7 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from phonebridge_server.app import create_app
 from phonebridge_server.protocol import BridgeError, CommandRequest, EventFrame, PairingRequest, ResultFrame
 
-from debug_test_support import DEBUG_SESSION, screenshot_data
+from screen_test_support import screenshot_data
 from phonebridge_test_support import ADMIN, connected, pair, provision
 
 
@@ -69,7 +69,7 @@ async def test_late_result_after_expiry_records_actual_outcome(store_factory, cl
 async def test_screenshot_sized_result_is_bounded_and_preserved(store_factory):
     store = store_factory()
     _, _, device_id, session = provision(store, capabilities=["screen.screenshot"])
-    command = store.enqueue(device_id, CommandRequest(op="screen.screenshot", args={"debug_session": DEBUG_SESSION}))
+    command = store.enqueue(device_id, CommandRequest(op="screen.screenshot", args={}))
     store.dispatch(device_id, session, command["id"])
     data = screenshot_data()
     store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True,

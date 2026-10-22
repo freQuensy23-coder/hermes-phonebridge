@@ -35,7 +35,6 @@ class NativeHandlers(private val context: Context, private val credentials: Devi
         return when {
             op.startsWith("screen.") -> (BridgeAccessibility.current ?: failure("PERMISSION_REQUIRED", "Enable PhoneBridge Accessibility in Android settings")).handle(op, args)
             op == "files.receive" -> FileReceiver(context, credentials ?: failure("AMBIGUOUS_STATE", "Pairing credentials unavailable")).receive(args)
-            op == "debug.status" -> { args.only(); DebugAccess.status() }
             op == "device.info" -> { args.only(); deviceInfo() }
             op == "capabilities" || op == "device.capabilities" -> { args.only(); JSONObject().put("capabilities", Access.capabilities(context)).put("permissions", Access.permissions(context)) }
             else -> failure("UNSUPPORTED", "Operation $op is not supported by this app version")

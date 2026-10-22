@@ -21,6 +21,13 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     signingConfigs {
+        getByName("debug") {
+            // Shared, non-secret debug key so every debug APK installs over the previous one.
+            storeFile = file("phonebridge-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         if (System.getenv("PHONEBRIDGE_KEYSTORE") != null) {
             create("stableRelease") {
                 storeFile = file(System.getenv("PHONEBRIDGE_KEYSTORE"))

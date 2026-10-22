@@ -131,8 +131,8 @@ class DurabilityInstrumentationTest {
     @Test fun advertisedCapabilitiesAreLimitedToScreenControlAndFiles() {
         val handlers = NativeHandlers(context)
         val caps = Access.capabilities(context).let { array -> (0 until array.length()).map { array.getString(it) }.toSet() }
-        assertTrue(caps.containsAll(setOf("device.info", "debug.status", "files.receive")))
-        if (!DebugAccess.snapshot().enabled) assertTrue(caps.none { it.startsWith("screen.") })
+        assertTrue(caps.containsAll(setOf("device.info", "files.receive")))
+        if (BridgeAccessibility.current == null) assertTrue(caps.none { it.startsWith("screen.") })
         for (op in listOf("shell.execute", "contacts.list", "sms.send", "clock.alarms.create", "calendar.delete", "notifications.list")) {
             try { handlers.execute(op, JSONObject()); fail("$op must not have a handler") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
         }

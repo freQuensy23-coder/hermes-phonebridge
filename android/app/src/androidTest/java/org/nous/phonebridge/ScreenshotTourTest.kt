@@ -1,6 +1,5 @@
 package org.nous.phonebridge
 
-import android.app.AlertDialog
 import android.app.UiAutomation
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -14,7 +13,6 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Base64
-import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -132,15 +130,7 @@ class ScreenshotTourTest {
         if (scenario == null) scenario = ActivityScenario.launch(MainActivity::class.java)
         else shell("am start -W -f 0x00020000 -n org.nous.phonebridge/.MainActivity")
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() == context.packageName }
-        allowCapture()
         scrollTop()
-    }
-    private fun allowCapture() {
-        scenario?.onActivity { activity ->
-            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            val field = MainActivity::class.java.getDeclaredField("debugDialog").apply { isAccessible = true }
-            (field.get(activity) as? AlertDialog)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        }
     }
     private fun notificationShade(name: String) {
         shell("cmd statusbar expand-notifications")
@@ -198,7 +188,6 @@ class ScreenshotTourTest {
         snap("01b-code-pasted")
         tap(connect)
         waitUntil { nodes().any { it.viewIdResourceName == "android:id/button1" && it.isVisibleToUser } }
-        allowCapture()
         snap("02-pair-with-code")
         tap(nodes().single { it.viewIdResourceName == "android:id/button1" })
         waitUntil { Credentials(context).load() != null }
@@ -212,15 +201,10 @@ class ScreenshotTourTest {
         shell("settings put secure enabled_accessibility_services $component")
         shell("settings put secure accessibility_enabled 1")
         waitUntil { BridgeAccessibility.current != null }
+        waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         showMain()
-        tap(reveal("org.nous.phonebridge:id/debug_enable_10"))
-        waitUntil { nodes().any { it.viewIdResourceName == "android:id/button1" && it.isVisibleToUser } }
-        allowCapture()
-        snap("04-consent-dialog")
-        tap(nodes().single { it.viewIdResourceName == "android:id/button1" })
-        waitUntil { DebugAccess.snapshot().enabled }
-        reveal("org.nous.phonebridge:id/debug_status")
-        snap("05-screen-control-on")
+        waitUntil { nodes().any { it.text?.toString()?.contains("Accessibility granted: yes") == true } }
+        snap("04-accessibility-granted")
         notificationShade("06-ongoing-notification")
 
         val image = send("hermes-photo.png", "image/png", "image", sampleImage())
@@ -228,20 +212,17 @@ class ScreenshotTourTest {
         writeFile("$directory/07-delivery-results.json", JSONObject().put("image", image).put("document", document).toString(2).toByteArray())
         notificationShade("07-files-received")
 
-        val session = DebugAccess.snapshot().debugSession ?: error("Screen control session missing")
         shell("am start -W -n $fixture/.FixtureActivity")
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() == fixture }
         snap("08-app-on-phone")
-        val tree = command("screen.tree", JSONObject().put("debug_session", session).put("expected_package", fixture))
+        val tree = command("screen.tree", JSONObject())
         writeFile("$directory/09-agent-screen-tree.json", tree.toString(2).toByteArray())
-        if (Build.VERSION.SDK_INT >= 34) {
-            val capture = command("screen.screenshot", JSONObject().put("debug_session", session).put("expected_package", fixture))
-            writeFile("$directory/10-agent-screenshot.jpg", Base64.decode(capture.getString("base64"), Base64.NO_WRAP))
-        }
+        val capture = command("screen.screenshot", JSONObject())
+        writeFile("$directory/10-agent-screenshot.jpg", Base64.decode(capture.getString("base64"), Base64.NO_WRAP))
         val nodes = tree.getJSONArray("nodes")
         val button = (0 until nodes.length()).map { nodes.getJSONObject(it) }.single { it.optString("resource_id") == "$fixture:id/increment" }
         val bounds = button.getJSONArray("bounds")
-        command("screen.tap", JSONObject().put("debug_session", session).put("expected_package", fixture)
+        command("screen.tap", JSONObject()
             .put("x", (bounds.getInt(0) + bounds.getInt(2)) / 2).put("y", (bounds.getInt(1) + bounds.getInt(3)) / 2))
         waitUntil { nodes().any { it.text?.toString() == "Counter: 1" } }
         snap("11-after-agent-tap")

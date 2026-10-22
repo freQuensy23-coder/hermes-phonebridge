@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, Strict
 
 
 OPERATIONS = frozenset({
-    "device.info", "capabilities", "device.capabilities", "debug.status",
+    "device.info", "capabilities", "device.capabilities",
     "screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global",
     "files.receive",
 })

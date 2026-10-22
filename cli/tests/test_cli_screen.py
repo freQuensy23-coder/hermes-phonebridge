@@ -23,8 +23,8 @@ def cli_wire(wire, environment, monkeypatch):
 
 def queue_result(wire, data, status="succeeded", error=None, op="screen.tap"):
     expiry = time.time() + 60
-    wire.respond({"id": "debug-command", "status": "queued", "expires_at": expiry})
-    resource = {"id": "debug-command", "op": op, "status": status, "expires_at": expiry,
+    wire.respond({"id": "screen-command", "status": "queued", "expires_at": expiry})
+    resource = {"id": "screen-command", "op": op, "status": status, "expires_at": expiry,
                 "data": data, "error": error}
     wire.respond(resource)
     return resource
@@ -36,42 +36,24 @@ def screenshot_data():
     image.save(stream, format="JPEG")
     return {"mime": "image/jpeg", "base64": base64.b64encode(stream.getvalue()).decode("ascii"),
             "width": 20, "height": 40, "package": "exact.package",
-            "screen_bounds": [10, 80, 1010, 2080], "window_bounds": [10, 80, 1010, 2080],
-            "secure_window_guard": "platform_window_capture"}
-
-
-@pytest.mark.parametrize("wait_flag", [[], ["--wait"]])
-def test_debug_status_submits_empty_args_once_then_only_reads(cli_wire, capsys, wait_flag):
-    data = {"enabled": True, "experimental": True, "remaining_seconds": 598,
-            "debug_session": "current-session", "screenshot_supported": True}
-    resource = queue_result(cli_wire, data, op="debug.status")
-    assert main(["debug", "status", "device/exact", *wait_flag]) == 0
-    output = capsys.readouterr()
-    assert json.loads(output.out) == resource
-    assert not output.err
-    assert [(request["method"], request["path"]) for request in cli_wire.requests] == [
-        ("POST", "/v1/devices/device%2Fexact/commands"), ("GET", "/v1/commands/debug-command")]
-    assert cli_wire.requests[0]["body"]["op"] == "debug.status"
-    assert cli_wire.requests[0]["body"]["args"] == {}
+            "screen_bounds": [0, 0, 1000, 2000], "window_bounds": [0, 0, 1000, 2000]}
 
 
 @pytest.mark.parametrize("action, flags, args", [
     ("tree", [], {}),
-    ("tree", ["--package", "exact.package"], {"expected_package": "exact.package"}),
-    ("screenshot", ["--package", "exact.package"], {"expected_package": "exact.package"}),
-    ("tap", ["--package", "exact.package", "--x", "30", "--y", "50"],
-     {"expected_package": "exact.package", "x": 30, "y": 50}),
-    ("swipe", ["--package", "exact.package", "--x1", "1", "--y1", "2", "--x2", "3", "--y2", "4", "--duration-ms", "2000"],
-     {"expected_package": "exact.package", "x1": 1, "y1": 2, "x2": 3, "y2": 4, "duration_ms": 2000}),
-    ("input", ["--package", "exact.package", "--resource-id", "exact.package:id/input", "--expected-text", " Before ", "--text", ""],
-     {"expected_package": "exact.package", "resource_id": "exact.package:id/input", "expected_text": " Before ", "text": ""}),
+    ("screenshot", [], {}),
+    ("tap", ["--x", "30", "--y", "50"], {"x": 30, "y": 50}),
+    ("swipe", ["--x1", "1", "--y1", "2", "--x2", "3", "--y2", "4", "--duration-ms", "5000"],
+     {"x1": 1, "y1": 2, "x2": 3, "y2": 4, "duration_ms": 5000}),
+    ("swipe", ["--x1", "1", "--y1", "2", "--x2", "3", "--y2", "4"], {"x1": 1, "y1": 2, "x2": 3, "y2": 4}),
+    ("input", ["--resource-id", "exact.package:id/input", "--text", ""], {"resource_id": "exact.package:id/input", "text": ""}),
+    ("input", ["--text", "123"], {"text": "123"}),
     ("global", ["--action", "back"], {"action": "back"}),
-    ("tap", ["--package", "exact.package", "--args", '{"x":30,"y":50}'],
-     {"expected_package": "exact.package", "x": 30, "y": 50}),
+    ("tap", ["--args", '{"x":30,"y":50}'], {"x": 30, "y": 50}),
 ])
 def test_screen_helpers_submit_exact_bounded_schema_once(cli_wire, capsys, action, flags, args):
     resource = queue_result(cli_wire, {"outcome": "dispatched", "verified": False}, op=f"screen.{action}")
-    arguments = ["screen", action, "device", "--debug-session", "Session-EXACT", *flags,
+    arguments = ["screen", action, "device", *flags,
                  "--wait", "--ttl", "15", "--timeout", "2", "--poll-interval", "0.05", "--idempotency-key", "key-EXACT"]
     assert main(arguments) == 0
     output = capsys.readouterr()
@@ -79,18 +61,16 @@ def test_screen_helpers_submit_exact_bounded_schema_once(cli_wire, capsys, actio
     assert not output.err
     assert [request["method"] for request in cli_wire.requests] == ["POST", "GET"]
     assert cli_wire.requests[0]["body"] == {"op": f"screen.{action}",
-        "args": {**args, "debug_session": "Session-EXACT"}, "ttl_seconds": 15, "idempotency_key": "key-EXACT"}
+        "args": args, "ttl_seconds": 15, "idempotency_key": "key-EXACT"}
 
 
 @pytest.mark.parametrize("arguments", [
-    ["debug", "enable", "device"],
-    ["debug", "renew", "device"],
-    ["screen", "tree", "device"],
-    ["screen", "tree", "device", "--args", '{"debug_session":"s"}'],
-    ["screen", "tap", "device", "--debug-session", "s", "--x", "1", "--y", "2"],
-    ["screen", "tap", "device", "--debug-session", "s", "--args", '{"expected_package":"p","x":1,"y":2}'],
+    ["debug", "status", "device"],
+    ["screen", "tree", "device", "--debug-session", "s"],
+    ["screen", "tap", "device", "--package", "p", "--x", "1", "--y", "2"],
+    ["screen", "input", "device", "--expected-text", "a", "--text", "b"],
 ])
-def test_missing_explicit_consent_or_remote_enable_is_usage_error(cli_wire, capsys, arguments):
+def test_removed_commands_and_flags_are_usage_errors(cli_wire, capsys, arguments):
     assert main(arguments) == 1
     output = capsys.readouterr()
     assert not output.out
@@ -101,20 +81,23 @@ def test_missing_explicit_consent_or_remote_enable_is_usage_error(cli_wire, caps
 @pytest.mark.parametrize("action, flags", [
     ("tree", ["--args", '{"unknown":1}']),
     ("tree", ["--args", '{"debug_session":"s"}']),
-    ("tap", ["--package", "p", "--args", '{"x":true,"y":0}']),
-    ("tap", ["--package", "p", "--args", '{"x":1.5,"y":0}']),
-    ("tap", ["--package", "p", "--args", '{"x":2147483648,"y":0}']),
-    ("tap", ["--package", "p", "--x", "1", "--y", "2", "--args", '{"x":1}']),
-    ("swipe", ["--package", "p", "--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":99}']),
-    ("swipe", ["--package", "p", "--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":2001}']),
-    ("input", ["--package", "p", "--resource-id", "id", "--args", json.dumps({"text": "x" * 4097})]),
-    ("input", ["--package", "p", "--resource-id", "id", "--args", json.dumps({"text": "😀" * 2049})]),
-    ("input", ["--package", "p", "--resource-id", "id", "--args", '{"text":null}']),
+    ("tap", ["--args", '{"x":true,"y":0}']),
+    ("tap", ["--args", '{"x":1.5,"y":0}']),
+    ("tap", ["--args", '{"x":2147483648,"y":0}']),
+    ("tap", ["--x", "1", "--y", "2", "--args", '{"x":1}']),
+    ("swipe", ["--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":49}']),
+    ("swipe", ["--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":5001}']),
+    ("input", ["--resource-id", "id", "--args", json.dumps({"text": "x" * 4097})]),
+    ("input", ["--resource-id", "id", "--args", json.dumps({"text": "😀" * 2049})]),
+    ("input", ["--resource-id", "id", "--args", '{"text":null}']),
     ("global", ["--args", '{"action":"permission_grant"}']),
-    ("tree", ["--package", "p", "--args", '{"expected_package":"p"}']),
+    ("tree", ["--args", '{"expected_package":"p"}']),
+    ("tap", ["--args", '{"x":1}']),
+    ("input", []),
+    ("input", ["--resource-id", "x" * 257, "--text", "a"]),
 ])
 def test_invalid_screen_json_is_rejected_before_http(cli_wire, capsys, action, flags):
-    assert main(["screen", action, "device", "--debug-session", "s", *flags]) == 1
+    assert main(["screen", action, "device", *flags]) == 1
     output = capsys.readouterr()
     assert not output.out
     assert json.loads(output.err)["error"]["code"] == "VALIDATION_ERROR"
@@ -127,15 +110,15 @@ def test_invalid_screen_json_is_rejected_before_http(cli_wire, capsys, action, f
     ["--x", "0", "--y", "0", "--ttl", "0"],
 ])
 def test_invalid_numeric_flags_are_usage_errors(cli_wire, capsys, flags):
-    assert main(["screen", "tap", "device", "--debug-session", "s", "--package", "p", *flags]) == 1
+    assert main(["screen", "tap", "device", *flags]) == 1
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "USAGE_ERROR"
     assert not cli_wire.requests
 
 
 @pytest.mark.parametrize("code", ["PERMISSION_REQUIRED", "AMBIGUOUS_STATE"])
-def test_session_or_gesture_failure_preserves_code_without_retry(cli_wire, capsys, code):
+def test_gesture_failure_preserves_code_without_retry(cli_wire, capsys, code):
     queue_result(cli_wire, None, status="failed", error={"code": code, "message": "private screen text"})
-    assert main(["screen", "tap", "device", "--debug-session", "old-session", "--package", "p", "--x", "1", "--y", "2", "--wait"]) == 1
+    assert main(["screen", "tap", "device", "--x", "1", "--y", "2", "--wait"]) == 1
     output = capsys.readouterr()
     assert json.loads(output.out)["error"] == {"code": code, "message": "private screen text"}
     assert not output.err
@@ -145,14 +128,14 @@ def test_session_or_gesture_failure_preserves_code_without_retry(cli_wire, capsy
 @pytest.mark.parametrize("code", ["PERMISSION_REQUIRED", "AMBIGUOUS_STATE"])
 def test_http_failure_preserves_code_without_retry(cli_wire, capsys, code):
     cli_wire.respond({"error": {"code": code}}, status=403)
-    assert main(["screen", "global", "device", "--debug-session", "s", "--action", "back", "--wait"]) == 1
+    assert main(["screen", "global", "device", "--action", "back", "--wait"]) == 1
     assert json.loads(capsys.readouterr().err)["error"]["code"] == code
     assert [request["method"] for request in cli_wire.requests] == ["POST"]
 
 
 def test_ambiguous_submit_never_retries(cli_wire, capsys):
     cli_wire.respond({}, status="disconnect")
-    assert main(["screen", "global", "device", "--debug-session", "s", "--action", "home", "--wait", "--idempotency-key", "unchanged"]) == 1
+    assert main(["screen", "global", "device", "--action", "home", "--wait", "--idempotency-key", "unchanged"]) == 1
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["code"] == "TRANSPORT_ERROR"
     assert error["may_have_been_submitted"] is True
@@ -160,22 +143,16 @@ def test_ambiguous_submit_never_retries(cli_wire, capsys):
     assert [request["method"] for request in cli_wire.requests] == ["POST"]
 
 
-def test_expired_screen_command_does_not_fetch_new_consent_or_resubmit(cli_wire, capsys):
+def test_expired_screen_command_is_not_resubmitted(cli_wire, capsys):
     resource = queue_result(cli_wire, None, status="expired")
-    assert main(["screen", "global", "device", "--debug-session", "old", "--action", "back", "--wait"]) == 1
+    assert main(["screen", "global", "device", "--action", "back", "--wait"]) == 1
     assert json.loads(capsys.readouterr().out) == resource
     assert [request["method"] for request in cli_wire.requests] == ["POST", "GET"]
 
 
-def test_status_disallows_nonempty_args(cli_wire, capsys):
-    assert main(["debug", "status", "device", "--args", '{"enable":true}']) == 1
-    assert json.loads(capsys.readouterr().err)["error"]["code"] == "VALIDATION_ERROR"
-    assert not cli_wire.requests
-
-
 def test_screenshot_default_preserves_base64_json(cli_wire, capsys):
     resource = queue_result(cli_wire, screenshot_data(), op="screen.screenshot")
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--wait"]) == 0
+    assert main(["screen", "screenshot", "device", "--wait"]) == 0
     output = capsys.readouterr()
     assert json.loads(output.out) == resource
     assert not output.err
@@ -185,7 +162,7 @@ def test_screenshot_output_waits_and_writes_new_private_viewable_image(cli_wire,
     data = screenshot_data()
     queue_result(cli_wire, data, op="screen.screenshot")
     path = tmp_path / "capture.jpg"
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(path)]) == 0
+    assert main(["screen", "screenshot", "device", "--output", str(path)]) == 0
     output = capsys.readouterr()
     result = json.loads(output.out)
     assert result["data"] == {**{key: value for key, value in data.items() if key != "base64"}, "output_path": str(path)}
@@ -207,10 +184,10 @@ def test_export_never_overwrites_existing_path(cli_wire, tmp_path, capsys, exist
         path = tmp_path / "link.jpg"
         path.symlink_to(target)
     queue_result(cli_wire, screenshot_data(), op="screen.screenshot")
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(path)]) == 1
+    assert main(["screen", "screenshot", "device", "--output", str(path)]) == 1
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["code"] == "LOCAL_FILE_ERROR"
-    assert error["command_id"] == "debug-command"
+    assert error["command_id"] == "screen-command"
     assert target.read_bytes() == b"preserve"
     if existing == "symlink":
         assert path.is_symlink()
@@ -228,20 +205,12 @@ def test_invalid_capture_cannot_write_or_resubmit(cli_wire, tmp_path, capsys, ch
     data = {**screenshot_data(), **changes}
     queue_result(cli_wire, data, op="screen.screenshot")
     path = tmp_path / "capture.jpg"
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(path)]) == 1
+    assert main(["screen", "screenshot", "device", "--output", str(path)]) == 1
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["code"] == "INVALID_RESPONSE"
-    assert error["command_id"] == "debug-command"
+    assert error["command_id"] == "screen-command"
     assert not path.exists()
     assert [request["method"] for request in cli_wire.requests] == ["POST", "GET"]
-
-
-def test_screenshot_package_mismatch_does_not_export(cli_wire, tmp_path, capsys):
-    queue_result(cli_wire, {**screenshot_data(), "package": "different.package"}, op="screen.screenshot")
-    path = tmp_path / "capture.jpg"
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(path)]) == 1
-    assert json.loads(capsys.readouterr().err)["error"]["code"] == "INVALID_RESPONSE"
-    assert not path.exists()
 
 
 def test_existing_screenshot_can_be_exported_with_only_get(cli_wire, tmp_path, capsys):
@@ -257,36 +226,26 @@ def test_existing_screenshot_can_be_exported_with_only_get(cli_wire, tmp_path, c
 def test_failed_screenshot_preserves_permission_failure_without_export(cli_wire, tmp_path, capsys):
     queue_result(cli_wire, None, status="failed", error={"code": "PERMISSION_REQUIRED"}, op="screen.screenshot")
     path = tmp_path / "capture.jpg"
-    assert main(["screen", "screenshot", "device", "--debug-session", "old", "--package", "exact.package", "--output", str(path)]) == 1
+    assert main(["screen", "screenshot", "device", "--output", str(path)]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "PERMISSION_REQUIRED"
     assert not path.exists()
     assert [request["method"] for request in cli_wire.requests] == ["POST", "GET"]
 
 
-def test_debug_skill_contract_is_bundled_exactly():
+def test_skill_contract_is_bundled_exactly():
     canonical = Path(__file__).resolve().parents[2] / "skills" / "phonebridge" / "SKILL.md"
     content = canonical.read_bytes()
     assert files("phonebridge").joinpath("resources", "SKILL.md").read_bytes() == content
-    for phrase in (b"debug status", b"--debug-session", b"--output", b"high-risk", b"Android 14+",
-                   b"window_bounds", b"screen_bounds", b"PERMISSION_REQUIRED", b"AMBIGUOUS_STATE"):
+    for phrase in (b"screen tree", b"screen input", b"--output", b"screen_bounds", b"PERMISSION_REQUIRED", b"AMBIGUOUS_STATE"):
         assert phrase in content
-
-
-@pytest.mark.parametrize("enabled, remaining, session", [(False, 0, None), (True, None, "manual-session")])
-def test_status_preserves_disabled_or_manual_lifetime(cli_wire, capsys, enabled, remaining, session):
-    data = {"enabled": enabled, "experimental": True, "remaining_seconds": remaining,
-            "debug_session": session, "screenshot_supported": False}
-    resource = queue_result(cli_wire, data, op="debug.status")
-    assert main(["debug", "status", "device"]) == 0
-    assert json.loads(capsys.readouterr().out) == resource
+    for removed in (b"debug status", b"--debug-session", b"--package"):
+        assert removed not in content
 
 
 def test_screen_parser_retains_submit_once_options():
-    options = parser().parse_args(["screen", "tap", "device", "--debug-session", "Case-Sensitive", "--package", "Exact.Package",
+    options = parser().parse_args(["screen", "tap", "device",
                                   "--args", '{"x":-2147483648,"y":2147483647}', "--ttl", "1", "--timeout", "0.1",
                                   "--poll-interval", "0.05", "--idempotency-key", "Case-Key"])
-    assert options.debug_session == "Case-Sensitive"
-    assert options.package == "Exact.Package"
     assert options.args == {"x": -2147483648, "y": 2147483647}
     assert options.ttl == 1
     assert options.timeout == 0.1
@@ -297,25 +256,18 @@ def test_screen_parser_retains_submit_once_options():
 
 def test_exact_identities_and_negative_native_coordinates_are_not_rewritten(cli_wire, capsys):
     cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
-    assert main(["screen", "tap", "Device-Case", "--debug-session", "Session-Case", "--package", "Exact.Package",
+    assert main(["screen", "tap", "Device-Case",
                  "--x", "-10", "--y", "20", "--idempotency-key", "Key-Case"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "queued"
     assert cli_wire.requests[0]["path"] == "/v1/devices/Device-Case/commands"
-    assert cli_wire.requests[0]["body"]["args"] == {"debug_session": "Session-Case", "expected_package": "Exact.Package", "x": -10, "y": 20}
+    assert cli_wire.requests[0]["body"]["args"] == {"x": -10, "y": 20}
     assert [request["method"] for request in cli_wire.requests] == ["POST"]
-
-
-@pytest.mark.parametrize("session", ["", "x" * 129, "bad session", "bad/session", "é", "😀", "bad\nvalue", "valid\n"])
-def test_invalid_session_identity_fails_before_submission(cli_wire, capsys, session):
-    assert main(["screen", "tree", "device", "--debug-session", session]) == 1
-    assert json.loads(capsys.readouterr().err)["error"]["code"] == "VALIDATION_ERROR"
-    assert not cli_wire.requests
 
 
 def test_read_failure_does_not_retry_or_resubmit(cli_wire, capsys):
     cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
     cli_wire.respond({}, status="disconnect")
-    assert main(["screen", "global", "device", "--debug-session", "s", "--action", "recents", "--wait"]) == 1
+    assert main(["screen", "global", "device", "--action", "recents", "--wait"]) == 1
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["code"] == "TRANSPORT_ERROR"
     assert error["command_id"] == "cmd"
@@ -328,7 +280,7 @@ def test_wait_timeout_leaves_original_command_for_readback(wire, fake_time):
     wire.client.sleep = fake_time.sleep
     wire.respond({"id": "cmd", "status": "queued", "expires_at": 2000})
     wire.respond({"id": "cmd", "status": "sent", "expires_at": 2000})
-    options = parser().parse_args(["screen", "global", "device", "--debug-session", "s", "--action", "back", "--wait", "--timeout", "0.1"])
+    options = parser().parse_args(["screen", "global", "device", "--action", "back", "--wait", "--timeout", "0.1"])
     with pytest.raises(BridgeError) as caught:
         dispatch(options, wire.client)
     assert caught.value.code == "WAIT_TIMEOUT"
@@ -342,7 +294,7 @@ def test_parent_symlink_cannot_receive_export(cli_wire, tmp_path, capsys):
     link = tmp_path / "link"
     link.symlink_to(outside, target_is_directory=True)
     queue_result(cli_wire, screenshot_data(), op="screen.screenshot")
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(link / "capture.jpg")]) == 1
+    assert main(["screen", "screenshot", "device", "--output", str(link / "capture.jpg")]) == 1
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "LOCAL_FILE_ERROR"
     assert not (outside / "capture.jpg").exists()
 
@@ -361,53 +313,9 @@ def test_missing_native_bounds_never_exports(cli_wire, tmp_path, capsys):
     del data["screen_bounds"]
     queue_result(cli_wire, data, op="screen.screenshot")
     path = tmp_path / "capture.jpg"
-    assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package", "--output", str(path)]) == 1
+    assert main(["screen", "screenshot", "device", "--output", str(path)]) == 1
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "INVALID_RESPONSE"
     assert not path.exists()
-
-
-@pytest.mark.parametrize("session", ["Z", "Aa0_.:-", "S" * 128])
-def test_session_wire_identifier_is_preserved_exactly(cli_wire, capsys, session):
-    cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
-    assert main(["screen", "tree", "device", "--debug-session", session]) == 0
-    assert json.loads(capsys.readouterr().out)["id"] == "cmd"
-    assert [request["method"] for request in cli_wire.requests] == ["POST"]
-    assert cli_wire.requests[0]["body"]["args"] == {"debug_session": session}
-
-
-@pytest.mark.parametrize("session", ["x" * 129, " Mixed/session é "])
-def test_generic_command_does_not_apply_convenience_session_validation(cli_wire, capsys, session):
-    cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
-    args = {"debug_session": session}
-    assert main(["command", "device", "screen.tree", "--args", json.dumps(args)]) == 0
-    assert json.loads(capsys.readouterr().out)["id"] == "cmd"
-    assert [request["method"] for request in cli_wire.requests] == ["POST"]
-    assert cli_wire.requests[0]["body"]["args"] == args
-
-
-@pytest.mark.parametrize("field", ["expected_package", "resource_id"])
-@pytest.mark.parametrize("value, accepted", [("x" * 256, True), ("😀" * 128, True),
-                                           ("x" * 257, False), ("😀" * 129, False)])
-def test_package_and_resource_id_keep_separate_utf16_limits(cli_wire, capsys, field, value, accepted):
-    args = {"resource_id": "exact:id/input", "text": ""}
-    package = value if field == "expected_package" else "exact.package"
-    if field == "resource_id":
-        args[field] = value
-    if accepted:
-        cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
-    assert main(["screen", "input", "device", "--debug-session", "s", "--package", package,
-                 "--args", json.dumps(args)]) == (0 if accepted else 1)
-    output = capsys.readouterr()
-    if accepted:
-        assert not output.err
-        assert json.loads(output.out)["id"] == "cmd"
-        assert [request["method"] for request in cli_wire.requests] == ["POST"]
-        assert cli_wire.requests[0]["body"]["args"] == {
-            **args, "debug_session": "s", "expected_package": package}
-    else:
-        assert not output.out
-        assert json.loads(output.err)["error"]["code"] == "VALIDATION_ERROR"
-        assert not cli_wire.requests
 
 
 @pytest.mark.parametrize("mode", ["submit", "recover"])
@@ -420,8 +328,8 @@ def test_export_local_failure_retains_id_cleans_partial_file_and_never_replays(
     private_detail = "private local diagnostic: " + str(path)
     if mode == "submit":
         queue_result(cli_wire, data, op="screen.screenshot")
-        command_id = "debug-command"
-        arguments = ["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package"]
+        command_id = "screen-command"
+        arguments = ["screen", "screenshot", "device"]
         methods = ["POST", "GET"]
     else:
         command_id = "original"
@@ -570,8 +478,8 @@ def test_invalid_local_path_has_safe_correlated_error_without_replay(cli_wire, t
         path = str(tmp_path / "private\x00capture.jpg")
     if mode == "submit":
         queue_result(cli_wire, screenshot_data(), op="screen.screenshot")
-        command_id = "debug-command"
-        arguments = ["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package"]
+        command_id = "screen-command"
+        arguments = ["screen", "screenshot", "device"]
         methods = ["POST", "GET"]
     else:
         command_id = "original"
@@ -612,13 +520,13 @@ def test_interrupt_before_exclusive_create_preserves_existing_path(cli_wire, tmp
 
     with monkeypatch.context() as patch:
         patch.setattr(screen.os, "open", open_file)
-        assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package",
+        assert main(["screen", "screenshot", "device",
                      "--output", str(path)]) == 130
     output = capsys.readouterr()
     assert not output.out
     error = json.loads(output.err)["error"]
     assert error["code"] == "INTERRUPTED"
-    assert error["command_id"] == "debug-command"
+    assert error["command_id"] == "screen-command"
     assert str(path) not in output.err
     assert reached == [path.name]
     assert target.read_bytes() == b"preserve"
@@ -654,13 +562,13 @@ def test_export_cleanup_does_not_remove_a_replaced_file_or_symlink(
 
     with monkeypatch.context() as patch:
         patch.setattr(screen.os, "fsync", fsync)
-        assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package",
+        assert main(["screen", "screenshot", "device",
                      "--output", str(path)]) == 130
     output = capsys.readouterr()
     assert not output.out
     error = json.loads(output.err)["error"]
     assert error["code"] == "INTERRUPTED"
-    assert error["command_id"] == "debug-command"
+    assert error["command_id"] == "screen-command"
     assert str(path) not in output.err
     assert reached == [replacement]
     assert target.read_bytes() == b"preserve"
@@ -690,7 +598,7 @@ def test_interrupted_export_can_recover_original_command_with_get_only(cli_wire,
 
     with monkeypatch.context() as patch:
         patch.setattr(screen.os, "fsync", fsync)
-        assert main(["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package",
+        assert main(["screen", "screenshot", "device",
                      "--output", str(path)]) == 130
     output = capsys.readouterr()
     assert not output.out
@@ -710,16 +618,16 @@ def test_interrupted_export_can_recover_original_command_with_get_only(cli_wire,
     assert path.read_bytes() == captured[0]
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert [(request["method"], request["path"]) for request in cli_wire.requests] == [
-        ("POST", "/v1/devices/device/commands"), ("GET", "/v1/commands/debug-command"),
-        ("GET", "/v1/commands/debug-command")]
+        ("POST", "/v1/devices/device/commands"), ("GET", "/v1/commands/screen-command"),
+        ("GET", "/v1/commands/screen-command")]
 
 
 def queue_export_attempt(wire, path, mode):
     data = screenshot_data()
     if mode == "submit":
         queue_result(wire, data, op="screen.screenshot")
-        command_id = "debug-command"
-        arguments = ["screen", "screenshot", "device", "--debug-session", "s", "--package", "exact.package"]
+        command_id = "screen-command"
+        arguments = ["screen", "screenshot", "device"]
         requests = [("POST", "/v1/devices/device/commands")]
     else:
         command_id = "original"

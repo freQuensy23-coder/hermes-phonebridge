@@ -12,8 +12,8 @@ from starlette.websockets import WebSocketDisconnect
 from phonebridge_server.app import create_app
 from phonebridge_server.protocol import BridgeError, CommandRequest, HelloFrame, ResultFrame, encode_json
 
-from debug_test_support import (
-    DEBUG_SESSION, SCREEN_OPERATIONS, DeadlineWebSocketSession, PrimaryPreservingTestClient,
+from screen_test_support import (
+    SCREEN_OPERATIONS, DeadlineWebSocketSession, PrimaryPreservingTestClient,
     WebSocketReceiveTimeout, connected, screenshot_data,
 )
 from phonebridge_test_support import ADMIN, pair, provision
@@ -50,7 +50,7 @@ def test_mock_phone_missing_message_deadline_cleans_up_socket_and_lifespan(setti
     with pytest.raises(WebSocketReceiveTimeout, match="WebSocket receive deadline") as failure:
         with client:
             _, claim = pair(client)
-            with connected(client, claim, capabilities=["debug.status"]) as phone:
+            with connected(client, claim, capabilities=["device.info"]) as phone:
                 phone.receive_timeout = 0.05
                 with pytest.raises(WebSocketReceiveTimeout) as expired:
                     phone.receive_json()
@@ -75,12 +75,12 @@ def test_mock_phone_socket_cleanup_preserves_primary_assertion(settings, clock, 
 
     app = create_app(settings, clock)
     client = PrimaryPreservingTestClient(app)
-    primary = AssertionError("primary debug assertion")
+    primary = AssertionError("primary assertion")
     started = monotonic()
-    with pytest.raises(AssertionError, match="primary debug assertion") as failure:
+    with pytest.raises(AssertionError, match="primary assertion") as failure:
         with client:
             _, claim = pair(client)
-            with connected(client, claim, capabilities=["debug.status"]) as phone:
+            with connected(client, claim, capabilities=["device.info"]) as phone:
                 if cleanup_fails:
                     phone.exit_stack.callback(fail_cleanup)
                 raise primary
@@ -118,11 +118,11 @@ def test_mock_phone_outer_cleanup_preserves_primary(settings, clock, primary_kin
     if cleanup_boundary == "lifespan":
         failing_lifespan(app, secondary)
     client = PrimaryPreservingTestClient(app)
-    primary = AssertionError("primary debug assertion") if primary_kind == "assertion" else None
+    primary = AssertionError("primary assertion") if primary_kind == "assertion" else None
     with pytest.raises(AssertionError) as failure:
         with client:
             _, claim = pair(client)
-            with connected(client, claim, capabilities=["debug.status"]) as phone:
+            with connected(client, claim, capabilities=["device.info"]) as phone:
                 if cleanup_boundary == "client":
                     client.exit_stack.callback(fail_cleanup)
                 if primary_kind == "deadline":
@@ -160,7 +160,7 @@ def test_mock_phone_fixture_report_preserves_primary_during_client_cleanup(setti
         try:
             def failing_call():
                 nonlocal primary
-                with connected(client, claim, capabilities=["debug.status"]) as phone:
+                with connected(client, claim, capabilities=["device.info"]) as phone:
                     if primary_kind == "deadline":
                         phone.receive_timeout = 0.05
                         with pytest.raises(WebSocketReceiveTimeout) as expired:
@@ -200,7 +200,7 @@ def test_mock_phone_cleanup_without_primary_still_fails(settings, clock, cleanup
     with pytest.raises(RuntimeError, match="unaccompanied cleanup failure") as failure:
         with client:
             _, claim = pair(client)
-            with connected(client, claim, capabilities=["debug.status"]) as phone:
+            with connected(client, claim, capabilities=["device.info"]) as phone:
                 if cleanup_boundary == "socket":
                     phone.exit_stack.callback(fail_cleanup)
                 elif cleanup_boundary == "client":
@@ -258,7 +258,7 @@ def test_mock_phone_withheld_accept_preserves_deadline_through_entry_cleanup(set
         assert finished == started
         assert session._send_rx.statistics().tasks_waiting_receive == 0
         assert session.portal is client.portal
-        with connected(client, claim, capabilities=["debug.status"]) as phone:
+        with connected(client, claim, capabilities=["device.info"]) as phone:
             barrier(phone, "after-failed-accept")
     assert client.portal is None
     assert client.task.done()
@@ -268,38 +268,12 @@ def test_mock_phone_withheld_accept_preserves_deadline_through_entry_cleanup(set
         app.state.store.connection.execute("SELECT 1")
 
 
-def barrier(phone, event_id="debug-barrier"):
+def barrier(phone, event_id="barrier"):
     phone.send_json({"type": "event", "id": event_id, "name": "mock.barrier", "data": {}, "time": 1})
     assert phone.receive_json() == {"type": "ack", "id": event_id}
 
-@pytest.mark.parametrize("data", [
-    {"enabled": False, "experimental": True, "remaining_seconds": 0, "debug_session": None, "screenshot_supported": False},
-    {"enabled": True, "experimental": True, "remaining_seconds": 600, "debug_session": DEBUG_SESSION, "screenshot_supported": True},
-    {"enabled": True, "experimental": True, "remaining_seconds": None, "debug_session": DEBUG_SESSION, "screenshot_supported": True},
-])
-def test_mock_phone_debug_status_http_ws_relay(client, data):
-    _, claim = pair(client)
-    with connected(client, claim, capabilities=["debug.status"]) as phone:
-        path = f"/v1/devices/{claim['device_id']}/commands"
-        request = {"op": "debug.status", "args": {}, "idempotency_key": "debug-status"}
-        response = client.post(path, headers=ADMIN, json=request)
-        assert response.status_code == 200
-        command = response.json()
-        assert client.post(path, headers=ADMIN, json=request).json() == command
-        assert phone.receive_json() == {"type": "command", "id": command["id"], "op": "debug.status",
-                                        "args": {}, "expires_at": command["expires_at"]}
-        result = {"type": "result", "id": command["id"], "ok": True, "data": data}
-        phone.send_json(result)
-        phone.send_json(result)
-        barrier(phone)
-        response = client.get(f"/v1/commands/{command['id']}", headers=ADMIN)
-        assert response.status_code == 200
-        assert response.json() == {"id": command["id"], "device_id": claim["device_id"], "op": "debug.status",
-                                   "status": "succeeded", "expires_at": command["expires_at"], "data": data, "error": None}
-        assert response.headers["cache-control"] == "no-store"
-
-@pytest.mark.parametrize("op", ["debug.enable", "debug.renew", "debug.disable", "missing.operation", "debug.status"])
-def test_mock_phone_unadvertised_debug_commands_never_queue(service, op):
+@pytest.mark.parametrize("op", ["debug.enable", "debug.status", "missing.operation", "screen.tap"])
+def test_mock_phone_unadvertised_commands_never_queue(service, op):
     app, client = service
     _, claim = pair(client)
     with connected(client, claim, capabilities=["device.info"]):
@@ -309,41 +283,26 @@ def test_mock_phone_unadvertised_debug_commands_never_queue(service, op):
         assert app.state.store.connection.execute("SELECT count(*) FROM commands").fetchone()[0] == 0
 
 
-def test_mock_phone_debug_auth_missing_operation_and_no_enable_endpoint(service):
+def test_mock_phone_command_auth_and_missing_operation(service):
     app, client = service
     _, claim = pair(client)
     path = f"/v1/devices/{claim['device_id']}/commands"
-    with connected(client, claim, capabilities=["debug.status"]):
+    with connected(client, claim, capabilities=SCREEN_OPERATIONS):
         for headers in ({}, {"Authorization": "Bearer wrong"}, {"Authorization": "Bearer " + claim["device_token"]}):
-            assert client.post(path, headers=headers, json={"op": "debug.status"}).status_code == 401
+            assert client.post(path, headers=headers, json={"op": "screen.tree"}).status_code == 401
         response = client.post(path, headers=ADMIN, json={"args": {}})
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "VALIDATION_ERROR"
-        for op in ("enable", "renew"):
-            assert client.post(f"/v1/devices/{claim['device_id']}/debug/{op}", headers=ADMIN, json={}).status_code == 404
         assert app.state.store.connection.execute("SELECT count(*) FROM commands").fetchone()[0] == 0
 
-@pytest.mark.parametrize("op", ["debug.enable", "debug.renew"])
-def test_remote_consent_operations_cannot_be_advertised(op):
-    assert HelloFrame(type="hello", version="0.1.0", capabilities=[op, "debug.status"], permissions={}).capabilities == ["debug.status"]
+def test_unknown_operations_are_not_advertised():
+    assert HelloFrame(type="hello", version="0.1.0", capabilities=["debug.status", "screen.tap"], permissions={}).capabilities == ["screen.tap"]
 
 @pytest.mark.parametrize("op", SCREEN_OPERATIONS)
-@pytest.mark.parametrize("args", [{}, {"debug_session": None}, {"debug_session": ""}, {"debug_session": 7},
-                                  {"debug_session": "x" * 129}, {"debug_session": "bad session"}])
-def test_screen_commands_require_bounded_session_before_enqueue(service, op, args):
-    app, client = service
-    _, claim = pair(client)
-    with connected(client, claim, capabilities=SCREEN_OPERATIONS):
-        response = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN, json={"op": op, "args": args})
-        assert response.status_code == 422
-        assert response.json()["error"]["code"] == "VALIDATION_ERROR"
-        assert app.state.store.connection.execute("SELECT count(*) FROM commands").fetchone()[0] == 0
-
-@pytest.mark.parametrize("op", SCREEN_OPERATIONS)
-def test_mock_phone_is_authority_for_current_screen_session(client, op):
+def test_mock_phone_screen_commands_relay_args_and_phone_errors(client, op):
     _, claim = pair(client)
     with connected(client, claim, capabilities=SCREEN_OPERATIONS) as phone:
-        args = {"debug_session": "stale-but-syntactic"}
+        args = {"x": 1, "y": 2} if op == "screen.tap" else {}
         response = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN, json={"op": op, "args": args})
         assert response.status_code == 200
         command = response.json()
@@ -351,7 +310,7 @@ def test_mock_phone_is_authority_for_current_screen_session(client, op):
         assert frame["id"] == command["id"]
         assert frame["args"] == args
         phone.send_json({"type": "result", "id": command["id"], "ok": False,
-                         "error": {"code": "PERMISSION_REQUIRED", "message": "Session is not current"}})
+                         "error": {"code": "PERMISSION_REQUIRED", "message": "Accessibility is off"}})
         barrier(phone)
         result = client.get(f"/v1/commands/{command['id']}", headers=ADMIN).json()
         assert result["status"] == "failed"
@@ -370,7 +329,7 @@ def test_mock_phone_large_screenshot_exact_http_readback_restart_and_terminal_co
         _, claim = pair(client)
         with connected(client, claim, capabilities=["screen.screenshot"]) as phone:
             command = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN,
-                                  json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                                  json={"op": "screen.screenshot", "args": {}}).json()
             assert phone.receive_json()["id"] == command["id"]
             result = {"type": "result", "id": command["id"], "ok": True, "data": data}
             phone.send_json(result)
@@ -398,7 +357,7 @@ def test_mock_phone_invalid_screenshot_is_not_stored(client, field, value):
     _, claim = pair(client)
     with connected(client, claim, capabilities=["screen.screenshot"]) as phone:
         command = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN,
-                              json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                              json={"op": "screen.screenshot", "args": {}}).json()
         assert phone.receive_json()["id"] == command["id"]
         phone.send_json({"type": "result", "id": command["id"], "ok": True, "data": {**screenshot_data(256), field: value}})
         assert phone.receive_json()["code"] == "INVALID_RESULT"
@@ -411,7 +370,7 @@ def test_mock_phone_missing_screenshot_payload_is_not_stored(client, data):
     _, claim = pair(client)
     with connected(client, claim, capabilities=["screen.screenshot"]) as phone:
         command = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN,
-                              json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                              json={"op": "screen.screenshot", "args": {}}).json()
         assert phone.receive_json()["id"] == command["id"]
         phone.send_json({"type": "result", "id": command["id"], "ok": True, "data": data})
         assert phone.receive_json()["code"] == "INVALID_RESULT"
@@ -432,7 +391,7 @@ def test_mock_phone_oversized_jpeg_does_not_store(client):
     _, claim = pair(client)
     with connected(client, claim, capabilities=["screen.screenshot"]) as phone:
         command = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN,
-                              json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                              json={"op": "screen.screenshot", "args": {}}).json()
         assert phone.receive_json()["id"] == command["id"]
         phone.send_json({"type": "result", "id": command["id"], "ok": True, "data": screenshot_data(240 * 1024 + 1)})
         assert phone.receive_json()["code"] == "INVALID_FRAME"
@@ -441,7 +400,7 @@ def test_mock_phone_oversized_jpeg_does_not_store(client):
 @pytest.mark.parametrize("kind", ["event", "hello", "command"])
 def test_mock_phone_existing_incoming_limits_remain_strict(client, kind):
     _, claim = pair(client)
-    with connected(client, claim, capabilities=["debug.status"]) as phone:
+    with connected(client, claim, capabilities=["device.info"]) as phone:
         if kind == "event":
             frame = {"type": "event", "id": "oversized", "name": "mock.event", "time": 1, "data": {"text": "x" * 16385}}
         elif kind == "hello":
@@ -459,7 +418,7 @@ def test_mock_phone_existing_incoming_limits_remain_strict(client, kind):
 def test_mock_phone_large_commands_still_rejected(service, settings):
     app, client = service
     _, claim = pair(client)
-    with connected(client, claim, capabilities=["debug.status"]):
+    with connected(client, claim, capabilities=["device.info"]):
         path = f"/v1/devices/{claim['device_id']}/commands"
         for args in ({"text": "x" * 16385}, {"a": "x" * 16380, "b": "y" * 16380, "c": "z" * 100}):
             response = client.post(path, headers=ADMIN, json={"op": "debug.status", "args": args})
@@ -474,7 +433,7 @@ def test_mock_phone_cross_device_screenshot_cannot_change_owner(client):
     with connected(client, owner_claim, capabilities=["screen.screenshot"]) as owner:
         with connected(client, attacker_claim, capabilities=["screen.screenshot"]) as attacker:
             command = client.post(f"/v1/devices/{owner_claim['device_id']}/commands", headers=ADMIN,
-                                  json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                                  json={"op": "screen.screenshot", "args": {}}).json()
             assert owner.receive_json()["id"] == command["id"]
             frame = {"type": "result", "id": command["id"], "ok": True, "data": screenshot_data()}
             attacker.send_json(frame)
@@ -485,16 +444,16 @@ def test_mock_phone_cross_device_screenshot_cannot_change_owner(client):
             assert client.get(f"/v1/commands/{command['id']}", headers=ADMIN).json()["data"] == frame["data"]
 
 
-def test_debug_expiry_and_revoked_device_results_remain_fail_closed(store_factory, clock):
+def test_late_screen_results_are_recorded_and_revoked_device_results_fail_closed(store_factory, clock):
     store = store_factory()
-    _, _, device_id, session = provision(store, capabilities=["debug.status"])
-    command = store.enqueue(device_id, CommandRequest(op="debug.status", ttl_seconds=1))
+    _, _, device_id, session = provision(store, capabilities=["screen.tree"])
+    command = store.enqueue(device_id, CommandRequest(op="screen.tree", ttl_seconds=1))
     store.dispatch(device_id, session, command["id"])
     clock.advance(1)
-    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={}))
-    assert store.command(command["id"])["status"] == "expired"
-    assert store.command(command["id"])["data"] is None
-    next_command = store.enqueue(device_id, CommandRequest(op="debug.status"))
+    store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data={"nodes": []}))
+    assert store.command(command["id"])["status"] == "succeeded"
+    assert store.command(command["id"])["data"] == {"nodes": []}
+    next_command = store.enqueue(device_id, CommandRequest(op="screen.tree"))
     store.revoke_device(device_id)
     with pytest.raises(BridgeError):
         store.result(device_id, session, ResultFrame(type="result", id=next_command["id"], ok=True, data={}))
@@ -504,7 +463,7 @@ def test_debug_expiry_and_revoked_device_results_remain_fail_closed(store_factor
 def test_configured_result_storage_limit_still_applies(store_factory):
     store = store_factory(max_json_bytes=32768)
     _, _, device_id, session = provision(store, capabilities=["screen.screenshot"])
-    command = store.enqueue(device_id, CommandRequest(op="screen.screenshot", args={"debug_session": DEBUG_SESSION}))
+    command = store.enqueue(device_id, CommandRequest(op="screen.screenshot", args={}))
     store.dispatch(device_id, session, command["id"])
     with pytest.raises(BridgeError) as oversized:
         store.result(device_id, session, ResultFrame(type="result", id=command["id"], ok=True, data=screenshot_data()))
@@ -519,7 +478,7 @@ def test_mock_phone_over_budget_result_is_not_stored(client):
     data["padding"] = "x" * (384 * 1024 - len(encode_json(data).encode()) + 1)
     with connected(client, claim, capabilities=["screen.screenshot"]) as phone:
         command = client.post(f"/v1/devices/{claim['device_id']}/commands", headers=ADMIN,
-                              json={"op": "screen.screenshot", "args": {"debug_session": DEBUG_SESSION}}).json()
+                              json={"op": "screen.screenshot", "args": {}}).json()
         assert phone.receive_json()["id"] == command["id"]
         phone.send_json({"type": "result", "id": command["id"], "ok": True, "data": data})
         assert phone.receive_json()["code"] == "INVALID_FRAME"

@@ -155,8 +155,8 @@ def test_reconnect_replays_sent_and_rejects_old_session(store_factory):
 
 def test_capability_changes_prevent_stale_dispatch(store_factory):
     store = store_factory()
-    _, _, device_id, session = provision(store)
-    command = store.enqueue(device_id, CommandRequest(op="debug.status"))
+    _, _, device_id, session = provision(store, capabilities=["device.info", "screen.tree"])
+    command = store.enqueue(device_id, CommandRequest(op="screen.tree"))
     store.hello(device_id, session, HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={"accessibility": False}))
     assert store.dispatch(device_id, session, command["id"]) is None
     assert store.command(command["id"])["error"]["code"] == "UNSUPPORTED"

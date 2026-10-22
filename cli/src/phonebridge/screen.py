@@ -3,7 +3,6 @@ import binascii
 import io
 import json
 import os
-import re
 from pathlib import Path
 
 from .errors import BridgeError
@@ -12,13 +11,14 @@ COORDINATE_MIN = -2147483648
 COORDINATE_MAX = 2147483647
 GLOBAL_ACTIONS = ("back", "home", "recents", "notifications", "quick_settings")
 SCREEN_FIELDS = {
-    "tree": {"expected_package"},
-    "screenshot": {"expected_package"},
-    "tap": {"expected_package", "x", "y"},
-    "swipe": {"expected_package", "x1", "y1", "x2", "y2", "duration_ms"},
-    "input": {"expected_package", "resource_id", "expected_text", "text"},
+    "tree": set(),
+    "screenshot": set(),
+    "tap": {"x", "y"},
+    "swipe": {"x1", "y1", "x2", "y2", "duration_ms"},
+    "input": {"resource_id", "text"},
     "global": {"action"},
 }
+OPTIONAL_FIELDS = {"duration_ms", "resource_id"}
 
 
 def bounded_text(value, maximum, empty=False):
@@ -32,35 +32,27 @@ def bounded_text(value, maximum, empty=False):
 
 def screen_args(options):
     args = dict(options.args)
-    mappings = {"debug_session": "debug_session", "package": "expected_package", "x": "x", "y": "y",
-                "x1": "x1", "y1": "y1", "x2": "x2", "y2": "y2", "duration_ms": "duration_ms",
-                "resource_id": "resource_id", "expected_text": "expected_text", "text": "text",
-                "global_action": "action"}
+    mappings = {"x": "x", "y": "y", "x1": "x1", "y1": "y1", "x2": "x2", "y2": "y2", "duration_ms": "duration_ms",
+                "resource_id": "resource_id", "text": "text", "global_action": "action"}
     for attribute, key in mappings.items():
         value = getattr(options, attribute, None)
         if value is not None:
             if key in args:
                 raise BridgeError("VALIDATION_ERROR", "Specify each screen argument only once.")
             args[key] = value
-    allowed = SCREEN_FIELDS[options.action] | {"debug_session"}
-    required = allowed - {"duration_ms", "expected_text"}
-    if options.action == "tree":
-        required = {"debug_session"}
+    allowed = SCREEN_FIELDS[options.action]
+    required = allowed - OPTIONAL_FIELDS
     if set(args) - allowed or required - set(args):
         raise BridgeError("VALIDATION_ERROR", "Screen arguments are missing or unsupported.")
-    if not isinstance(args["debug_session"], str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", args["debug_session"]) is None:
-        raise BridgeError("VALIDATION_ERROR", "Debug session must be an exact ASCII identifier matching [A-Za-z0-9_.:-]{1,128}.")
-    for key in ("expected_package", "resource_id"):
-        if key in args and (not bounded_text(args[key], 256) or any(ord(char) < 32 or ord(char) == 127 for char in args[key])):
-            raise BridgeError("VALIDATION_ERROR", "Screen identities must be exact bounded nonempty strings without control characters.")
-    for key in ("text", "expected_text"):
-        if key in args and not bounded_text(args[key], 4096, empty=True):
-            raise BridgeError("VALIDATION_ERROR", "Screen text must be a string of at most 4096 UTF-16 code units without NUL.")
+    if "resource_id" in args and (not bounded_text(args["resource_id"], 256) or any(ord(char) < 32 or ord(char) == 127 for char in args["resource_id"])):
+        raise BridgeError("VALIDATION_ERROR", "resource_id must be a bounded nonempty string without control characters.")
+    if "text" in args and not bounded_text(args["text"], 4096, empty=True):
+        raise BridgeError("VALIDATION_ERROR", "Screen text must be a string of at most 4096 UTF-16 code units without NUL.")
     for key in ("x", "y", "x1", "y1", "x2", "y2"):
         if key in args and (type(args[key]) is not int or not COORDINATE_MIN <= args[key] <= COORDINATE_MAX):
-            raise BridgeError("VALIDATION_ERROR", "Screen coordinates must be signed Android 32-bit integers; the phone checks current native bounds.")
-    if "duration_ms" in args and (type(args["duration_ms"]) is not int or not 100 <= args["duration_ms"] <= 2000):
-        raise BridgeError("VALIDATION_ERROR", "Swipe duration must be an integer in 100..2000 milliseconds.")
+            raise BridgeError("VALIDATION_ERROR", "Screen coordinates must be integers in screen pixels.")
+    if "duration_ms" in args and (type(args["duration_ms"]) is not int or not 50 <= args["duration_ms"] <= 5000):
+        raise BridgeError("VALIDATION_ERROR", "Swipe duration must be an integer in 50..5000 milliseconds.")
     if "action" in args and args["action"] not in GLOBAL_ACTIONS:
         raise BridgeError("VALIDATION_ERROR", "Global action is not allowlisted.")
     if len(json.dumps(args, ensure_ascii=True, allow_nan=False).encode("ascii")) > 32768:
@@ -74,7 +66,7 @@ def valid_bounds(value):
             and value[0] < value[2] and value[1] < value[3])
 
 
-def decode_screenshot(data, expected_package=None):
+def decode_screenshot(data):
     from PIL import Image, UnidentifiedImageError
 
     if not isinstance(data, dict) or data.get("mime") != "image/jpeg":
@@ -84,10 +76,6 @@ def decode_screenshot(data, expected_package=None):
         raise BridgeError("INVALID_RESPONSE", "Screenshot dimensions are invalid or exceed 1280 pixels.")
     if not all(valid_bounds(data.get(key)) for key in ("screen_bounds", "window_bounds")):
         raise BridgeError("INVALID_RESPONSE", "Screenshot requires ordered native screen_bounds and window_bounds metadata.")
-    if not bounded_text(data.get("package"), 256) or (expected_package is not None and data["package"] != expected_package):
-        raise BridgeError("INVALID_RESPONSE", "Screenshot package does not match the exact requested package.")
-    if data.get("secure_window_guard") != "platform_window_capture":
-        raise BridgeError("INVALID_RESPONSE", "Screenshot has no supported platform secure-window guard.")
     encoded = data.get("base64")
     if not isinstance(encoded, str) or not encoded or len(encoded) > 327680:
         raise BridgeError("INVALID_RESPONSE", "Screenshot base64 exceeds the bounded JPEG payload.")
@@ -184,14 +172,14 @@ def write_screenshot(path, content):
     return str(output)
 
 
-def export_screenshot(result, path, expected_package=None):
+def export_screenshot(result, path):
     command_id = result.get("id")
     if result.get("status") != "succeeded":
         return result
     try:
         if result.get("op") != "screen.screenshot":
             raise BridgeError("INVALID_RESPONSE", "Only a screen.screenshot command result can be exported.")
-        raw = decode_screenshot(result.get("data"), expected_package)
+        raw = decode_screenshot(result.get("data"))
         output = write_screenshot(path, raw)
         data = {key: value for key, value in result["data"].items() if key != "base64"}
         return {**result, "data": {**data, "output_path": output}}

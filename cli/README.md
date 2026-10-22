@@ -9,8 +9,7 @@
     phonebridge pair revoke PAIRING_ID
     phonebridge devices list | show DEVICE | revoke DEVICE
     phonebridge capabilities DEVICE
-    phonebridge debug status DEVICE
-    phonebridge screen tree|screenshot|tap|swipe|input|global DEVICE --debug-session SESSION ...
+    phonebridge screen tree|screenshot|tap|swipe|input|global DEVICE ...
     phonebridge files send DEVICE PATH [--image] [--name NAME] [--mime TYPE] [--wait]
     phonebridge images send DEVICE PATH [--name NAME] [--mime TYPE] [--wait]
     phonebridge command DEVICE OP --args JSON [--wait]
@@ -18,7 +17,7 @@
     phonebridge events DEVICE --after CURSOR --limit 50
     phonebridge install-skill [--replace]
 
-Screen helpers: `tree` (`--package` optional), `screenshot` (`--package`, `--output new.jpg` writes a private JPEG), `tap` (`--package --x --y`), `swipe` (`--package --x1 --y1 --x2 --y2 [--duration-ms]`), `input` (`--package --resource-id --text [--expected-text]`), `global` (`--action back|home|recents|notifications|quick_settings`). See [../docs/screen-control.md](../docs/screen-control.md).
+Screen helpers: `tree`, `screenshot` (`--output new.jpg` writes a private JPEG), `tap` (`--x --y`), `swipe` (`--x1 --y1 --x2 --y2 [--duration-ms]`), `input` (`--text [--resource-id]`; without `--resource-id` it types into the focused field), `global` (`--action back|home|recents|notifications|quick_settings`). See [../docs/screen-control.md](../docs/screen-control.md).
 
 `pair --code` adds a `pairing_code` (`pb1:` followed by base64url of the QR payload) that can be pasted in the app instead of scanning the QR; `--qr` can then be omitted. Both are one-use and expire after `--ttl` seconds.
 

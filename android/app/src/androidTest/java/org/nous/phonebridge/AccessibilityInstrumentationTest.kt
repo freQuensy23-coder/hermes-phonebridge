@@ -60,24 +60,16 @@ class AccessibilityInstrumentationTest {
     private fun refused(code: String, block: () -> Unit) {
         try { block(); fail("Expected $code refusal") } catch (error: BridgeFailure) { assertEquals(code, error.code) }
     }
-    private fun assertDebugOff(handlers: NativeHandlers) {
-        val status = handlers.execute("debug.status", JSONObject())
-        assertTrue(status.getBoolean("experimental"))
-        assertFalse(status.getBoolean("enabled"))
-        assertTrue(status.has("debug_session") && status.isNull("debug_session"))
-        assertEquals(0, status.getInt("remaining_seconds"))
-        assertEquals(Build.VERSION.SDK_INT >= 34 && BridgeAccessibility.current != null, status.getBoolean("screenshot_supported"))
+    private fun screenCapabilities(): Set<String> {
         val advertised = Access.capabilities(context)
-        val capabilities = (0 until advertised.length()).map { advertised.getString(it) }.toSet()
-        assertTrue("debug.status" in capabilities)
-        assertTrue(capabilities.none { it.startsWith("screen.") })
+        return (0 until advertised.length()).map { advertised.getString(it) }.filter { it.startsWith("screen.") }.toSet()
     }
-    private fun screenArgs(op: String): JSONObject = JSONObject().put("expected_package", context.packageName).apply {
+    private fun screenArgs(op: String): JSONObject = JSONObject().apply {
         when (op) {
-            "screen.input" -> put("resource_id", "org.nous.phonebridge:id/device_name").put("text", "Must not change")
+            "screen.input" -> put("resource_id", "org.nous.phonebridge:id/device_name").put("text", "Typed by Accessibility")
             "screen.tap" -> put("x", 10).put("y", 10)
             "screen.swipe" -> put("x1", 10).put("y1", 100).put("x2", 10).put("y2", 10).put("duration_ms", 400)
-            "screen.global" -> { remove("expected_package"); put("action", "unlock") }
+            "screen.global" -> put("action", "back")
         }
     }
     @Before fun setup() {
@@ -90,61 +82,31 @@ class AccessibilityInstrumentationTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         waitUntil("activity-focused") { ForegroundFixture.focused() }
     }
-    @Test fun accessibilityGrantAndRevokeKeepScreenControlOffUntilLocalConsent() {
-        run {
-            val handlers = NativeHandlers(context)
-            assertFalse(Access.permissions(context).getBoolean("accessibility"))
-            assertDebugOff(handlers)
-            for (op in screenOps) {
-                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
-                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }
-            }
-            restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, component)
-            waitUntil("service-connected") { BridgeAccessibility.current != null }
-            val service = BridgeAccessibility.current!!
-            assertTrue(Access.permissions(context).getBoolean("accessibility"))
-            assertDebugOff(handlers)
-            val advertised = Access.capabilities(context)
-            val capabilities = (0 until advertised.length()).map { advertised.getString(it) }.toSet()
-            for (op in screenOps) assertFalse(op in capabilities)
-            waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
-            var originalName: String? = null
-            scenario!!.onActivity { activity -> originalName = activity.findViewById<EditText>(R.id.device_name).text.toString() }
-            for (op in screenOps) {
-                val cases = listOf(
-                    screenArgs(op) to "PERMISSION_REQUIRED",
-                    screenArgs(op).put("debug_session", JSONObject.NULL) to "PERMISSION_REQUIRED",
-                    screenArgs(op).put("debug_session", "not-a-current-session") to "PERMISSION_REQUIRED",
-                    screenArgs(op).put("debug_session", "") to "PERMISSION_REQUIRED",
-                    screenArgs(op).put("debug_session", 17) to "VALIDATION_ERROR",
-                    screenArgs(op).put("debug_session", true) to "VALIDATION_ERROR",
-                    screenArgs(op).put("debug_session", JSONObject()) to "VALIDATION_ERROR",
-                    screenArgs(op).put("debug_session", "x".repeat(129)) to "VALIDATION_ERROR",
-                    screenArgs(op).put("debug_session", "invalid" + 0.toChar() + "session") to "VALIDATION_ERROR"
-                )
-                for ((args, code) in cases) {
-                    refused(code) { handlers.execute(op, args) }
-                    refused(code) { service.handle(op, Arguments(args)) }
-                }
-                scenario!!.onActivity { activity -> assertEquals(originalName, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
-                assertDebugOff(handlers)
-            }
-            refused("UNSUPPORTED") { UiThread.call { service.root(context.packageName) } }
-            for (op in listOf("debug.enable", "debug.renew")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
-            assertDebugOff(handlers)
-            scenario!!.onActivity { activity -> assertEquals(originalName, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
-            restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
-            waitUntil("service-revoked") { BridgeAccessibility.current == null }
-            assertFalse(Access.permissions(context).getBoolean("accessibility"))
-            val revoked = Access.capabilities(context)
-            val revokedCapabilities = (0 until revoked.length()).map { revoked.getString(it) }.toSet()
-            for (op in screenOps) assertFalse(op in revokedCapabilities)
-            for (op in screenOps) {
-                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", "not-a-current-session")) }
-                refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }
-            }
-            assertDebugOff(handlers)
-        }
+    @Test fun accessibilityGrantEnablesScreenOperationsAndRevokeRemovesThem() {
+        val handlers = NativeHandlers(context)
+        assertFalse(Access.permissions(context).getBoolean("accessibility"))
+        assertTrue(screenCapabilities().isEmpty())
+        for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
+        restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, component)
+        waitUntil("service-connected") { BridgeAccessibility.current != null }
+        val service = BridgeAccessibility.current!!
+        assertTrue(Access.permissions(context).getBoolean("accessibility"))
+        assertEquals(screenOps.toSet(), screenCapabilities())
+        waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
+        val tree = handlers.execute("screen.tree", JSONObject())
+        assertEquals(context.packageName, tree.getString("package"))
+        val nodes = tree.getJSONArray("nodes")
+        assertTrue((0 until nodes.length()).any { nodes.getJSONObject(it).optString("resource_id") == "org.nous.phonebridge:id/device_name" })
+        val input = handlers.execute("screen.input", screenArgs("screen.input"))
+        assertTrue(input.getBoolean("verified"))
+        scenario!!.onActivity { activity -> assertEquals("Typed by Accessibility", activity.findViewById<EditText>(R.id.device_name).text.toString()) }
+        refused("VALIDATION_ERROR") { handlers.execute("screen.global", JSONObject().put("action", "unlock")) }
+        for (op in listOf("debug.status", "debug.enable")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
+        restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
+        waitUntil("service-revoked") { BridgeAccessibility.current == null }
+        assertFalse(Access.permissions(context).getBoolean("accessibility"))
+        assertTrue(screenCapabilities().isEmpty())
+        for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
     }
 }
 

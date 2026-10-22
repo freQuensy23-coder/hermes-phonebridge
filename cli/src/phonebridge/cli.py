@@ -89,29 +89,20 @@ def parser():
     status.add_argument("--output", help="Export a completed screenshot to a new private JPEG; implies --wait")
     status.add_argument("--timeout", type=number(0.1, 86400), default=60.0)
     status.add_argument("--poll-interval", type=number(0.05, 30), default=0.5)
-    debug = commands.add_parser("debug").add_subparsers(dest="action", required=True)
-    debug_status = debug.add_parser("status", help="Read local experimental debug consent; cannot enable or renew it")
-    debug_status.add_argument("device")
-    execution_flags(debug_status)
-    debug_status.set_defaults(wait=True)
-    screen = commands.add_parser("screen", help="Experimental high-risk UI control; requires local owner consent").add_subparsers(dest="action", required=True)
+    screen = commands.add_parser("screen", help="Read and operate the phone screen through Android Accessibility").add_subparsers(dest="action", required=True)
     for action in ("tree", "screenshot", "tap", "swipe", "input", "global"):
         item = screen.add_parser(action)
         item.add_argument("device")
         execution_flags(item)
-        item.add_argument("--debug-session", required=True)
-        if action != "global":
-            item.add_argument("--package", required=action != "tree", help="Exact current foreground package, sent as expected_package")
         if action == "screenshot":
             item.add_argument("--output", help="Export to a new mode-0600 .jpg/.jpeg file; implies --wait")
         if action in {"tap", "swipe"}:
             for coordinate in (("x", "y") if action == "tap" else ("x1", "y1", "x2", "y2")):
                 item.add_argument(f"--{coordinate}", type=integer(COORDINATE_MIN, COORDINATE_MAX))
         if action == "swipe":
-            item.add_argument("--duration-ms", type=integer(100, 2000))
+            item.add_argument("--duration-ms", type=integer(50, 5000))
         if action == "input":
-            item.add_argument("--resource-id")
-            item.add_argument("--expected-text")
+            item.add_argument("--resource-id", help="Field to type into; defaults to the focused field")
             item.add_argument("--text")
         if action == "global":
             item.add_argument("--action", dest="global_action", choices=GLOBAL_ACTIONS)
@@ -134,14 +125,6 @@ def parser():
         send.add_argument("--poll-interval", type=number(0.05, 30), default=0.5)
         send.add_argument("--idempotency-key")
     return root
-
-
-def operation_args(options):
-    if options.command == "screen":
-        return screen_args(options)
-    if options.args:
-        raise BridgeError("VALIDATION_ERROR", "debug.status accepts only empty args and cannot change local consent.")
-    return {}
 
 
 def dispatch(options, client):
@@ -186,10 +169,10 @@ def dispatch(options, client):
     if options.command == "command":
         op, args = options.op, options.args
     else:
-        op, args = f"{options.command}.{options.action}", operation_args(options)
+        op, args = f"{options.command}.{options.action}", screen_args(options)
     output = getattr(options, "output", None)
     result = client.submit(options.device, op, args, options.ttl, options.idempotency_key, options.wait or bool(output), options.timeout, options.poll_interval)
-    return export_screenshot(result, output, args.get("expected_package")) if output else result
+    return export_screenshot(result, output) if output else result
 
 
 def revoke(client, path, identifier):

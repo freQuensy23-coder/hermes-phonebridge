@@ -2,7 +2,7 @@
 
 Lets a Hermes agent on your server operate your Android phone:
 
-- **Screen control** through Android Accessibility: read the UI tree, take screenshots, tap, swipe, type, press back/home. Off by default; you switch it on in the app for 10 minutes, 15 minutes, 1 hour or until stopped. See [docs/screen-control.md](docs/screen-control.md).
+- **Screen control** through Android Accessibility: read the UI tree, take screenshots, tap, swipe, type, press back/home. Works as soon as you grant PhoneBridge Accessibility in Android settings. See [docs/screen-control.md](docs/screen-control.md).
 - **File delivery**: `phonebridge files send DEVICE ./report.pdf` puts the file into `Download/PhoneBridge`, `phonebridge images send` into the gallery. See [docs/file-delivery.md](docs/file-delivery.md).
 
 The phone connects out to the server over an authenticated WebSocket; no inbound port, root or ADB is needed. Protocol and API: [docs/contract.md](docs/contract.md). Platform limits: [docs/support-matrix.md](docs/support-matrix.md).
@@ -19,4 +19,4 @@ The phone connects out to the server over an authenticated WebSocket; no inbound
     python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests
     cd android && ./gradlew testDebugUnitTest assembleDebug
 
-Emulator instrumentation runs in GitHub CI (`.github/workflows/ci.yml`, `debug-control.yml`).
+Emulator instrumentation runs in GitHub CI (`.github/workflows/ci.yml`) and locally with `bash ci/run_android_instrumentation.sh` against a booted emulator.

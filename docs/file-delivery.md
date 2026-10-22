@@ -1,6 +1,6 @@
 # Send files to a phone
 
-One-way delivery accepts a local path on the agent's machine. Ordinary files appear in `Download/PhoneBridge`; images appear in `Pictures/PhoneBridge` and the gallery. No phone filesystem listing, reading, arbitrary-path writes, remote execution or automatic opening is exposed. Accessibility and experimental debug consent are not required.
+One-way delivery accepts a local path on the agent's machine. Ordinary files appear in `Download/PhoneBridge`; images appear in `Pictures/PhoneBridge` and the gallery. No phone filesystem listing, reading, arbitrary-path writes, remote execution or automatic opening is exposed. Accessibility is not required.
 
     phonebridge files send DEVICE /path/report.pdf --wait
     phonebridge images send DEVICE /path/photo.png --wait

@@ -32,7 +32,7 @@ Errors are `{"error":{"code","message"}}`. The CLI shows both; messages are writ
 
 ## Operations
 
-`device.info`, `capabilities`, `debug.status`, `screen.tree`, `screen.screenshot`, `screen.tap`, `screen.swipe`, `screen.input`, `screen.global`, `files.receive`. The phone advertises only what it can do right now (screen operations only while local control is enabled). The server ignores unknown operations in a hello, so app and server can be upgraded independently.
+`device.info`, `capabilities`, `screen.tree`, `screen.screenshot`, `screen.tap`, `screen.swipe`, `screen.input`, `screen.global`, `files.receive`. The phone advertises only what it can do right now (screen operations only while Accessibility is granted). The server ignores unknown operations in a hello, so app and server can be upgraded independently.
 
 ## Device WebSocket
 
@@ -41,4 +41,4 @@ Errors are `{"error":{"code","message"}}`. The CLI shows both; messages are writ
 - unknown or revoked token: frame `{"type":"revoked"}`, close code 4401. This is the only signal on which the phone erases its pairing.
 - too many reconnects from one device: error frame, close 1013. Other server problems: error frame and close 1008/1009/1011. The phone reconnects with jittered exponential backoff (up to 5 minutes) in every non-revoked case, including HTTP errors from a proxy.
 
-Frames: phone `hello {version, capabilities, permissions}` first; server `command {id, op, args, expires_at}`; phone `result {id, ok, data, error}`; phone `event {id, name, data, time}`, server `ack {id}`. Commands that were sent but not answered are delivered again after a reconnect; the phone answers from its durable result cache and never executes a command id twice. A result that arrives after the command TTL is still recorded (screen and debug results are dropped instead). Command history is pruned oldest first; only undelivered commands count against the queue limit.
+Frames: phone `hello {version, capabilities, permissions}` first; server `command {id, op, args, expires_at}`; phone `result {id, ok, data, error}`; phone `event {id, name, data, time}`, server `ack {id}`. Commands that were sent but not answered are delivered again after a reconnect; the phone answers from its durable result cache and never executes a command id twice. A result that arrives after the command TTL is still recorded. Command history is pruned oldest first; only undelivered commands count against the queue limit.

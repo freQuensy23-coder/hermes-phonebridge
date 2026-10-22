@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">PhoneBridge</string>
-    <string name="accessibility_description">Lets your paired PhoneBridge server read and operate the screen, but only after you enable control in the PhoneBridge app for a limited time. Requires an awake, unlocked phone. Lock screen, password fields, secure screens, permission dialogs and PhoneBridge itself are excluded. Stop control in PhoneBridge or its notification at any time</string>
+    <string name="accessibility_description">Lets your paired PhoneBridge server read and operate the screen: read the UI tree, take screenshots, tap, swipe, type and press Back, Home and Recents.</string>
 </resources>

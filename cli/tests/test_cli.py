@@ -2,20 +2,20 @@ import json
 
 import pytest
 
-from phonebridge.cli import main, operation_args, parser
+from phonebridge.cli import main, parser
+from phonebridge.screen import screen_args
 from phonebridge.errors import BridgeError
 from phonebridge.jsonio import object_args, sanitize
 
 
 @pytest.mark.parametrize(("arguments", "expected"), [
-    (["debug", "status", "dev"], {}),
-    (["screen", "tree", "dev", "--debug-session", "s1"], {"debug_session": "s1"}),
-    (["screen", "tap", "dev", "--debug-session", "s1", "--package", "com.example", "--x", "10", "--y", "20"],
-     {"debug_session": "s1", "expected_package": "com.example", "x": 10, "y": 20}),
-    (["screen", "global", "dev", "--debug-session", "s1", "--action", "back"], {"debug_session": "s1", "action": "back"}),
+    (["screen", "tree", "dev"], {}),
+    (["screen", "tap", "dev", "--x", "10", "--y", "20"], {"x": 10, "y": 20}),
+    (["screen", "input", "dev", "--text", "123"], {"text": "123"}),
+    (["screen", "global", "dev", "--action", "back"], {"action": "back"}),
 ])
 def test_ergonomic_args(arguments, expected):
-    assert operation_args(parser().parse_args(arguments)) == expected
+    assert screen_args(parser().parse_args(arguments)) == expected
 
 
 @pytest.mark.parametrize("group", ["alarms", "timers", "notifications", "clock", "calendar", "sms"])
@@ -44,13 +44,13 @@ def test_invalid_usage_has_safe_json(arguments, capsys):
 
 
 @pytest.mark.parametrize("arguments", [
-    ["debug", "status", "dev", "--args", '{"enable":true}'],
-    ["screen", "tap", "dev", "--debug-session", "s1", "--package", "p", "--x", "1"],
-    ["screen", "tree", "dev", "--debug-session", "bad session"],
+    ["screen", "tap", "dev", "--x", "1"],
+    ["screen", "tap", "dev", "--x", "1", "--y", "2", "--args", '{"x":1}'],
+    ["screen", "input", "dev"],
 ])
 def test_missing_conflicting_or_invalid_operation_args(arguments):
     with pytest.raises(BridgeError):
-        operation_args(parser().parse_args(arguments))
+        screen_args(parser().parse_args(arguments))
 
 
 def test_trusted_credentials_removed_without_filtering_phone_content():

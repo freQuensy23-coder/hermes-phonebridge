@@ -11,11 +11,9 @@ from uuid import uuid4
 
 from .protocol import (
     FILE_OPERATIONS,
-    IDENTIFIER_PATTERN,
     MAX_RESULT_DATA_BYTES,
     MAX_RESULT_STRING_CHARS,
     OPERATIONS,
-    SCREEN_OPERATIONS,
     BridgeError,
     digest,
     encode_json,
@@ -374,10 +372,6 @@ class Store:
         if request.op in FILE_OPERATIONS:
             raise BridgeError("VALIDATION_ERROR", "File delivery requires the authenticated upload endpoint", 422)
         self._bounded(request.args, 32768)
-        if request.op in SCREEN_OPERATIONS:
-            debug_session = request.args.get("debug_session")
-            if not isinstance(debug_session, str) or not IDENTIFIER_PATTERN.fullmatch(debug_session):
-                raise BridgeError("VALIDATION_ERROR", "Screen commands require a bounded debug_session identifier", 422)
         now = int(self.clock())
         request_hash = fingerprint({"op": request.op, "args": request.args, "ttl_seconds": request.ttl_seconds})
         with self.transaction() as db:
@@ -485,8 +479,6 @@ class Store:
                 return
             if row["status"] == "queued":
                 raise BridgeError("RESULT_UNCORRELATED", "Command was never delivered to this device", 409)
-            if row["status"] == "expired" and (row["op"] in SCREEN_OPERATIONS or row["op"] == "debug.status"):
-                return
             db.execute("UPDATE commands SET status=?,completed_at=?,result_hash=?,data=?,error=? WHERE id=?",
                        ("succeeded" if frame.ok else "failed", now, result_hash,
                         encode_json(data) if data is not None else None,

@@ -44,8 +44,8 @@ cd android
   -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 \
   "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
   "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \
-  -Pandroid.testInstrumentationRunnerArguments.automaticDebugCi=true \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DebugControlInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest \
+  -Pandroid.testInstrumentationRunnerArguments.emulatorCi=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest \
   -Pandroid.testInstrumentationRunnerArguments.screenshotTour=true \
   "-Pandroid.testInstrumentationRunnerArguments.pairingCode=$pairing_code" \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
