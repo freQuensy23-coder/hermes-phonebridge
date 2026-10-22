@@ -82,7 +82,7 @@ class BridgeAccessibility : AccessibilityService() {
                 "quick_settings" -> GLOBAL_ACTION_QUICK_SETTINGS
                 else -> failure("VALIDATION_ERROR", "action must be back, home, recents, notifications or quick_settings")
             }
-            if (!UiThread.call { checkScreenAccess(true); performGlobalAction(action) }) failure("UNSUPPORTED", "Android refused the global action")
+            if (!UiThread.call { checkScreenAccess(action != GLOBAL_ACTION_HOME && action != GLOBAL_ACTION_BACK); performGlobalAction(action) }) failure("UNSUPPORTED", "Android refused the global action")
             JSONObject().put("outcome", "dispatched").put("verified", false)
         }
         else -> failure("UNSUPPORTED", "Unknown screen operation $op")

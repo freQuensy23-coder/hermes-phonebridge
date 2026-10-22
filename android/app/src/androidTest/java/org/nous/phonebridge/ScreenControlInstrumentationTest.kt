@@ -321,6 +321,10 @@ class ScreenControlInstrumentationTest {
         refused(command("screen.tap", JSONObject().put("x", 100).put("y", 100)), "PERMISSION_REQUIRED")
         refused(command("screen.global", JSONObject().put("action", "notifications")), "PERMISSION_REQUIRED")
         scenario!!.onActivity { assertEquals("Before", it.findViewById<android.widget.EditText>(R.id.device_name).text.toString()) }
+        // An agent may safely leave the dashboard after the owner enables a session.
+        dispatched(success(command("screen.global", JSONObject().put("action", "home"))))
+        waitUntil { automation.rootInActiveWindow?.packageName?.toString() != context.packageName }
+
 
     }
 
