@@ -192,11 +192,12 @@ def test_request_size_limit_prevents_submission(wire):
 
 
 @pytest.mark.parametrize(("status", "code"), [(422, "UNSUPPORTED"), (429, "QUEUE_FULL"), (409, "IDEMPOTENCY_CONFLICT"), (503, "UNAVAILABLE")])
-def test_known_server_error_codes_retained_without_messages(wire, status, code):
+def test_known_server_error_codes_retained_with_redacted_messages(wire, status, code):
     wire.respond({"error": {"code": code, "message": wire.client.settings.token}}, status=status)
     with pytest.raises(BridgeError) as caught:
         wire.client.request("POST", "/v1/devices/dev/commands", {"op": "device.info", "args": {}})
     assert caught.value.code == code
+    assert caught.value.message == "[redacted]"
     assert wire.client.settings.token not in json.dumps(caught.value.as_dict())
     assert len(wire.requests) == 1
 

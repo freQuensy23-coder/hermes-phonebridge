@@ -137,8 +137,7 @@ def test_session_or_gesture_failure_preserves_code_without_retry(cli_wire, capsy
     queue_result(cli_wire, None, status="failed", error={"code": code, "message": "private screen text"})
     assert main(["screen", "tap", "device", "--debug-session", "old-session", "--package", "p", "--x", "1", "--y", "2", "--wait"]) == 1
     output = capsys.readouterr()
-    assert json.loads(output.out)["error"]["code"] == code
-    assert "private screen text" not in output.out
+    assert json.loads(output.out)["error"] == {"code": code, "message": "private screen text"}
     assert not output.err
     assert [request["method"] for request in cli_wire.requests] == ["POST", "GET"]
 

@@ -67,7 +67,7 @@ def pairing_qr(result, path, now):
     return {"id": result["id"], "expires_at": expiry, "status": "pending", "qr_path": str(output)}
 
 
-def install_skill():
+def install_skill(replace=False):
     home = Path(os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")).expanduser().absolute()
     if ".." in home.parts:
         raise BridgeError("LOCAL_FILE_ERROR", "Hermes home cannot contain parent traversal.")
@@ -90,9 +90,12 @@ def install_skill():
             existing = None
         if existing is not None:
             with os.fdopen(existing, "rb") as stream:
-                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode) or stream.read(len(content) + 1) != content:
-                    raise BridgeError("SKILL_EXISTS", "A different skill already exists; it was not overwritten.")
-            return {"installed": True, "changed": False, "path": str(home / "skills" / "phonebridge" / "SKILL.md")}
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise BridgeError("SKILL_EXISTS", "Installed skill path is not a regular file; it was not replaced.")
+                if stream.read(len(content) + 1) == content:
+                    return {"installed": True, "changed": False, "path": str(home / "skills" / "phonebridge" / "SKILL.md")}
+            if not replace:
+                raise BridgeError("SKILL_EXISTS", "A different skill already exists; rerun with --replace to update it.")
         import uuid
 
         temporary = ".phonebridge-" + uuid.uuid4().hex
@@ -101,8 +104,11 @@ def install_skill():
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.link(temporary, "SKILL.md", src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        os.unlink(temporary, dir_fd=directory)
+        if existing is not None:
+            os.replace(temporary, "SKILL.md", src_dir_fd=directory, dst_dir_fd=directory)
+        else:
+            os.link(temporary, "SKILL.md", src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            os.unlink(temporary, dir_fd=directory)
         temporary = None
         os.fsync(directory)
         return {"installed": True, "changed": True, "path": str(home / "skills" / "phonebridge" / "SKILL.md")}

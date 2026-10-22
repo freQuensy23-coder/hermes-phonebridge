@@ -2,6 +2,7 @@ import http.client
 import ipaddress
 import math
 import os
+import re
 import stat
 import time
 import uuid
@@ -22,9 +23,18 @@ MAX_EVENTS_RESPONSE = 256 + MAX_EVENT_PAGE * (EVENT_RESPONSE_BYTES + 1)
 MAX_DEVICES_RESPONSE = 256 + MAX_DEVICE_COLLECTION * (DEVICE_RESPONSE_BYTES + 1)
 TERMINAL = {"succeeded", "failed", "expired"}
 STATUSES = TERMINAL | {"queued", "sent"}
-PHONE_ERRORS = {"PERMISSION_REQUIRED", "PHONE_LOCKED", "FOREGROUND_REQUIRED", "UNSUPPORTED",
-                "VALIDATION_ERROR", "NOT_FOUND", "AMBIGUOUS_STATE", "EXPIRED",
-                "DEVICE_OFFLINE", "REVOKED", "DEVICE_REVOKED", "QUEUE_FULL"}
+ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def safe_message(value, fallback):
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    cleaned = "".join(char if char.isprintable() else " " for char in value).strip()
+    return cleaned[:1024] or fallback
+
+
+def error_code(value, fallback):
+    return value if isinstance(value, str) and ERROR_CODE.fullmatch(value) else fallback
 
 
 def response_budget(method, path):
@@ -120,7 +130,8 @@ class Client:
         self.parsed = validate_url(settings.url)
         self.secrets = {settings.token}
 
-    def request(self, method, path, payload=None, query=None, timeout=None, deadline_at=None):
+    def request(self, method, path, payload=None, query=None, timeout=None, deadline_at=None,
+                raw_body=None, extra_headers=None):
         import json
 
         connection = None
@@ -133,6 +144,8 @@ class Client:
             body = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             if body is not None and len(body) > 65536:
                 raise BridgeError("VALIDATION_ERROR", "Request JSON exceeds the size limit.")
+            if raw_body is not None:
+                body = raw_body
             deadline.remaining()
             connection = open_connection(self.parsed, deadline)
             target = self.parsed.path.rstrip("/") + path
@@ -141,6 +154,8 @@ class Client:
             headers = {"Authorization": f"Bearer {self.settings.token}", "Accept": "application/json"}
             if body is not None:
                 headers["Content-Type"] = "application/json"
+                headers["Content-Length"] = str(len(body))
+            headers.update(extra_headers or {})
             active_socket = connection.sock
             active_socket.settimeout(deadline.remaining())
             connection.request(method, target, body=body, headers=headers)
@@ -167,16 +182,18 @@ class Client:
             raw = b"".join(chunks)
             if status >= 400:
                 code = {401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 422: "VALIDATION_ERROR", 429: "RATE_LIMITED"}.get(status, "SERVER_ERROR" if status >= 500 else "HTTP_ERROR")
-                safe_codes = PHONE_ERRORS | {"UNAUTHORIZED", "FORBIDDEN", "CONFLICT", "RATE_LIMITED", "IDEMPOTENCY_CONFLICT", "UNAVAILABLE"}
+                message = f"Server rejected the request with HTTP {status}."
                 try:
                     error_body = loads(raw) if len(raw) <= MAX_RESPONSE else None
                     server_error = error_body.get("error") if isinstance(error_body, dict) else None
-                    server_code = server_error.get("code") if isinstance(server_error, dict) else None
-                    if isinstance(server_code, str) and server_code in safe_codes:
-                        code = server_code
-                except (ValueError, TypeError, RecursionError):
+                    if isinstance(server_error, dict):
+                        code = error_code(server_error.get("code"), code)
+                        message = safe_message(server_error.get("message"), message)
+                        for secret in sorted(self.secrets, key=len, reverse=True):
+                            message = message.replace(secret, "[redacted]")
+                except (ValueError, TypeError, RecursionError, UnicodeDecodeError):
                     pass
-                raise BridgeError(code, "Server rejected the request; response content is withheld.", http_status=status, may_have_been_submitted=ambiguous and status >= 500)
+                raise BridgeError(code, message, http_status=status, may_have_been_submitted=ambiguous and status >= 500)
             if response.length not in {None, 0}:
                 raise BridgeError("INVALID_RESPONSE", "Server response was truncated.", may_have_been_submitted=ambiguous)
             if status < 200 or status >= 300 or len(raw) > maximum:

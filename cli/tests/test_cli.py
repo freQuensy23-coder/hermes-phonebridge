@@ -8,59 +8,20 @@ from phonebridge.jsonio import object_args, sanitize
 
 
 @pytest.mark.parametrize(("arguments", "expected"), [
-    (["alarms", "create", "dev", "--hour", "7", "--minute", "30", "--label", "Work", "--days", "1,2,3,4,5", "--package", "com.google.android.deskclock"], {"hour": 7, "minute": 30, "label": "Work", "days": [1, 2, 3, 4, 5], "package": "com.google.android.deskclock"}),
-    (["alarms", "dismiss", "dev", "--hour", "7", "--minute", "30"], {"hour": 7, "minute": 30}),
-    (["alarms", "snooze", "dev", "--minutes", "10"], {"minutes": 10}),
-    (["alarms", "show", "dev", "--package", "p"], {"package": "p"}),
-    (["alarms", "list", "dev"], {}),
-    (["alarms", "enable", "dev", "--id", "a"], {"id": "a"}),
-    (["alarms", "disable", "dev", "--args", '{"selector":"exact"}'], {"selector": "exact"}),
-    (["alarms", "delete", "dev", "--id", "a"], {"id": "a"}),
-    (["timers", "create", "dev", "--seconds", "300", "--label", "Tea"], {"seconds": 300, "label": "Tea"}),
-    (["timers", "dismiss", "dev", "--uri", "content://clock/timer/3"], {"uri": "content://clock/timer/3"}),
-    (["timers", "dismiss", "dev"], {}),
-    (["timers", "show", "dev"], {}),
-    (["timers", "list", "dev"], {}),
-    (["timers", "cancel", "dev", "--id", "t"], {"id": "t"}),
-    (["timers", "pause", "dev", "--id", "t"], {"id": "t"}),
-    (["timers", "resume", "dev", "--id", "t"], {"id": "t"}),
-    (["notifications", "list", "dev", "--args", '{"limit":10}'], {"limit": 10}),
-    (["notifications", "dismiss", "dev", "--key", "exact"], {"key": "exact"}),
-    (["notifications", "reply", "dev", "--key", "exact", "--action", "0", "--text", "yes", "--result-key", "reply-key"], {"key": "exact", "action": 0, "text": "yes", "result_key": "reply-key"}),
-    (["notifications", "action", "dev", "--key", "exact", "--action", "2"], {"key": "exact", "action": 2}),
-    (["clock", "providers", "dev"], {}),
+    (["debug", "status", "dev"], {}),
+    (["screen", "tree", "dev", "--debug-session", "s1"], {"debug_session": "s1"}),
+    (["screen", "tap", "dev", "--debug-session", "s1", "--package", "com.example", "--x", "10", "--y", "20"],
+     {"debug_session": "s1", "expected_package": "com.example", "x": 10, "y": 20}),
+    (["screen", "global", "dev", "--debug-session", "s1", "--action", "back"], {"debug_session": "s1", "action": "back"}),
 ])
 def test_ergonomic_args(arguments, expected):
     assert operation_args(parser().parse_args(arguments)) == expected
 
 
-@pytest.mark.parametrize(("group", "actions", "prefix"), [
-    ("alarms", ["create", "dismiss", "snooze", "show", "list", "enable", "disable", "delete"], "clock.alarms"),
-    ("timers", ["create", "dismiss", "show", "list", "cancel", "pause", "resume"], "clock.timers"),
-    ("notifications", ["list", "dismiss", "reply", "action"], "notifications"),
-    ("clock", ["providers"], "clock"),
-])
-def test_helpers_send_current_contract_ops(wire, group, actions, prefix):
-    from phonebridge.cli import dispatch
-
-    for action in actions:
-        args = {}
-        if (group, action) == ("alarms", "create"):
-            args = {"hour": 7, "minute": 30}
-        elif (group, action) == ("timers", "create"):
-            args = {"seconds": 60}
-        elif group == "notifications" and action != "list":
-            args = {"key": "exact"}
-            if action in {"reply", "action"}:
-                args["action"] = 0
-            if action == "reply":
-                args["text"] = "user-authorized"
-        wire.respond({"id": "cmd", "status": "queued", "expires_at": 2000})
-        options = parser().parse_args([group, action, "dev", "--args", json.dumps(args)])
-        dispatch(options, wire.client)
-        assert wire.requests[-1]["body"]["op"] == f"{prefix}.{action}"
-        assert wire.requests[-1]["body"]["args"] == args
-        assert wire.requests[-1]["method"] == "POST"
+@pytest.mark.parametrize("group", ["alarms", "timers", "notifications", "clock", "calendar", "sms"])
+def test_removed_native_helpers_are_not_exposed(group, capsys):
+    assert main([group, "list", "dev"]) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "USAGE_ERROR"
 
 
 @pytest.mark.parametrize("value", ["[]", "null", "1", "NaN", '{"a":Infinity}', '{"a":1,"a":2}', "{" + " " * 65536 + "}"])
@@ -71,12 +32,6 @@ def test_args_must_be_bounded_strict_object(value):
 
 
 @pytest.mark.parametrize("arguments", [
-    ["alarms", "create", "dev", "--hour", "24", "--minute", "0"],
-    ["alarms", "create", "dev", "--hour", "7", "--minute", "60"],
-    ["alarms", "create", "dev", "--hour", "7", "--minute", "0", "--days", "0,1"],
-    ["alarms", "create", "dev", "--hour", "7", "--minute", "0", "--days", "1,1"],
-    ["timers", "create", "dev", "--seconds", "0"],
-    ["timers", "create", "dev", "--seconds", "86401"],
     ["command", "dev", "device.info", "--timeout", "nan"],
     ["events", "dev", "--after", "-1"],
     ["command", "dev", "device.info", "--args", "[]"],
@@ -89,14 +44,9 @@ def test_invalid_usage_has_safe_json(arguments, capsys):
 
 
 @pytest.mark.parametrize("arguments", [
-    ["alarms", "create", "dev"],
-    ["timers", "create", "dev"],
-    ["notifications", "dismiss", "dev"],
-    ["notifications", "reply", "dev", "--key", "k", "--text", "hello"],
-    ["notifications", "action", "dev", "--key", "k"],
-    ["alarms", "create", "dev", "--hour", "7", "--minute", "0", "--args", '{"hour":8}'],
-    ["alarms", "create", "dev", "--args", '{"hour":true,"minute":0}'],
-    ["timers", "create", "dev", "--args", '{"seconds":1.5}'],
+    ["debug", "status", "dev", "--args", '{"enable":true}'],
+    ["screen", "tap", "dev", "--debug-session", "s1", "--package", "p", "--x", "1"],
+    ["screen", "tree", "dev", "--debug-session", "bad session"],
 ])
 def test_missing_conflicting_or_invalid_operation_args(arguments):
     with pytest.raises(BridgeError):

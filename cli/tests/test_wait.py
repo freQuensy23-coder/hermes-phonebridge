@@ -172,7 +172,7 @@ def test_device_revoked_code_is_preserved_with_server_message(wire, environment,
     assert main(["command-status", "cmd"] + (["--wait"] if wait else [])) == 1
     output = capsys.readouterr()
     result = json.loads(output.out)
-    assert result == command("failed", error={"code": "DEVICE_REVOKED", "message": "Device authorization was revoked."})
+    assert result == command("failed", error={"code": "DEVICE_REVOKED", "message": "[redacted]"})
     assert wire.client.settings.token not in output.out
     assert not output.err
     assert [request["method"] for request in wire.requests] == ["GET"]

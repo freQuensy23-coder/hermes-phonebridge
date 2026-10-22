@@ -93,3 +93,21 @@ def test_empty_home_falls_back_without_writing_cwd(tmp_path, environment, monkey
     monkeypatch.setenv("HERMES_HOME", "")
     result = install_skill()
     assert result["path"] == str(tmp_path / ".hermes" / "skills" / "phonebridge" / "SKILL.md")
+
+
+def test_replace_updates_existing_skill_atomically(tmp_path, environment, monkeypatch):
+    home = tmp_path / "home"
+    target = home / "skills" / "phonebridge" / "SKILL.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("older phonebridge skill")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    result = install_skill(replace=True)
+    assert result == {"installed": True, "changed": True, "path": str(target)}
+    assert target.read_bytes() == files("phonebridge").joinpath("resources", "SKILL.md").read_bytes()
+    assert [path.name for path in target.parent.iterdir()] == ["SKILL.md"]
+
+
+def test_skill_declares_token_where_hermes_reads_it():
+    canonical = Path(__file__).resolve().parents[2] / "skills" / "phonebridge" / "SKILL.md"
+    frontmatter = canonical.read_text().split("---")[1]
+    assert "\nrequired_environment_variables: [PHONEBRIDGE_TOKEN]\n" in frontmatter

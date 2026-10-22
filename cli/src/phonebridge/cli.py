@@ -3,7 +3,8 @@ import json
 import sys
 
 from . import __version__
-from .client import Client, PHONE_ERRORS, Settings, bounded_number, segment
+from . import files
+from .client import Client, Settings, bounded_number, error_code, safe_message, segment
 from .errors import BridgeError
 from .jsonio import object_args, sanitize
 from .local import install_skill, pairing_qr
@@ -12,7 +13,7 @@ from .screen import COORDINATE_MAX, COORDINATE_MIN, GLOBAL_ACTIONS, export_scree
 
 class Parser(argparse.ArgumentParser):
     def error(self, message):
-        raise BridgeError("USAGE_ERROR", "Invalid command or arguments; use phonebridge --help.")
+        raise BridgeError("USAGE_ERROR", f"{message}; use phonebridge --help.")
 
 
 def integer(minimum, maximum):
@@ -62,7 +63,8 @@ def parser():
     root.add_argument("--config", help="Optional private mode-0600 JSON file with url and token")
     root.add_argument("--request-timeout", type=number(0.1, 120), default=10.0)
     commands = root.add_subparsers(dest="command", required=True)
-    commands.add_parser("install-skill", help="Install only the bundled skill in HERMES_HOME")
+    install = commands.add_parser("install-skill", help="Install the bundled skill in HERMES_HOME")
+    install.add_argument("--replace", action="store_true", help="Replace an older installed PhoneBridge skill")
     pair = commands.add_parser("pair", help="Create a one-use local QR PNG or inspect/revoke a pairing")
     pair.add_argument("--name")
     pair.add_argument("--ttl", type=integer(1, 900), default=300)
@@ -116,96 +118,29 @@ def parser():
     events.add_argument("device")
     events.add_argument("--after", type=integer(0, 9223372036854775807), default=0)
     events.add_argument("--limit", type=integer(1, 100), default=50)
-    clock = commands.add_parser("clock").add_subparsers(dest="action", required=True)
-    providers = clock.add_parser("providers")
-    providers.add_argument("device")
-    execution_flags(providers)
-    groups = {
-        "alarms": ("create", "dismiss", "snooze", "show", "list", "enable", "disable", "delete"),
-        "timers": ("create", "dismiss", "show", "list", "cancel", "pause", "resume"),
-        "notifications": ("list", "dismiss", "reply", "action"),
-    }
-    for group, actions in groups.items():
-        group_commands = commands.add_parser(group).add_subparsers(dest="action", required=True)
-        for action in actions:
-            item = group_commands.add_parser(action)
-            item.add_argument("device")
-            execution_flags(item)
-            if group in {"alarms", "timers"}:
-                item.add_argument("--package")
-                if action not in {"list", "show"}:
-                    item.add_argument("--label")
-                if action in {"enable", "disable", "delete", "cancel", "pause", "resume"}:
-                    item.add_argument("--id", dest="target_id")
-                    if group == "alarms":
-                        item.add_argument("--time")
-            if group == "alarms":
-                if action in {"create", "dismiss"}:
-                    item.add_argument("--hour", type=integer(0, 23))
-                    item.add_argument("--minute", type=integer(0, 59))
-                if action == "create":
-                    item.add_argument("--days", type=days)
-                if action == "snooze":
-                    item.add_argument("--minutes", type=integer(1, 1440))
-            if group == "timers":
-                if action == "create":
-                    item.add_argument("--seconds", type=integer(1, 86400))
-                if action == "dismiss":
-                    item.add_argument("--uri")
-            if group == "notifications" and action != "list":
-                item.add_argument("--key")
-                if action == "reply":
-                    item.add_argument("--text")
-                    item.add_argument("--result-key")
-                if action in {"reply", "action"}:
-                    item.add_argument("--action", dest="action_index", type=integer(0, 255))
+    for group, image in (("files", False), ("images", True)):
+        send = commands.add_parser(group, help="Send a local file to the phone").add_subparsers(dest="action", required=True).add_parser("send")
+        send.add_argument("device")
+        send.add_argument("path")
+        if not image:
+            send.add_argument("--image", action="store_true", help="Save to the gallery; PNG, JPEG, WebP or GIF only")
+        send.set_defaults(image_group=image)
+        send.add_argument("--name", help="File name on the phone; defaults to the local file name")
+        send.add_argument("--mime", help="Explicit media type")
+        send.add_argument("--ttl", type=integer(1, 900), default=300)
+        send.add_argument("--wait", action="store_true")
+        send.add_argument("--timeout", type=number(0.1, 86400), default=120.0)
+        send.add_argument("--poll-interval", type=number(0.05, 30), default=0.5)
+        send.add_argument("--idempotency-key")
     return root
 
 
 def operation_args(options):
     if options.command == "screen":
         return screen_args(options)
-    if options.command == "debug":
-        if options.args:
-            raise BridgeError("VALIDATION_ERROR", "debug.status accepts only empty args and cannot change local consent.")
-        return {}
-    args = dict(options.args)
-    mappings = {"package": "package", "label": "label", "hour": "hour", "minute": "minute",
-                "days": "days", "minutes": "minutes", "seconds": "seconds", "uri": "uri",
-                "target_id": "id", "time": "time", "key": "key", "text": "text", "action_index": "action",
-                "result_key": "result_key"}
-    for attribute, key in mappings.items():
-        value = getattr(options, attribute, None)
-        if value is not None:
-            if key in args:
-                raise BridgeError("VALIDATION_ERROR", "Specify each operation argument only once.")
-            args[key] = value
-    required = {
-        ("alarms", "create"): ("hour", "minute"),
-        ("timers", "create"): ("seconds",),
-        ("notifications", "dismiss"): ("key",),
-        ("notifications", "reply"): ("key", "action", "text"),
-        ("notifications", "action"): ("key", "action"),
-    }.get((options.command, options.action), ())
-    if any(key not in args for key in required):
-        raise BridgeError("VALIDATION_ERROR", "Required operation arguments are missing.")
-    if options.command == "alarms":
-        for key, maximum in (("hour", 23), ("minute", 59)):
-            if key in args and (type(args[key]) is not int or not 0 <= args[key] <= maximum):
-                raise BridgeError("VALIDATION_ERROR", "Alarm time is outside the supported range.")
-        if "days" in args and (not isinstance(args["days"], list) or not args["days"] or any(type(day) is not int or not 1 <= day <= 7 for day in args["days"]) or len(set(args["days"])) != len(args["days"])):
-            raise BridgeError("VALIDATION_ERROR", "Alarm days must be unique integers 1..7.")
-    if options.command == "timers" and options.action == "create":
-        if type(args["seconds"]) is not int or not 1 <= args["seconds"] <= 86400:
-            raise BridgeError("VALIDATION_ERROR", "Timer seconds must be an integer in 1..86400.")
-    if options.command == "notifications" and options.action != "list":
-        if not isinstance(args["key"], str) or not args["key"]:
-            raise BridgeError("VALIDATION_ERROR", "An exact notification key is required.")
-        if options.action == "reply" and (not isinstance(args["text"], str) or not args["text"] or len(args["text"]) > 4096):
-            raise BridgeError("VALIDATION_ERROR", "A bounded nonempty reply is required.")
-        if options.action in {"reply", "action"} and (type(args["action"]) is not int or not 0 <= args["action"] <= 255):
-            raise BridgeError("VALIDATION_ERROR", "An exact notification action index is required.")
-    return args
+    if options.args:
+        raise BridgeError("VALIDATION_ERROR", "debug.status accepts only empty args and cannot change local consent.")
+    return {}
 
 
 def dispatch(options, client):
@@ -240,11 +175,14 @@ def dispatch(options, client):
     if options.command == "command-status":
         result = client.wait(options.id, options.timeout, options.poll_interval) if options.wait or options.output else client.get_command(options.id)
         return export_screenshot(result, options.output) if options.output else result
+    if options.command in {"files", "images"}:
+        upload = files.prepare(options.path, image=options.image_group or getattr(options, "image", False), name=options.name,
+                               mime=options.mime, ttl=options.ttl, idempotency_key=options.idempotency_key)
+        return files.send(client, options.device, upload, options.wait, options.timeout, options.poll_interval)
     if options.command == "command":
         op, args = options.op, options.args
     else:
-        prefix = {"alarms": "clock.alarms", "timers": "clock.timers", "notifications": "notifications", "clock": "clock", "screen": "screen", "debug": "debug"}[options.command]
-        op, args = f"{prefix}.{options.action}", operation_args(options)
+        op, args = f"{options.command}.{options.action}", operation_args(options)
     output = getattr(options, "output", None)
     result = client.submit(options.device, op, args, options.ttl, options.idempotency_key, options.wait or bool(output), options.timeout, options.poll_interval)
     return export_screenshot(result, output, args.get("expected_package")) if output else result
@@ -268,18 +206,16 @@ def main(argv=None):
     try:
         options = parser().parse_args(argv)
         if options.command == "install-skill":
-            result = install_skill()
+            result = install_skill(options.replace)
         else:
             settings = Settings.load(options.config, options.url, options.request_timeout)
             client = Client(settings)
             secrets = client.secrets
             result = dispatch(options, client)
-        if result.get("status") == "failed":
-            result = dict(result)
-            upstream_error = result.get("error")
-            code = upstream_error.get("code") if isinstance(upstream_error, dict) else None
-            message = "Device authorization was revoked." if code == "DEVICE_REVOKED" else "Phone reported a command failure."
-            result["error"] = {"code": code if isinstance(code, str) and code in PHONE_ERRORS else "COMMAND_FAILED", "message": message}
+        if result.get("status") in {"failed", "expired"} and isinstance(result.get("error"), dict):
+            upstream = result["error"]
+            result = {**result, "error": {"code": error_code(upstream.get("code"), "COMMAND_FAILED"),
+                                          "message": safe_message(upstream.get("message"), "Phone reported a command failure.")}}
         if isinstance(result.get("data"), dict) and result["data"].get("outcome") == "dispatched":
             result = {**result, "data": {**result["data"], "verified": False}}
         safe = sanitize(result, secrets)

@@ -56,7 +56,7 @@ def enroll(store, name="CI phone", capabilities=None, permissions=None, version=
     claim = store.claim(ClaimRequest(token=pairing["qr_payload"]["token"], name=name, platform="android"))
     device_id, session = store.connect(claim["device_token"])
     store.hello(device_id, session, HelloFrame(type="hello", version=version,
-                                             capabilities=capabilities or ["device.info", "clipboard.set"],
+                                             capabilities=capabilities or ["device.info", "debug.status"],
                                              permissions=permissions or {}))
     return device_id, session
 
@@ -77,7 +77,7 @@ def test_real_server_revocation_result_retains_cli_code(bridge_server, environme
     assert main(["command-status", command_id] + (["--wait"] if waiting else [])) == 1
     output = capsys.readouterr()
     assert json.loads(output.out) == {**expected, "error": {
-        "code": "DEVICE_REVOKED", "message": "Device authorization was revoked."}}
+        "code": "DEVICE_REVOKED", "message": "Device authorization revoked"}}
     assert not output.err
     assert ADMIN_TOKEN not in output.out
 
@@ -149,8 +149,8 @@ def test_server_accepts_near_max_utf8_args_from_real_cli_transport(bridge_server
     overhead = len(encode_json({"text": ""}).encode("utf-8"))
     args = {"text": character * ((32768 - overhead) // len(character.encode("utf-8")))}
     assert validate_json(args) == args
-    assert CommandRequest(op="clipboard.set", args=args).args == args
+    assert CommandRequest(op="device.info", args=args).args == args
     assert len(json.dumps(args, ensure_ascii=True).encode("ascii")) > 65536
-    result = client.submit(device_id, "clipboard.set", args, idempotency_key="unicode-server")
+    result = client.submit(device_id, "device.info", args, idempotency_key="unicode-server")
     assert result["status"] == "queued"
     assert store.dispatch(device_id, session, result["id"])["args"] == args
