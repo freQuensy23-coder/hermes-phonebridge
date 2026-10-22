@@ -216,7 +216,7 @@ class Peer:
             self.close_sent = True
             try:
                 await asyncio.wait_for(self.websocket.close(code=code), self.settings.send_timeout)
-            except (RuntimeError, TimeoutError, OSError):
+            except (WebSocketDisconnect, RuntimeError, TimeoutError, OSError):
                 pass
 
     def enqueue(self, value):
