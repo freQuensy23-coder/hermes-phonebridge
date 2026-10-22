@@ -5,3 +5,4 @@
 *.jks
 *.keystore
 /.kotlin/
+!app/phonebridge-debug.keystore
