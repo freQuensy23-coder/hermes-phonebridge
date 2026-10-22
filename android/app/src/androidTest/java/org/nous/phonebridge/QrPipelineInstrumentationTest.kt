@@ -27,6 +27,7 @@ import java.util.UUID
 class QrPipelineInstrumentationTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
+    private val adminHttp = BridgeHttp.client.newBuilder().connectionPool(okhttp3.ConnectionPool(0, 1, java.util.concurrent.TimeUnit.SECONDS)).build()
     private lateinit var server: String
     private lateinit var expectedPublicServerUrl: String
     private lateinit var adminToken: String
@@ -211,8 +212,8 @@ class QrPipelineInstrumentationTest {
     private fun http(method: String, path: String, body: JSONObject? = null, admin: Boolean = true, expected: Int = 200): JSONObject {
         val builder = Request.Builder().url(server + path)
         if (admin) builder.header("Authorization", "Bearer $adminToken")
-        builder.method(method, body?.toString()?.toRequestBody("application/json".toMediaType()))
-        return BridgeHttp.client.newCall(builder.build()).execute().use { response ->
+        builder.method(method, body?.toString()?.toRequestBody("application/json".toMediaType())).header("Connection", "close")
+        return adminHttp.newCall(builder.build()).execute().use { response ->
             assertEquals("Unexpected real server status for $method $path", expected, response.code)
             val source = response.body?.source() ?: return@use JSONObject()
             assertFalse("Real server response exceeds the test bound", source.request(32769))

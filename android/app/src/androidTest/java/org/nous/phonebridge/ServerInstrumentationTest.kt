@@ -40,13 +40,14 @@ class ServerInstrumentationTest {
     private var scenario: ActivityScenario<MainActivity>? = null
     private var recoverySocket: WebSocket? = null
     private val delivered = mutableListOf<Uri>()
+    private val adminHttp = BridgeHttp.client.newBuilder().connectionPool(okhttp3.ConnectionPool(0, 1, TimeUnit.SECONDS)).build()
     private fun shell(command: String): String = instrumentation.uiAutomation.executeShellCommand(command).use { parcel -> android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { it.readText() } }
     private fun http(method: String, path: String, body: JSONObject? = null, admin: Boolean = true, expected: Int = 200): JSONObject {
         val builder = Request.Builder().url(server + path)
         if (admin) builder.header("Authorization", "Bearer $adminToken")
         val payload = body?.toString()?.toRequestBody("application/json".toMediaType())
-        builder.method(method, payload)
-        return BridgeHttp.client.newCall(builder.build()).execute().use {
+        builder.method(method, payload).header("Connection", "close")
+        return adminHttp.newCall(builder.build()).execute().use {
             assertEquals("Unexpected status for $method $path", expected, it.code)
             val text = it.body?.string().orEmpty()
             if (text.isEmpty()) JSONObject() else JSONObject(text)
@@ -87,8 +88,8 @@ class ServerInstrumentationTest {
         val url = "$server/v1/devices/$id/files".toHttpUrl().newBuilder().addQueryParameter("name", name).addQueryParameter("mime", mime)
             .addQueryParameter("kind", kind).addQueryParameter("ttl_seconds", "300").build()
         val request = Request.Builder().url(url).header("Authorization", "Bearer $adminToken").header("X-Content-SHA256", sha256(bytes))
-            .header("Idempotency-Key", UUID.randomUUID().toString()).post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
-        return BridgeHttp.client.newCall(request).execute().use {
+            .header("Idempotency-Key", UUID.randomUUID().toString()).header("Connection", "close").post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
+        return adminHttp.newCall(request).execute().use {
             assertEquals("Upload must be queued", 200, it.code)
             JSONObject(it.body!!.string())
         }
@@ -145,7 +146,7 @@ class ServerInstrumentationTest {
         BridgeService.stop(context, true)
         delivered.forEach { context.contentResolver.delete(it, null, null) }
         deviceId?.let { id ->
-            BridgeHttp.client.newCall(Request.Builder().url("$server/v1/devices/$id").header("Authorization", "Bearer $adminToken").delete().build()).execute().close()
+            adminHttp.newCall(Request.Builder().url("$server/v1/devices/$id").header("Authorization", "Bearer $adminToken").header("Connection", "close").delete().build()).execute().close()
         }
     }
     @Test fun realPairingKeystoreWebSocketPermissionsEventsReconnectExpiryAndRevocation() {

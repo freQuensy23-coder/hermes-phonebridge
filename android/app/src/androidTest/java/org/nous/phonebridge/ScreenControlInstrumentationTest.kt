@@ -259,12 +259,6 @@ class ScreenControlInstrumentationTest {
         assertTrue(input.getBoolean("verified"))
         waitUntil { localText("editor") == requested }
         assertEquals(requested, treeNode(tree(), "editor").getString("text"))
-        val editor = center(treeNode(tree(), "editor"))
-        success(command("screen.tap", JSONObject().put("x", editor.first).put("y", editor.second)))
-        waitUntil { localNodes().any { it.viewIdResourceName == "$fixture:id/editor" && it.isFocused } }
-        val focused = "Typed into the focused field"
-        success(command("screen.input", JSONObject().put("text", focused)))
-        waitUntil { localText("editor") == focused }
         val scroll = treeNode(tree(), "scroll").getJSONArray("bounds")
         val x = (scroll.getInt(0) + scroll.getInt(2)) / 2
         val top = scroll.getInt(1)
@@ -277,6 +271,13 @@ class ScreenControlInstrumentationTest {
         assertTrue(swipe.getBoolean("gesture_completed"))
         waitUntil { localNodes().filter { it.isVisibleToUser && it.text?.startsWith("Synthetic scroll row") == true }.map { it.text.toString() } != before }
         assertEquals("Counter: 1", localText("counter"))
+        // Last, because tapping the field opens the soft keyboard over the lower part of the screen.
+        val editor = center(treeNode(tree(), "editor"))
+        success(command("screen.tap", JSONObject().put("x", editor.first).put("y", editor.second)))
+        waitUntil { localNodes().any { it.viewIdResourceName == "$fixture:id/editor" && it.isFocused } }
+        val focused = "Typed into the focused field"
+        success(command("screen.input", JSONObject().put("text", focused)))
+        waitUntil { localText("editor") == focused }
     }
 
     @Test fun realPlatformScreenshotOfTheWholeDisplay() {
