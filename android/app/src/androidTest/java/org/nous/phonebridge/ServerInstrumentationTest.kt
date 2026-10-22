@@ -171,7 +171,7 @@ class ServerInstrumentationTest {
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { online(id) }
         assertTrue(capabilities(id).containsAll(setOf("device.info", "files.receive")))
-        if (BridgeAccessibility.current == null) assertTrue(capabilities(id).none { it.startsWith("screen.") })
+        if (BridgeAccessibility.current == null || !ScreenControl.enabled(context)) assertTrue(capabilities(id).none { it.startsWith("screen.") })
         assertTrue(http("GET", "/v1/devices/$id").getJSONObject("permissions").has("accessibility"))
         val command = enqueue(id, "device.info", key = "device-info-dedup")
         val duplicate = enqueue(id, "device.info", key = "device-info-dedup")

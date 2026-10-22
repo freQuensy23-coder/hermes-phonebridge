@@ -62,6 +62,7 @@ class ScreenControlInstrumentationTest {
                     },
                     { scenario?.close(); scenario = null },
                     { BridgeService.stop(context, true) },
+                    { ScreenControl.stop(context) },
                     { waitUntil { BridgeService.current == null && Credentials(context).load() == null } },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, originalServices) },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ACCESSIBILITY_ENABLED, originalEnabled) },
@@ -236,6 +237,8 @@ class ScreenControlInstrumentationTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").optBoolean("online") }
+        waitForScreenCapabilities(false)
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_manual).performClick() }
         waitForScreenCapabilities(true)
     }
 
@@ -317,6 +320,18 @@ class ScreenControlInstrumentationTest {
         success(command("screen.input", JSONObject().put("resource_id", "${context.packageName}:id/device_name").put("text", "Renamed remotely")))
         var name = ""
         waitUntil { scenario!!.onActivity { name = it.findViewById<android.widget.EditText>(R.id.device_name).text.toString() }; name == "Renamed remotely" }
+    }
+
+    @Test fun stopButtonRemovesScreenOperationsAndTimedEnableRestoresThem() {
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_stop).performClick() }
+        waitForScreenCapabilities(false)
+        val refused = request("POST", commandPath(), commandBody("screen.tree", JSONObject()))
+        assertEquals(422, refused.status)
+        assertEquals("UNSUPPORTED", refused.body.getJSONObject("error").getString("code"))
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_10).performClick() }
+        waitForScreenCapabilities(true)
+        showFixture()
+        assertEquals(fixture, tree().getString("package"))
     }
 
     @Test fun accessibilityLossRemovesScreenOperations() {

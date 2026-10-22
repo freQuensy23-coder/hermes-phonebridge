@@ -32,7 +32,7 @@ Errors are `{"error":{"code","message"}}`. The CLI shows both; messages are writ
 
 ## Operations
 
-`device.info`, `capabilities`, `screen.tree`, `screen.screenshot`, `screen.tap`, `screen.swipe`, `screen.input`, `screen.global`, `files.receive`. The phone advertises only what it can do right now (screen operations only while Accessibility is granted). The server ignores unknown operations in a hello, so app and server can be upgraded independently.
+`device.info`, `capabilities`, `screen.tree`, `screen.screenshot`, `screen.tap`, `screen.swipe`, `screen.input`, `screen.global`, `files.receive`. The phone advertises only what it can do right now (screen operations only while Accessibility is granted and the owner has screen control on in the app). The server ignores unknown operations in a hello, so app and server can be upgraded independently.
 
 ## Device WebSocket
 

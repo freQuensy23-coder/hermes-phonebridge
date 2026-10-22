@@ -312,7 +312,7 @@ class BridgeService : Service() {
         prefs.edit().putBoolean("enabled", false).putString("status", message).commit()
         socket?.cancel()
         socket = null
-        if (erase) { credentials.clear(); store.clearAll() }
+        if (erase) { credentials.clear(); store.clearAll(); ScreenControl.stop(this) }
         commands.shutdownNow()
         Handler(Looper.getMainLooper()).post { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
@@ -344,6 +344,7 @@ class BridgeService : Service() {
             if (service != null) service.halt(if (disconnect) "Disconnected" else "Stopped", disconnect) else if (disconnect) {
                 Credentials(context).clear()
                 DurableStore(context).use { it.clearAll() }
+                ScreenControl.stop(context)
             }
         }
         fun refresh() {

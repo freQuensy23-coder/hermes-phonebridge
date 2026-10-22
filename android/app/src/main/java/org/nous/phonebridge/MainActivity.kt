@@ -23,6 +23,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var name: EditText
     private lateinit var code: EditText
+    private lateinit var screenControl: TextView
     private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var pairing = false
@@ -50,7 +51,7 @@ class MainActivity : Activity() {
         status = TextView(this).also { layout.addView(it) }
         name = EditText(this).apply { id = R.id.device_name; hint = "Device name"; setText(Build.MODEL); filters = arrayOf(android.text.InputFilter.LengthFilter(80)); isSaveEnabled = false }
         layout.addView(name)
-        text("Pair only with a server you trust. Scan the one-time server QR and confirm its hostname. The server can send files to Download/PhoneBridge and Pictures/PhoneBridge, and once Accessibility is granted it can see and operate the screen.")
+        text("Pair only with a server you trust. Scan the one-time server QR and confirm its hostname. The server can send files to Download/PhoneBridge and Pictures/PhoneBridge, and it can see and operate the screen while screen control is on.")
         button("Scan server QR") {
             requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
             if (!Access.has(this, Manifest.permission.CAMERA)) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else scan()
@@ -81,8 +82,17 @@ class MainActivity : Activity() {
         }
         if (Build.VERSION.SDK_INT >= 33) button("Allow notifications") { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11) }
         button("Grant Accessibility (screen control)") {
-            AlertDialog.Builder(this).setTitle("Grant Accessibility?").setMessage("PhoneBridge uses Accessibility to read and operate the screen for your server. If Android shows \"Restricted setting\", open App info, tap the menu and allow restricted settings first.").setNegativeButton("Cancel", null).setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
+            AlertDialog.Builder(this).setTitle("Grant Accessibility?").setMessage("PhoneBridge uses Accessibility to read and operate the screen for your server while screen control is on. If Android shows \"Restricted setting\", open App info, tap the menu and allow restricted settings first.").setNegativeButton("Cancel", null).setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
         }
+        screenControl = TextView(this).apply { id = R.id.screen_control_status; setPadding(0, 12, 0, 12) }.also { layout.addView(it) }
+        fun screenButton(label: String, resourceId: Int, action: () -> Unit) {
+            layout.addView(Button(this).apply { text = label; id = resourceId; setOnClickListener { action(); render() } })
+        }
+        screenButton("Enable screen control for 10 minutes", R.id.screen_enable_10) { ScreenControl.enable(this, 10) }
+        screenButton("Enable screen control for 15 minutes", R.id.screen_enable_15) { ScreenControl.enable(this, 15) }
+        screenButton("Enable screen control for 1 hour", R.id.screen_enable_60) { ScreenControl.enable(this, 60) }
+        screenButton("Enable screen control until stopped", R.id.screen_enable_manual) { ScreenControl.enable(this, null) }
+        screenButton("Stop screen control", R.id.screen_stop) { ScreenControl.stop(this) }
         button("App permissions / battery settings") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
         text("Persistent connection uses a visible foreground service and no permanent wake lock. Android force-stop prevents boot restore until you open the app. Samsung: remove PhoneBridge from sleeping/deep-sleeping apps and select unrestricted battery use. Pixel: select unrestricted battery use. OEM restrictions or network loss can interrupt delivery.")
         render()
@@ -140,6 +150,7 @@ class MainActivity : Activity() {
         val permissions = Access.permissions(this)
         fun mark(key: String) = if (permissions.optBoolean(key)) "yes" else "no"
         status.text = "Status: ${prefs.getString("status", "Not connected")}\nServer: ${value?.server?.removeSuffix("/") ?: "not paired"}\nAccessibility granted: ${mark("accessibility")}\nNotifications allowed: ${mark("post_notifications")}"
+        screenControl.text = ScreenControl.describe(this)
     }
     private fun message(value: String) { if (!isFinishing && !isDestroyed) AlertDialog.Builder(this).setMessage(value).setPositiveButton("OK", null).show() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

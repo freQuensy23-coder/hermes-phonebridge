@@ -12,10 +12,11 @@ object Access {
     fun permissions(context: Context): JSONObject = JSONObject().apply {
         put("post_notifications", Build.VERSION.SDK_INT < 33 || has(context, Manifest.permission.POST_NOTIFICATIONS))
         put("accessibility", BridgeAccessibility.current != null)
+        put("screen_control", ScreenControl.enabled(context))
     }
     fun capabilities(context: Context): JSONArray {
         val ops = mutableSetOf("device.info", "capabilities", "device.capabilities", "files.receive")
-        if (BridgeAccessibility.current != null) ops += listOf("screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global")
+        if (BridgeAccessibility.current != null && ScreenControl.enabled(context)) ops += listOf("screen.tree", "screen.screenshot", "screen.tap", "screen.swipe", "screen.input", "screen.global")
         return JSONArray(ops.sorted())
     }
 }

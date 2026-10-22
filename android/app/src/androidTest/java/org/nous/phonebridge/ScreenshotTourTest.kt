@@ -173,6 +173,7 @@ class ScreenshotTourTest {
         if (!::server.isInitialized) return
         deviceId?.let { id -> try { http("DELETE", "/v1/devices/$id") } catch (_: Throwable) { } }
         BridgeService.stop(context, true)
+        ScreenControl.stop(context)
         val services = originalServices
         shell(if (services.isNullOrEmpty()) "settings delete secure enabled_accessibility_services" else "settings put secure enabled_accessibility_services $services")
         shell("am force-stop $fixture")
@@ -201,10 +202,13 @@ class ScreenshotTourTest {
         shell("settings put secure enabled_accessibility_services $component")
         shell("settings put secure accessibility_enabled 1")
         waitUntil { BridgeAccessibility.current != null }
-        waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         showMain()
         waitUntil { nodes().any { it.text?.toString()?.contains("Accessibility granted: yes") == true } }
         snap("04-accessibility-granted")
+        tap(reveal("org.nous.phonebridge:id/screen_enable_10"))
+        waitUntil { nodes().any { it.text?.toString()?.startsWith("Screen control: ON") == true } }
+        snap("05-screen-control-on")
+        waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         notificationShade("06-ongoing-notification")
 
         val image = send("hermes-photo.png", "image/png", "image", sampleImage())

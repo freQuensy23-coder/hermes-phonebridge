@@ -2,7 +2,7 @@
 
 Lets a Hermes agent on your server operate your Android phone:
 
-- **Screen control** through Android Accessibility: read the UI tree, take screenshots, tap, swipe, type, press back/home. Works as soon as you grant PhoneBridge Accessibility in Android settings. See [docs/screen-control.md](docs/screen-control.md).
+- **Screen control** through Android Accessibility: read the UI tree, take screenshots, tap, swipe, type, press back/home. Grant PhoneBridge Accessibility in Android settings once, then switch screen control on in the app for 10 minutes, 15 minutes, 1 hour or until stopped. See [docs/screen-control.md](docs/screen-control.md).
 - **File delivery**: `phonebridge files send DEVICE ./report.pdf` puts the file into `Download/PhoneBridge`, `phonebridge images send` into the gallery. See [docs/file-delivery.md](docs/file-delivery.md).
 
 The phone connects out to the server over an authenticated WebSocket; no inbound port, root or ADB is needed. Protocol and API: [docs/contract.md](docs/contract.md). Platform limits: [docs/support-matrix.md](docs/support-matrix.md).

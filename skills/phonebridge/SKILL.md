@@ -29,7 +29,7 @@ Nothing else is available: no SMS, calls, notifications API, clock or calendar h
 
 ## Screen control
 
-Works whenever the phone is online and Accessibility is granted (`phonebridge capabilities DEVICE` lists `screen.*`). There is nothing to enable on the phone and no session to pass.
+Works while the owner has screen control on in the PhoneBridge app (buttons for 10 minutes, 15 minutes, 1 hour or until stopped) and PhoneBridge Accessibility is granted. Then `phonebridge capabilities DEVICE` lists `screen.*` and `permissions.screen_control` is `true`. There is no session or token to pass; the commands below just work.
 
 1. Observe: `phonebridge screen tree DEVICE --wait` returns `package` (the app in front) and `nodes` (text, description, resource_id, clickable, editable, focused, bounds `[left,top,right,bottom]`). `truncated:true` means more nodes exist than were returned; take a screenshot then.
    `phonebridge screen screenshot DEVICE --output /private/new/shot.jpg` saves a JPEG of the whole screen and prints `screen_bounds` `[0,0,W,H]`, `width`, `height`. Map an image pixel `(u,v)` to the screen: `x = u*W/width`, `y = v*H/height`.
@@ -48,7 +48,7 @@ Works whenever the phone is online and Accessibility is granted (`phonebridge ca
 Example, "open Notes and write 123": `screen global --action home`, `screen tree`, tap the Notes icon (swipe up to the app drawer if it is not on the home screen), `screen tree`, tap the new-note button, tap the text area, `screen input --text 123`, `screen tree` to confirm.
 
 Errors:
-- `UNSUPPORTED` with "not advertised by this device" or "Capability no longer advertised", or `PERMISSION_REQUIRED`: screen control is unavailable. Run `phonebridge capabilities DEVICE`: if the phone is offline, ask the owner to open PhoneBridge; if `screen.*` is missing, ask the owner to turn on PhoneBridge in Android Accessibility settings.
+- `UNSUPPORTED` with "not advertised by this device" or "Capability no longer advertised", or `PERMISSION_REQUIRED`: screen control is unavailable. Run `phonebridge capabilities DEVICE`: if the phone is offline, ask the owner to open PhoneBridge; if `permissions.screen_control` is `false`, ask the owner to tap "Enable screen control" in the PhoneBridge app; if `permissions.accessibility` is `false`, ask the owner to turn on PhoneBridge in Android Accessibility settings.
 - Other `UNSUPPORTED`: Android refused the action (for example a field that does not accept text); try another way, such as tapping the keyboard keys.
 - `NOT_FOUND`: no window or no such field; the screen may be off or locked, ask the owner to unlock it.
 - `VALIDATION_ERROR`: fix the arguments (coordinates are 0..100000 screen pixels).

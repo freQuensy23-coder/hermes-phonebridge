@@ -132,7 +132,7 @@ class DurabilityInstrumentationTest {
         val handlers = NativeHandlers(context)
         val caps = Access.capabilities(context).let { array -> (0 until array.length()).map { array.getString(it) }.toSet() }
         assertTrue(caps.containsAll(setOf("device.info", "files.receive")))
-        if (BridgeAccessibility.current == null) assertTrue(caps.none { it.startsWith("screen.") })
+        if (BridgeAccessibility.current == null || !ScreenControl.enabled(context)) assertTrue(caps.none { it.startsWith("screen.") })
         for (op in listOf("shell.execute", "contacts.list", "sms.send", "clock.alarms.create", "calendar.delete", "notifications.list")) {
             try { handlers.execute(op, JSONObject()); fail("$op must not have a handler") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
         }

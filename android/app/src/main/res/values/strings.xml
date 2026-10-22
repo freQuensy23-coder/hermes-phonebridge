@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">PhoneBridge</string>
-    <string name="accessibility_description">Lets your paired PhoneBridge server read and operate the screen: read the UI tree, take screenshots, tap, swipe, type and press Back, Home and Recents.</string>
+    <string name="accessibility_description">Lets your paired PhoneBridge server read and operate the screen while you have screen control on in the PhoneBridge app: read the UI tree, take screenshots, tap, swipe, type and press Back, Home and Recents.</string>
 </resources>

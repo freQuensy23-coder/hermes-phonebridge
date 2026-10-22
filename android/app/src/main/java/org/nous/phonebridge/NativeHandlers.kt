@@ -33,7 +33,10 @@ class NativeHandlers(private val context: Context, private val credentials: Devi
         PayloadBounds.validate(json)
         val args = Arguments(json)
         return when {
-            op.startsWith("screen.") -> (BridgeAccessibility.current ?: failure("PERMISSION_REQUIRED", "Enable PhoneBridge Accessibility in Android settings")).handle(op, args)
+            op.startsWith("screen.") -> {
+                if (!ScreenControl.enabled(context)) failure("PERMISSION_REQUIRED", "Screen control is off; ask the owner to enable it in the PhoneBridge app")
+                (BridgeAccessibility.current ?: failure("PERMISSION_REQUIRED", "Enable PhoneBridge Accessibility in Android settings")).handle(op, args)
+            }
             op == "files.receive" -> FileReceiver(context, credentials ?: failure("AMBIGUOUS_STATE", "Pairing credentials unavailable")).receive(args)
             op == "device.info" -> { args.only(); deviceInfo() }
             op == "capabilities" || op == "device.capabilities" -> { args.only(); JSONObject().put("capabilities", Access.capabilities(context)).put("permissions", Access.permissions(context)) }

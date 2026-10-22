@@ -1,8 +1,8 @@
 # Screen control
 
-PhoneBridge controls the phone through its own Android Accessibility service. This is not ADB, root or Developer Options. Once the owner grants the PhoneBridge Accessibility service in Android settings, the paired server can read the screen and operate any app as the owner. Revoking Accessibility, stopping the connection in the app or revoking the device on the server ends it.
+PhoneBridge controls the phone through its own Android Accessibility service. This is not ADB, root or Developer Options. The owner grants the PhoneBridge Accessibility service in Android settings once, then switches screen control on in the PhoneBridge app for 10 minutes, 15 minutes, 1 hour or until stopped. While it is on, the paired server can read the screen and operate any app as the owner. "Stop screen control", the end of the chosen time, turning Accessibility off, "Disconnect" or revoking the device ends it. The setting is kept across app restarts.
 
-The phone advertises `screen.*` operations whenever the Accessibility service is connected. Commands act on whatever is on the display: the active window for the tree and text input, the whole display for screenshots and gestures.
+The phone advertises `screen.*` operations, and reports `permissions.screen_control: true`, while screen control is on and the Accessibility service is connected; it re-advertises within a few seconds when the time runs out. Commands act on whatever is on the display: the active window for the tree and text input, the whole display for screenshots and gestures.
 
 ## Operations
 
@@ -14,4 +14,4 @@ The phone advertises `screen.*` operations whenever the Accessibility service is
 
 Gesture results are `outcome:"dispatched", verified:false`: Android only confirms that the gesture was injected. Commands are never retried automatically; `AMBIGUOUS_STATE` means the agent must observe before deciding anything.
 
-Errors: without Accessibility the phone stops advertising `screen.*`, so the server rejects new screen commands with `UNSUPPORTED` ("not advertised by this device") and fails queued ones with `UNSUPPORTED` ("Capability no longer advertised"); a command already on the phone fails with `PERMISSION_REQUIRED`. `NOT_FOUND` means there is no window (screen off) or no matching field, other `UNSUPPORTED` results mean Android refused the action, `VALIDATION_ERROR` means bad arguments.
+Errors: with screen control off or without Accessibility the phone stops advertising `screen.*`, so the server rejects new screen commands with `UNSUPPORTED` ("not advertised by this device") and fails queued ones with `UNSUPPORTED` ("Capability no longer advertised"); a command already on the phone fails with `PERMISSION_REQUIRED`. `NOT_FOUND` means there is no window (screen off) or no matching field, other `UNSUPPORTED` results mean Android refused the action, `VALIDATION_ERROR` means bad arguments.

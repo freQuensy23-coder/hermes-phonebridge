@@ -36,6 +36,7 @@ class AccessibilityInstrumentationTest {
                 val actions: List<() -> Unit> = listOf(
                     { scenario?.close(); scenario = null },
                     { BridgeService.stop(context, true) },
+                    { ScreenControl.stop(context) },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null) },
                     { if (settingsCaptured) waitUntil("service-cleanup") { BridgeAccessibility.current == null } },
                     { if (settingsCaptured) restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, originalServices) },
@@ -82,7 +83,7 @@ class AccessibilityInstrumentationTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         waitUntil("activity-focused") { ForegroundFixture.focused() }
     }
-    @Test fun accessibilityGrantEnablesScreenOperationsAndRevokeRemovesThem() {
+    @Test fun screenControlButtonsAndAccessibilityGateScreenOperations() {
         val handlers = NativeHandlers(context)
         assertFalse(Access.permissions(context).getBoolean("accessibility"))
         assertTrue(screenCapabilities().isEmpty())
@@ -91,6 +92,12 @@ class AccessibilityInstrumentationTest {
         waitUntil("service-connected") { BridgeAccessibility.current != null }
         val service = BridgeAccessibility.current!!
         assertTrue(Access.permissions(context).getBoolean("accessibility"))
+        assertFalse(Access.permissions(context).getBoolean("screen_control"))
+        assertTrue(screenCapabilities().isEmpty())
+        for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_10).performClick() }
+        assertTrue(Access.permissions(context).getBoolean("screen_control"))
+        scenario!!.onActivity { assertTrue(it.findViewById<android.widget.TextView>(R.id.screen_control_status).text.startsWith("Screen control: ON")) }
         assertEquals(screenOps.toSet(), screenCapabilities())
         waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
         val tree = handlers.execute("screen.tree", JSONObject())
@@ -102,6 +109,12 @@ class AccessibilityInstrumentationTest {
         scenario!!.onActivity { activity -> assertEquals("Typed by Accessibility", activity.findViewById<EditText>(R.id.device_name).text.toString()) }
         refused("VALIDATION_ERROR") { handlers.execute("screen.global", JSONObject().put("action", "unlock")) }
         for (op in listOf("debug.status", "debug.enable")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_stop).performClick() }
+        assertFalse(Access.permissions(context).getBoolean("screen_control"))
+        assertTrue(screenCapabilities().isEmpty())
+        for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
+        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_manual).performClick() }
+        assertEquals(screenOps.toSet(), screenCapabilities())
         restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
         waitUntil("service-revoked") { BridgeAccessibility.current == null }
         assertFalse(Access.permissions(context).getBoolean("accessibility"))
