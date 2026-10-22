@@ -82,6 +82,7 @@ class BridgeService : Service() {
     private var lastHello = 0L
     private var credits = 8.0
     private var creditTime = android.os.SystemClock.elapsedRealtime()
+    private var networkUp = false
     private val network = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) { scheduleNetwork() }
         override fun onLost(network: Network) { DebugAccess.revoke(); scheduleNetwork() }
@@ -107,7 +108,7 @@ class BridgeService : Service() {
             halt(if (intent.action == DISCONNECT) "Disconnected" else "Stopped", intent.action == DISCONNECT)
             return START_NOT_STICKY
         }
-        if (!prefs.getBoolean("enabled", false) || credentials.load() == null) {
+        if (!prefs.getBoolean("enabled", false) || !paired()) {
             halt("Not paired or stopped", false)
             return START_NOT_STICKY
         }
@@ -115,39 +116,42 @@ class BridgeService : Service() {
         return START_STICKY
     }
     override fun onBind(intent: Intent?): IBinder? = null
+    private fun paired(): Boolean = try { credentials.load() != null } catch (_: Exception) { true }
     private fun dispatch(task: () -> Unit) {
         if (!active || control.isShutdown) return
         try {
             control.execute {
-                if (active) try { task() } catch (_: Exception) { halt("Connection control failed; stopped for safety", false) }
+                if (active) try { task() } catch (_: Exception) { try { recover("Internal error; reconnecting") } catch (_: Exception) { } }
             }
         } catch (_: RejectedExecutionException) { }
+    }
+    private fun recover(reason: String) {
+        val ownEpoch = epoch
+        socket?.cancel()
+        lost(ownEpoch, reason)
     }
     internal fun interruptTransport() {
         DebugAccess.revoke()
         if (!active || control.isShutdown) return
-        dispatch {
-            val ownEpoch = epoch
-            socket?.cancel()
-            lost(ownEpoch, false)
-        }
+        dispatch { recover("Reconnecting") }
     }
     private fun hasNetwork(): Boolean = manager.activeNetwork?.let { manager.getNetworkCapabilities(it)?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) } == true
     private fun scheduleNetwork() {
         if (!active || control.isShutdown) return
         dispatch {
-            if (!hasNetwork()) {
+            val available = hasNetwork()
+            val returned = available && !networkUp
+            networkUp = available
+            if (!available) {
                 DebugAccess.revoke()
                 epoch++
                 socket?.cancel()
                 socket = null
                 connected = false
                 state("Waiting for network")
-            } else if (!connected) {
+            } else if (returned && !connected && socket == null) {
                 retry?.cancel(false)
                 retry = null
-                socket?.cancel()
-                socket = null
                 connect()
             }
         }
@@ -155,12 +159,12 @@ class BridgeService : Service() {
     private fun connect() {
         if (!active || socket != null || !prefs.getBoolean("enabled", false)) return
         if (!hasNetwork()) { state("Waiting for network"); return }
-        val value = credentials.load() ?: run { halt("Credentials unavailable", false); return }
+        val value = credentials.load() ?: run { halt("Not paired; scan a new QR", false); return }
         val ownEpoch = ++epoch
         state("Connecting")
         val request = Request.Builder().url(value.wsUrl).header("Authorization", "Bearer ${value.token}").build()
         socket = client.newWebSocket(request, object : WebSocketListener() {
-            private var protocolError: String? = null
+            private var serverError: String? = null
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 dispatch {
                     if (!active || ownEpoch != epoch) { webSocket.cancel(); return@dispatch }
@@ -189,9 +193,9 @@ class BridgeService : Service() {
                             store.ack(id)
                             sentEvents.ack(id)
                         }
-                        "command" -> accept(frame, value.deviceId)
-                        "revoked" -> { DebugAccess.revoke(); dispatch { halt("Revoked by server", true) } }
-                        "error" -> { protocolError = frame.optString("code", "INVALID_FRAME") }
+                        "command" -> accept(frame, value)
+                        "revoked" -> { DebugAccess.revoke(); dispatch { halt("Unpaired by the server; scan a new QR", true) } }
+                        "error" -> { serverError = frame.optString("code", "ERROR").take(64) }
                     }
                 } catch (_: Exception) { webSocket.close(1008, "Invalid frame") }
             }
@@ -206,32 +210,31 @@ class BridgeService : Service() {
                 if (ownEpoch == epoch) DebugAccess.revoke()
                 dispatch {
                     if (ownEpoch != epoch) return@dispatch
-                    val error = protocolError
-                    if (error != null && error !in setOf("AUTH_REVOKED", "DEVICE_REVOKED", "UNAUTHORIZED")) halt("Server rejected protocol data ($error); stopped without erasing credentials", false)
-                    else lost(ownEpoch, code in setOf(1008, 4001, 4003, 4401, 4403))
+                    if (code == 4401) halt("Unpaired by the server; scan a new QR", true)
+                    else lost(ownEpoch, serverError?.let { "Server closed the connection ($it); reconnecting" } ?: "Reconnecting")
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 if (ownEpoch == epoch) DebugAccess.revoke()
-                if (!control.isShutdown) dispatch { lost(ownEpoch, response?.code in setOf(401, 403)) }
+                if (!control.isShutdown) dispatch { lost(ownEpoch, response?.code?.let { "Server unavailable (HTTP $it); reconnecting" } ?: "Server unreachable; reconnecting") }
             }
         })
     }
-    private fun lost(ownEpoch: Long, revoked: Boolean) {
+    private fun lost(ownEpoch: Long, reason: String) {
         if (!active || ownEpoch != epoch) return
         DebugAccess.revoke()
         epoch++
         socket = null
         connected = false
-        if (revoked) { halt("Authorization revoked; scan a new QR", true); return }
-        state("Reconnecting")
+        state(reason)
         val ceiling = min(300000L, 1000L shl attempt.coerceAtMost(9))
         attempt++
         retry?.cancel(false)
         retry = control.schedule({ retry = null; dispatch { connect() } }, Random.nextLong(ceiling / 2, ceiling + 1), TimeUnit.MILLISECONDS)
     }
     internal fun debugConnectionReady(): Boolean = active && connected && prefs.getBoolean("enabled", false)
-    private fun accept(frame: JSONObject, deviceId: String) {
+    private fun accept(frame: JSONObject, paired: DeviceCredentials) {
+        val deviceId = paired.deviceId
         val args = Arguments(frame)
         args.only("type", "id", "op", "args", "expires_at")
         val id = args.string("id", 128)!!
@@ -257,7 +260,7 @@ class BridgeService : Service() {
                         val cached = store.begin(frame, if (screen) screenSinks(session, expires, execution) else null)
                         reserved = cached == null
                         if (cached != null && op != "debug.status") cached else {
-                            val data = NativeHandlers(this, store).execute(op, frame.getJSONObject("args"))
+                            val data = NativeHandlers(this, paired).execute(op, frame.getJSONObject("args"))
                             Results.ok(id, data).also { PayloadBounds.validateResult(it, op) }
                         }
                     } catch (e: BridgeFailure) { Results.error(id, e.code, e.message) }
@@ -300,7 +303,7 @@ class BridgeService : Service() {
     private fun addPending(result: PendingResult, sinks: CommandSinks = CommandSinks()) {
         val bytes = result.text.toByteArray().size
         if (pendingResults.size >= 2048 || pendingResultBytes + bytes > 2097152) {
-            halt("Pending result buffer full; stopped without command replay", false)
+            recover("Too many unsent results; reconnecting to resend from cache")
             return
         }
         sinks.prepared({ bytes }) { preparedBytes ->
@@ -444,7 +447,9 @@ class BridgeService : Service() {
 class RestoreReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action !in setOf(Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED)) return
-        if (context.getSharedPreferences("connection", Context.MODE_PRIVATE).getBoolean("enabled", false) && Credentials(context).load() != null) {
+        if (!context.getSharedPreferences("connection", Context.MODE_PRIVATE).getBoolean("enabled", false)) return
+        if (try { Credentials(context).load() == null } catch (_: Exception) { false }) return
+        run {
             try { context.startForegroundService(Intent(context, BridgeService::class.java)) } catch (_: Exception) {
                 context.getSharedPreferences("connection", Context.MODE_PRIVATE).edit().putString("status", "Android blocked automatic restore; open PhoneBridge").apply()
             }

@@ -338,6 +338,15 @@ class RemoteWindowPolicyTest {
     @Test fun inputMethodAndOtherWindowTypesHaveNoImplicitFocusException() {
         refused { resolve(listOf(window(), window(8, Node(8, "ordinary.ime"), false, true, RemoteWindowKind.OTHER))) }
         refused { resolve(listOf(window(), window(8, Node(8), false, false, RemoteWindowKind.OTHER))) }
+        refused { resolve(listOf(window(), window(8, Node(8, "ordinary.ime"), false, true, RemoteWindowKind.INPUT_METHOD))) }
+        refused { resolve(listOf(window(), window(8, Node(8, "ordinary.ime"), true, false, RemoteWindowKind.INPUT_METHOD))) }
+    }
+    @Test fun visibleKeyboardIsToleratedButCannotReceiveGestures() {
+        val keyboard = RemoteWindowBounds(0, 1200, 1000, 1800)
+        val target = resolve(listOf(window(), window(8, null, false, false, RemoteWindowKind.INPUT_METHOD, keyboard)))
+        assertSame(root, target.root)
+        target.requireGesturePoint(500, 600)
+        invalidGesture { target.requireGesturePoint(500, 1300) }
     }
     @Test fun selectedPasswordSubtreeIsRefusedByProductionTraversal() {
         val password = Node(children = listOf(Node(password = true)))
@@ -355,17 +364,18 @@ class RemoteWindowPolicyTest {
         refused { RemoteWindowPolicy.assertSafeWindow(Node(children = listOf(Node(), null, Node())), adapter) }
     }
     @Test fun traversalRetainsChildDepthAndTotalNodeBounds() {
-        refused { RemoteWindowPolicy.assertSafeWindow(Node(advertisedChildren = 101), adapter) }
+        refused { RemoteWindowPolicy.assertSafeWindow(Node(advertisedChildren = RemoteWindowPolicy.MAX_CHILDREN + 1), adapter) }
         var deep = Node()
-        repeat(31) { deep = Node(children = listOf(deep)) }
+        repeat(RemoteWindowPolicy.MAX_DEPTH + 1) { deep = Node(children = listOf(deep)) }
         refused { RemoteWindowPolicy.assertSafeWindow(deep, adapter) }
-        val hundred = List(100) { Node() }
-        refused { RemoteWindowPolicy.assertSafeWindow(Node(children = List(4) { Node(children = hundred) }), adapter) }
+        val wide = List(250) { Node() }
+        refused { RemoteWindowPolicy.assertSafeWindow(Node(children = List(9) { Node(children = wide) }), adapter) }
     }
     @Test fun completeTraversalAcceptsOrdinaryNodesAtItsDepthBoundary() {
         var deep = Node()
-        repeat(30) { deep = Node(children = listOf(deep)) }
+        repeat(RemoteWindowPolicy.MAX_DEPTH) { deep = Node(children = listOf(deep)) }
         RemoteWindowPolicy.assertSafeWindow(deep, adapter)
+        RemoteWindowPolicy.assertSafeWindow(Node(children = List(7) { Node(children = List(250) { Node() }) }), adapter)
     }
     @Test fun incompleteTraversalRejectsChangingAdvertisedChildCount() {
         val changing = object : RemoteWindowNodeAdapter<Node> by adapter {

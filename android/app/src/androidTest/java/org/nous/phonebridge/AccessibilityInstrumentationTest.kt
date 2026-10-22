@@ -90,9 +90,9 @@ class AccessibilityInstrumentationTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         waitUntil("activity-focused") { ForegroundFixture.focused() }
     }
-    @Test fun optionalAccessibilityGrantRevokePreservesDebugOffAndUnknownClockGuards() {
-        DurableStore(context).use { store ->
-            val handlers = NativeHandlers(context, store)
+    @Test fun accessibilityGrantAndRevokeKeepScreenControlOffUntilLocalConsent() {
+        run {
+            val handlers = NativeHandlers(context)
             assertFalse(Access.permissions(context).getBoolean("accessibility"))
             assertDebugOff(handlers)
             for (op in screenOps) {
@@ -104,16 +104,9 @@ class AccessibilityInstrumentationTest {
             val service = BridgeAccessibility.current!!
             assertTrue(Access.permissions(context).getBoolean("accessibility"))
             assertDebugOff(handlers)
-            for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
-                for (op in AospClockAdapter.operations) {
-                    refused("UNSUPPORTED") { adapter.execute(service, op, Arguments(JSONObject())) }
-                }
-            }
-            val expectedClockOps = if (GoogleClockProfile.installed(context)) GoogleClockProfile.operations else emptySet()
-            assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
             val advertised = Access.capabilities(context)
             val capabilities = (0 until advertised.length()).map { advertised.getString(it) }.toSet()
-            for (op in AospClockAdapter.operations) assertEquals(op in expectedClockOps, op in capabilities)
+            for (op in screenOps) assertFalse(op in capabilities)
             waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
             var originalName: String? = null
             scenario!!.onActivity { activity -> originalName = activity.findViewById<EditText>(R.id.device_name).text.toString() }
@@ -143,13 +136,9 @@ class AccessibilityInstrumentationTest {
             restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
             waitUntil("service-revoked") { BridgeAccessibility.current == null }
             assertFalse(Access.permissions(context).getBoolean("accessibility"))
-            assertEquals(expectedClockOps, ClockAdapters(context).capabilities())
-            for (op in AospClockAdapter.operations) {
-                refused("PERMISSION_REQUIRED") { ClockAdapters(context).execute(op, Arguments(JSONObject())) }
-            }
             val revoked = Access.capabilities(context)
             val revokedCapabilities = (0 until revoked.length()).map { revoked.getString(it) }.toSet()
-            for (op in AospClockAdapter.operations) assertFalse(op in revokedCapabilities)
+            for (op in screenOps) assertFalse(op in revokedCapabilities)
             for (op in screenOps) {
                 refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", "not-a-current-session")) }
                 refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op).put("debug_session", 17)) }

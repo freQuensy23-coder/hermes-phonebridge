@@ -22,35 +22,54 @@ data class DeviceCredentials(val deviceId: String, val token: String, val server
 class Credentials(context: Context) {
     private val prefs = context.getSharedPreferences("credentials", Context.MODE_PRIVATE)
     private val alias = "phonebridge.device.v1"
+    private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
     private fun key(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(alias, null) as? SecretKey)?.let { return it }
+        (keyStore().getKey(alias, null) as? SecretKey)?.let { return it }
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
             init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setRandomizedEncryptionRequired(true).build())
         }.generateKey()
     }
-    @Synchronized fun save(value: DeviceCredentials) {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
-        val plain = JSONObject().put("id", value.deviceId).put("token", value.token).put("server", value.server).put("ws", value.wsUrl).toString().toByteArray()
-        val encrypted = cipher.doFinal(plain)
-        check(prefs.edit().putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP)).putString("ciphertext", Base64.encodeToString(encrypted, Base64.NO_WRAP)).commit())
-    }
-    @Synchronized fun load(): DeviceCredentials? {
-        val encrypted = prefs.getString("ciphertext", null) ?: return null
-        return try {
-            val iv = Base64.decode(prefs.getString("iv", null) ?: return null, Base64.NO_WRAP)
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv)) }
-            val obj = JSONObject(String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP))))
-            DeviceCredentials(obj.getString("id"), obj.getString("token"), obj.getString("server"), obj.getString("ws"))
-        } catch (_: Exception) {
-            clear()
-            null
+    fun save(value: DeviceCredentials) {
+        synchronized(Credentials) {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
+            val plain = JSONObject().put("id", value.deviceId).put("token", value.token).put("server", value.server).put("ws", value.wsUrl).toString().toByteArray()
+            val encrypted = cipher.doFinal(plain)
+            val ciphertext = Base64.encodeToString(encrypted, Base64.NO_WRAP)
+            check(prefs.edit().putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP)).putString("ciphertext", ciphertext).commit())
+            cached = ciphertext to value
         }
     }
-    @Synchronized fun clear() {
-        prefs.edit().clear().commit()
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        if (store.containsAlias(alias)) store.deleteEntry(alias)
+    fun load(): DeviceCredentials? {
+        val current = prefs.getString("ciphertext", null) ?: return null
+        cached?.let { (ciphertext, value) -> if (ciphertext == current) return value }
+        synchronized(Credentials) {
+            val encrypted = prefs.getString("ciphertext", null) ?: return null
+            cached?.let { (ciphertext, value) -> if (ciphertext == encrypted) return value }
+            val iv = prefs.getString("iv", null) ?: run { clear(); return null }
+            val key = keyStore().getKey(alias, null) as? SecretKey ?: run { clear(); return null }
+            return try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP))) }
+                val obj = JSONObject(String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP))))
+                DeviceCredentials(obj.getString("id"), obj.getString("token"), obj.getString("server"), obj.getString("ws")).also { cached = encrypted to it }
+            } catch (_: javax.crypto.AEADBadTagException) {
+                clear(); null
+            } catch (_: org.json.JSONException) {
+                clear(); null
+            } catch (_: IllegalArgumentException) {
+                clear(); null
+            }
+        }
+    }
+    fun clear() {
+        synchronized(Credentials) {
+            cached = null
+            prefs.edit().clear().commit()
+            val store = keyStore()
+            if (store.containsAlias(alias)) store.deleteEntry(alias)
+        }
+    }
+    companion object {
+        @Volatile private var cached: Pair<String, DeviceCredentials>? = null
     }
 }
 

@@ -1,12 +1,9 @@
 package org.nous.phonebridge
 
-import android.Manifest
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
-import android.content.ClipData
-import android.content.ClipboardManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
@@ -19,13 +16,14 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okhttp3.MediaType.Companion.toMediaType
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
@@ -41,7 +39,7 @@ class ServerInstrumentationTest {
     private var deviceId: String? = null
     private var scenario: ActivityScenario<MainActivity>? = null
     private var recoverySocket: WebSocket? = null
-    private val listener = "org.nous.phonebridge/org.nous.phonebridge.BridgeNotifications"
+    private val delivered = mutableListOf<Uri>()
     private fun shell(command: String): String = instrumentation.uiAutomation.executeShellCommand(command).use { parcel -> android.os.ParcelFileDescriptor.AutoCloseInputStream(parcel).bufferedReader().use { it.readText() } }
     private fun http(method: String, path: String, body: JSONObject? = null, admin: Boolean = true, expected: Int = 200): JSONObject {
         val builder = Request.Builder().url(server + path)
@@ -84,6 +82,42 @@ class ServerInstrumentationTest {
         key?.let { payload.put("idempotency_key", it) }
         return http("POST", "/v1/devices/$id/commands", payload)
     }
+    private fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private fun upload(id: String, name: String, mime: String, kind: String, bytes: ByteArray): JSONObject {
+        val url = "$server/v1/devices/$id/files".toHttpUrl().newBuilder().addQueryParameter("name", name).addQueryParameter("mime", mime)
+            .addQueryParameter("kind", kind).addQueryParameter("ttl_seconds", "300").build()
+        val request = Request.Builder().url(url).header("Authorization", "Bearer $adminToken").header("X-Content-SHA256", sha256(bytes))
+            .header("Idempotency-Key", UUID.randomUUID().toString()).post(bytes.toRequestBody("application/octet-stream".toMediaType())).build()
+        return BridgeHttp.client.newCall(request).execute().use {
+            assertEquals("Upload must be queued", 200, it.code)
+            JSONObject(it.body!!.string())
+        }
+    }
+    private fun read(uri: Uri): ByteArray = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+    private fun png(): ByteArray {
+        val bitmap = Bitmap.createBitmap(3, 2, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff336699.toInt()) }
+        return ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+    }
+    private fun deliver(id: String, name: String, mime: String, kind: String, bytes: ByteArray): JSONObject {
+        val result = terminal(upload(id, name, mime, kind, bytes).getString("id"))
+        assertEquals("files.receive", result.getString("op"))
+        assertEquals("succeeded", result.getString("status"))
+        val data = result.getJSONObject("data")
+        assertEquals(setOf("uri", "name", "size", "sha256", "mime", "kind"), data.keys().asSequence().toSet())
+        assertEquals(bytes.size.toLong(), data.getLong("size"))
+        assertEquals(sha256(bytes), data.getString("sha256"))
+        val uri = Uri.parse(data.getString("uri"))
+        delivered += uri
+        assertArrayEquals(bytes, read(uri))
+        val folder = if (kind == "image") "Pictures/PhoneBridge/" else "Download/PhoneBridge/"
+        context.contentResolver.query(uri, arrayOf(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.provider.MediaStore.MediaColumns.IS_PENDING, android.provider.MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)!!.use {
+            assertTrue(it.moveToFirst())
+            assertEquals(folder, it.getString(0))
+            assertEquals(0, it.getInt(1))
+            assertEquals(data.getString("name"), it.getString(2))
+        }
+        return data
+    }
     private fun terminal(id: String): JSONObject {
         var value = JSONObject()
         waitUntil { value = http("GET", "/v1/commands/$id"); value.getString("status") in setOf("succeeded", "failed", "expired") }
@@ -102,9 +136,6 @@ class ServerInstrumentationTest {
         waitUntil(5000) { BridgeService.current == null }
         shell("input keyevent KEYCODE_WAKEUP")
         shell("wm dismiss-keyguard")
-        shell("cmd notification disallow_listener $listener")
-        shell("cmd notification disallow_dnd ${context.packageName}")
-        waitUntil(5000) { BridgeNotifications.current == null }
         if (Build.VERSION.SDK_INT >= 33) shell("pm grant org.nous.phonebridge android.permission.POST_NOTIFICATIONS")
         assertEquals("ok", http("GET", "/healthz", admin = false).getString("status"))
     }
@@ -112,9 +143,7 @@ class ServerInstrumentationTest {
         recoverySocket?.cancel()
         scenario?.close()
         BridgeService.stop(context, true)
-        context.getSystemService(NotificationManager::class.java).cancel(777)
-        shell("cmd notification disallow_listener $listener")
-        shell("cmd notification disallow_dnd ${context.packageName}")
+        delivered.forEach { context.contentResolver.delete(it, null, null) }
         deviceId?.let { id ->
             BridgeHttp.client.newCall(Request.Builder().url("$server/v1/devices/$id").header("Authorization", "Bearer $adminToken").delete().build()).execute().close()
         }
@@ -140,17 +169,9 @@ class ServerInstrumentationTest {
         scenario = ActivityScenario.launch(MainActivity::class.java)
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { online(id) }
-        assertTrue("device.info" in capabilities(id))
-        assertFalse("notifications.list" in capabilities(id))
-        waitUntil { !http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_policy") }
-        shell("cmd notification allow_dnd ${context.packageName}")
-        waitUntil { http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_policy") }
-        assertFalse(http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_listener"))
-        shell("cmd notification disallow_dnd ${context.packageName}")
-        waitUntil { !http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_policy") }
-        DurableStore(context).use { store ->
-            try { NativeHandlers(context, store).execute("notifications.list", JSONObject()); fail("Listener permission required") } catch (e: BridgeFailure) { assertEquals("PERMISSION_REQUIRED", e.code) }
-        }
+        assertTrue(capabilities(id).containsAll(setOf("device.info", "debug.status", "files.receive")))
+        assertTrue(capabilities(id).none { it.startsWith("screen.") })
+        assertTrue(http("GET", "/v1/devices/$id").getJSONObject("permissions").has("accessibility"))
         val command = enqueue(id, "device.info", key = "device-info-dedup")
         val duplicate = enqueue(id, "device.info", key = "device-info-dedup")
         assertEquals(command.getString("id"), duplicate.getString("id"))
@@ -158,26 +179,19 @@ class ServerInstrumentationTest {
         assertEquals("succeeded", result.getString("status"))
         assertEquals(Build.MODEL, result.getJSONObject("data").getString("model"))
         assertEquals(Build.VERSION.SDK_INT, result.getJSONObject("data").getInt("sdk"))
-        shell("cmd notification allow_listener $listener")
-        waitUntil { BridgeNotifications.current != null && "notifications.list" in capabilities(id) }
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel("ci.notifications", "CI fixture", NotificationManager.IMPORTANCE_DEFAULT))
-        manager.notify(777, Notification.Builder(context, "ci.notifications").setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("CI permission notification").setContentText("Untrusted fixture content").build())
-        var key: String? = null
-        waitUntil {
-            val list = terminal(enqueue(id, "notifications.list", JSONObject().put("limit", 8)).getString("id"))
-            assertEquals("succeeded", list.getString("status"))
-            val items = list.getJSONObject("data").getJSONArray("notifications")
-            key = (0 until items.length()).map { items.getJSONObject(it) }.firstOrNull { it.optString("title") == "CI permission notification" }?.getString("key")
-            key != null
-        }
-        val dismissal = terminal(enqueue(id, "notifications.dismiss", JSONObject().put("key", key)).getString("id"))
-        assertEquals("succeeded", dismissal.getString("status"))
-        assertFalse(dismissal.getJSONObject("data").getBoolean("verified"))
-        waitUntil { BridgeNotifications.current?.activeNotifications?.none { it.key == key } == true }
-        shell("cmd notification disallow_listener $listener")
-        waitUntil { BridgeNotifications.current == null && "notifications.list" !in capabilities(id) }
-        assertFalse(http("GET", "/v1/devices/$id").getJSONObject("permissions").getBoolean("notification_listener"))
+        val prefix = "ci-${UUID.randomUUID().toString().take(8)}"
+        val binary = ByteArray(300_000) { ((it * 31 + 7) and 255).toByte() }
+        deliver(id, "$prefix-binary.bin", "application/octet-stream", "file", binary)
+        deliver(id, "$prefix-empty.txt", "text/plain", "file", byteArrayOf())
+        val image = png()
+        deliver(id, "$prefix-image.png", "image/png", "image", image)
+        val decoded = BitmapFactory.decodeByteArray(image, 0, image.size)
+        assertEquals(3, decoded.width)
+        val first = deliver(id, "$prefix-same.bin", "application/octet-stream", "file", "first".toByteArray())
+        val second = deliver(id, "$prefix-same.bin", "application/octet-stream", "file", "second, different".toByteArray())
+        assertNotEquals(first.getString("uri"), second.getString("uri"))
+        assertNotEquals(first.getString("name"), second.getString("name"))
+        assertArrayEquals("first".toByteArray(), read(Uri.parse(first.getString("uri"))))
         val eventId = DurableStore(context).use { it.event("ci.native_event", JSONObject().put("untrusted", true).put("value", "real durable outbox")) }
         BridgeService.refresh()
         waitUntil {
@@ -213,10 +227,6 @@ class ServerInstrumentationTest {
         deviceId = credentials.deviceId
         Credentials(context).save(credentials)
         scenario = ActivityScenario.launch(MainActivity::class.java)
-        val clipboard = context.getSystemService(ClipboardManager::class.java)
-        val baseline = "before execution ${UUID.randomUUID()}"
-        val requested = "execute once ${UUID.randomUUID()}"
-        scenario!!.onActivity { clipboard.setPrimaryClip(ClipData.newPlainText("CI", baseline)) }
         val incoming = ArrayBlockingQueue<JSONObject>(8)
         val opened = CountDownLatch(1)
         recoverySocket = BridgeHttp.client.newWebSocket(Request.Builder().url(credentials.wsUrl).header("Authorization", "Bearer ${credentials.token}").build(), object : WebSocketListener() {
@@ -229,20 +239,18 @@ class ServerInstrumentationTest {
             }
         })
         assertTrue(opened.await(10, TimeUnit.SECONDS))
-        waitUntil { online(credentials.deviceId) && "clipboard.set" in capabilities(credentials.deviceId) }
-        val queued = enqueue(credentials.deviceId, "clipboard.set", JSONObject().put("text", requested))
+        waitUntil { online(credentials.deviceId) && "device.info" in capabilities(credentials.deviceId) }
+        val queued = enqueue(credentials.deviceId, "device.info")
         val frame = incoming.poll(10, TimeUnit.SECONDS) ?: error("Real server did not deliver the recovery command")
         assertEquals("command", frame.getString("type"))
         assertEquals(queued.getString("id"), frame.getString("id"))
-        assertEquals("clipboard.set", frame.getString("op"))
-        assertEquals(requested, frame.getJSONObject("args").getString("text"))
+        assertEquals("device.info", frame.getString("op"))
         var expected: JSONObject? = null
         val unknownId = UUID.randomUUID().toString()
         DurableStore(context).use { store ->
             assertNull(store.begin(frame))
             if (completed) {
-                val data = NativeHandlers(context, store).execute(frame.getString("op"), frame.getJSONObject("args"))
-                assertTrue(data.getBoolean("verified"))
+                val data = NativeHandlers(context).execute(frame.getString("op"), frame.getJSONObject("args")).put("recovery_marker", UUID.randomUUID().toString())
                 expected = Results.ok(frame.getString("id"), data)
                 store.complete(frame.getString("id"), expected!!)
             }
@@ -252,12 +260,7 @@ class ServerInstrumentationTest {
         recoverySocket!!.cancel()
         recoverySocket = null
         waitUntil { !http("GET", "/v1/devices/${credentials.deviceId}").getBoolean("online") }
-        val afterLoss = if (completed) "changed after result send loss ${UUID.randomUUID()}" else baseline
-        scenario!!.onActivity {
-            assertEquals(if (completed) requested else baseline, clipboard.primaryClip!!.getItemAt(0).text.toString())
-            if (completed) clipboard.setPrimaryClip(ClipData.newPlainText("CI", afterLoss))
-            BridgeService.start(it)
-        }
+        scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { online(credentials.deviceId) }
         val result = terminal(frame.getString("id"))
         if (completed) {
@@ -267,7 +270,6 @@ class ServerInstrumentationTest {
             assertEquals("failed", result.getString("status"))
             assertEquals("AMBIGUOUS_STATE", result.getJSONObject("error").getString("code"))
         }
-        scenario!!.onActivity { assertEquals(afterLoss, clipboard.primaryClip!!.getItemAt(0).text.toString()) }
         DurableStore(context).use { store ->
             val cached = store.begin(frame)!!
             assertEquals(completed, cached.getBoolean("ok"))
@@ -278,8 +280,8 @@ class ServerInstrumentationTest {
         assertTrue(online(credentials.deviceId))
         assertNotNull(BridgeService.current)
     }
-    @Test fun completedClipboardResultLostBeforeSendIsReturnedOnlyOnRealServerReconnectReplay() = realServerRecovery(true)
-    @Test fun recoveredReservationReportsAmbiguityOnRealServerReplayWithoutClipboardExecutionOrUnknownResultFlood() = realServerRecovery(false)
+    @Test fun completedResultLostBeforeSendIsReturnedOnlyOnRealServerReconnectReplay() = realServerRecovery(true)
+    @Test fun recoveredReservationReportsAmbiguityOnRealServerReplayWithoutExecutionOrUnknownResultFlood() = realServerRecovery(false)
     @Test fun expiredServerGeneratedQrCannotBeClaimedOrParsed() {
         val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Expiry CI").put("ttl_seconds", 1))
         val payload = pairing.getJSONObject("qr_payload")

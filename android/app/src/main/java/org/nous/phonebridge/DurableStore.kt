@@ -13,7 +13,6 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE commands(id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, expires INTEGER NOT NULL, result TEXT, created INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE events(id TEXT PRIMARY KEY, payload TEXT NOT NULL, created INTEGER NOT NULL)")
-        db.execSQL("CREATE TABLE owned_calendar(id INTEGER PRIMARY KEY)")
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
     @Synchronized fun recover() {
@@ -101,16 +100,10 @@ class DurableStore(context: Context) : SQLiteOpenHelper(context, "bridge.sqlite3
         buildList { while (cursor.moveToNext()) add(JSONObject(cursor.getString(0))) }
     }
     @Synchronized fun ack(id: String) { writableDatabase.delete("events", "id=?", arrayOf(id)) }
-    @Synchronized fun ownCalendar(id: Long) {
-        val db = writableDatabase
-        db.insertWithOnConflict("owned_calendar", null, ContentValues().apply { put("id", id) }, SQLiteDatabase.CONFLICT_IGNORE)
-        db.execSQL("DELETE FROM owned_calendar WHERE id NOT IN (SELECT id FROM owned_calendar ORDER BY rowid DESC LIMIT 2048)")
-    }
-    @Synchronized fun isOwnCalendar(id: Long): Boolean = readableDatabase.rawQuery("SELECT id FROM owned_calendar WHERE id=?", arrayOf(id.toString())).use { it.moveToFirst() }
     @Synchronized fun clearAll() {
         writableDatabase.beginTransaction()
         try {
-            for (table in listOf("commands", "events", "owned_calendar")) writableDatabase.delete(table, null, null)
+            for (table in listOf("commands", "events")) writableDatabase.delete(table, null, null)
             writableDatabase.setTransactionSuccessful()
         } finally { writableDatabase.endTransaction() }
     }

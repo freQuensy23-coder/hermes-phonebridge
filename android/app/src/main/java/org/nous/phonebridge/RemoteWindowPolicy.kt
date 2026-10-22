@@ -9,7 +9,7 @@ internal interface RemoteWindowNodeAdapter<N> {
     fun child(node: N, index: Int): N?
 }
 
-internal enum class RemoteWindowKind { APPLICATION, SYSTEM, OTHER }
+internal enum class RemoteWindowKind { APPLICATION, SYSTEM, INPUT_METHOD, OTHER }
 
 internal data class RemoteWindowBounds(val left: Int, val top: Int, val right: Int, val bottom: Int) {
     val nonempty: Boolean get() = left < right && top < bottom
@@ -63,18 +63,22 @@ internal data class RemoteWindowSnapshot<N>(
     val root: N?
 )
 
-internal data class RemoteWindowTarget<N>(val root: N, val windowId: Int, val owner: String, val bounds: RemoteWindowBounds, val inputBounds: RemoteWindowBounds = bounds) {
+internal data class RemoteWindowTarget<N>(val root: N, val windowId: Int, val owner: String, val bounds: RemoteWindowBounds, val inputBounds: RemoteWindowBounds = bounds, val keyboards: List<RemoteWindowBounds> = emptyList()) {
     fun requireGesturePoint(x: Int, y: Int) {
         if (!inputBounds.contains(x, y)) failure("VALIDATION_ERROR", "Gesture coordinates must exclude native system bars and display cutouts")
+        if (keyboards.any { it.contains(x, y) }) failure("VALIDATION_ERROR", "Gesture coordinates must not touch the keyboard; use screen.input to type")
     }
 }
 
 internal object RemoteWindowPolicy {
+    const val MAX_DEPTH = 64
+    const val MAX_NODES = 2000
+    const val MAX_CHILDREN = 256
     fun <N : Any> assertSafeWindow(root: N, adapter: RemoteWindowNodeAdapter<N>) {
         var count = 0
         fun visit(node: N, depth: Int) {
             val children = adapter.childCount(node)
-            if (depth > 30 || ++count > 400 || children !in 0..100) failure("UNSUPPORTED", "Window exceeds complete password-guard traversal bound")
+            if (depth > MAX_DEPTH || ++count > MAX_NODES || children !in 0..MAX_CHILDREN) failure("UNSUPPORTED", "Window is too large to check for password fields")
             if (adapter.isPassword(node)) failure("UNSUPPORTED", "Password-bearing windows are excluded")
             for (index in 0 until children) {
                 val child = adapter.child(node, index) ?: failure("UNSUPPORTED", "Cannot inspect advertised window child")
@@ -106,7 +110,12 @@ internal object RemoteWindowPolicy {
         if (expectedOwner != null && owner != expectedOwner) failure("FOREGROUND_REQUIRED", "Selected window owner changed")
         if (!selected.active || !selected.focused || selected.kind != RemoteWindowKind.APPLICATION || !selected.bounds.nonempty) failure("UNSUPPORTED", "Selected window must be an active focused application with native bounds")
         val geometry = nativeGeometry?.takeIf { it.displayBounds.contains(selected.bounds) }
+        val keyboards = mutableListOf<RemoteWindowBounds>()
         for (window in windows) {
+            if (window.kind == RemoteWindowKind.INPUT_METHOD && !window.active && !window.focused && window.id != selectedId) {
+                if (window.bounds.nonempty) keyboards += window.bounds
+                continue
+            }
             val relevant = window.active || window.focused || window.kind != RemoteWindowKind.SYSTEM || !window.bounds.nonempty || window.bounds.overlaps(selected.bounds)
             if (!relevant) continue
             val node = window.root ?: failure("UNSUPPORTED", "Cannot inspect relevant window")
@@ -121,12 +130,12 @@ internal object RemoteWindowPolicy {
                 continue
             }
             if (protectedOwner(otherOwner)) failure("UNSUPPORTED", "Protected UI window is present")
-            if (window.kind != RemoteWindowKind.APPLICATION) failure("UNSUPPORTED", "System, input method and overlay windows are excluded")
+            if (window.kind != RemoteWindowKind.APPLICATION) failure("UNSUPPORTED", "A system or overlay window covers the app")
             if ((window.active || window.focused) && window.id != selectedId) failure("AMBIGUOUS_STATE", "Active or focused window differs from selected window")
             if (otherOwner != owner) failure("UNSUPPORTED", "Relevant window has a different owner")
             if (window.id != selectedId && window.bounds.overlaps(selected.bounds)) failure("UNSUPPORTED", "Another window overlaps the selected native window")
             assertSafeWindow(node, adapter)
         }
-        return RemoteWindowTarget(selectedRoot, selectedId, owner, selected.bounds, geometry?.inputBounds?.intersect(selected.bounds) ?: selected.bounds)
+        return RemoteWindowTarget(selectedRoot, selectedId, owner, selected.bounds, geometry?.inputBounds?.intersect(selected.bounds) ?: selected.bounds, keyboards)
     }
 }

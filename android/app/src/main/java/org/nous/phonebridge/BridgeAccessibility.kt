@@ -60,10 +60,10 @@ class BridgeAccessibility : AccessibilityService() {
     fun nodes(root: AccessibilityNodeInfo, includePasswords: Boolean = false): List<AccessibilityNodeInfo> {
         val result = ArrayList<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo, depth: Int) {
-            if (depth > 30 || result.size >= 400) return
+            if (depth > MAX_DEPTH || result.size >= MAX_NODES) return
             if (node.isPassword && !includePasswords) return
             result.add(node)
-            for (i in 0 until node.childCount.coerceAtMost(100)) node.getChild(i)?.let { visit(it, depth + 1) }
+            for (i in 0 until node.childCount.coerceAtMost(MAX_CHILDREN)) node.getChild(i)?.let { visit(it, depth + 1) }
         }
         visit(root, 0)
         return result
@@ -138,6 +138,7 @@ class BridgeAccessibility : AccessibilityService() {
             val kind = when (window.type) {
                 android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> RemoteWindowKind.APPLICATION
                 android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM -> RemoteWindowKind.SYSTEM
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD -> RemoteWindowKind.INPUT_METHOD
                 else -> RemoteWindowKind.OTHER
             }
             RemoteWindowSnapshot(window.id, kind, window.isActive, window.isFocused, RemoteWindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom), window.root)
@@ -167,15 +168,23 @@ class BridgeAccessibility : AccessibilityService() {
                 args.only("debug_session", "expected_package")
                 screenCall(session) {
                     val root = remoteRoot(args.string("expected_package", 256, false)).root
+                    val all = nodes(root)
+                    val informative = all.filter { node ->
+                        node.isVisibleToUser && (!node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank() || node.isClickable || node.isLongClickable || node.isEditable || node.isCheckable || node.isScrollable)
+                    }
                     val result = JSONArray()
-                    for (node in nodes(root)) {
+                    var bytes = 0
+                    for (node in informative) {
                         val bounds = Rect().also { node.getBoundsInScreen(it) }
-                        val value = JSONObject().put("resource_id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString() ?: "").put("text", node.text?.toString()?.take(256) ?: "").put("description", node.contentDescription?.toString()?.take(256) ?: "").put("clickable", node.isClickable).put("editable", node.isEditable).put("checked", node.isChecked).put("enabled", node.isEnabled).put("visible", node.isVisibleToUser).put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
-                        if (result.length() >= 48 || result.toString().toByteArray().size + value.toString().toByteArray().size > 24000) break
+                        val value = JSONObject().put("resource_id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString() ?: "").put("text", node.text?.toString()?.take(256) ?: "").put("description", node.contentDescription?.toString()?.take(256) ?: "").put("clickable", node.isClickable).put("editable", node.isEditable).put("scrollable", node.isScrollable).put("checked", node.isChecked).put("enabled", node.isEnabled).put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
+                        val size = value.toString().toByteArray().size
+                        if (result.length() >= TREE_NODES || bytes + size > TREE_BYTES) break
+                        bytes += size
                         result.put(value)
                     }
                     guard()
-                    JSONObject().put("package", root.packageName).put("revision", revision.get()).put("nodes", result).put("bounded", true).put("password_nodes_excluded", true).put("untrusted", true)
+                    val truncated = result.length() < informative.size || all.size >= MAX_NODES
+                    JSONObject().put("package", root.packageName).put("revision", revision.get()).put("nodes", result).put("truncated", truncated).put("password_nodes_excluded", true).put("untrusted", true)
                 }
             }
             "screen.input" -> {
@@ -332,6 +341,11 @@ class BridgeAccessibility : AccessibilityService() {
         } finally { if (bitmap !== original) bitmap.recycle() }
     }
     companion object {
+        const val MAX_DEPTH = RemoteWindowPolicy.MAX_DEPTH
+        const val MAX_NODES = RemoteWindowPolicy.MAX_NODES
+        const val MAX_CHILDREN = RemoteWindowPolicy.MAX_CHILDREN
+        const val TREE_NODES = 100
+        const val TREE_BYTES = 60000
         @Volatile var current: BridgeAccessibility? = null
         val blockedPackages = setOf("com.android.systemui", "com.android.settings", "com.google.android.gms", "com.samsung.android.biometrics.app.setting", "com.android.permissioncontroller", "com.google.android.permissioncontroller", "com.samsung.android.permissioncontroller", "com.android.packageinstaller", "com.google.android.packageinstaller", "com.android.credentials", "com.android.credentialmanager", "com.samsung.android.settings", "com.samsung.android.knox.containeragent")
     }

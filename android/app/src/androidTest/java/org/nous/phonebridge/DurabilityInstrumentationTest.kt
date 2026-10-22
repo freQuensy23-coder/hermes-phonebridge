@@ -1,12 +1,9 @@
 package org.nous.phonebridge
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.provider.AlarmClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.*
@@ -131,47 +128,15 @@ class DurabilityInstrumentationTest {
         assertNull(credentials.load())
         assertTrue(prefs.all.isEmpty())
     }
-    @Test fun nativePermissionsAndUnsupportedFeaturesAreHonest() {
-        val handlers = NativeHandlers(context, store)
+    @Test fun advertisedCapabilitiesAreLimitedToScreenControlAndFiles() {
+        val handlers = NativeHandlers(context)
         val caps = Access.capabilities(context).let { array -> (0 until array.length()).map { array.getString(it) }.toSet() }
-        assertTrue("device.info" in caps)
-        if (!Access.has(context, Manifest.permission.READ_CONTACTS)) {
-            assertFalse("contacts.list" in caps)
-            try { handlers.execute("contacts.list", JSONObject()); fail("Contacts permission required") } catch (e: BridgeFailure) { assertEquals("PERMISSION_REQUIRED", e.code) }
+        assertTrue(caps.containsAll(setOf("device.info", "debug.status", "files.receive")))
+        if (!DebugAccess.snapshot().enabled) assertTrue(caps.none { it.startsWith("screen.") })
+        for (op in listOf("shell.execute", "contacts.list", "sms.send", "clock.alarms.create", "calendar.delete", "notifications.list")) {
+            try { handlers.execute(op, JSONObject()); fail("$op must not have a handler") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
         }
-        try { handlers.execute("shell.execute", JSONObject()); fail("No remote shell handler") } catch (e: BridgeFailure) { assertEquals("UNSUPPORTED", e.code) }
-        assertTrue(GoogleClockAdapter().supported("unknown", 1).isEmpty())
-        assertTrue(SamsungClockAdapter().supported("unknown", 1).isEmpty())
-        assertTrue(AospClockAdapter().supported("unknown", 1).isEmpty())
-    }
-    @Test fun emptyNameZeroCodeAndAllUnidentifiedClockProfilesStayUnadvertised() {
-        for (adapter in listOf(AospClockAdapter(), GoogleClockAdapter(), SamsungClockAdapter())) {
-            for ((version, code) in listOf("" to 0L, "unknown" to 1L, "" to 1L, "unknown" to 0L)) {
-                assertTrue(adapter.supported(version, code).isEmpty())
-            }
-        }
-        assertTrue(ClockAdapters(context).capabilities().isEmpty())
-        val providers = NativeClocks(context).providers().getJSONArray("providers")
-        for (index in 0 until providers.length()) {
-            assertEquals(0, providers.getJSONObject(index).getJSONArray("ui_actions").length())
-            assertFalse(providers.getJSONObject(index).getJSONObject("validation").getBoolean("ui_implemented"))
-        }
-    }
-    @Test fun existingClockIntentsAreTypedAndNeverOwnClockSchedules() {
-        val clocks = NativeClocks(context)
-        val providers = clocks.installed()
-        for (pkg in providers) {
-            val action = Intent(AlarmClock.ACTION_SET_ALARM).setPackage(pkg)
-            if (context.packageManager.resolveActivity(action, 0) != null) {
-                val intent = clocks.intent("clock.alarms.create", Arguments(JSONObject().put("package", pkg).put("hour", 7).put("minute", 45).put("label", "CI typed intent").put("days", JSONArray(listOf(1, 7)))))
-                assertEquals(AlarmClock.ACTION_SET_ALARM, intent.action)
-                assertEquals(pkg, intent.`package`)
-                assertEquals(7, intent.getIntExtra(AlarmClock.EXTRA_HOUR, -1))
-                assertEquals(45, intent.getIntExtra(AlarmClock.EXTRA_MINUTES, -1))
-                assertEquals(arrayListOf(2, 1), intent.getIntegerArrayListExtra(AlarmClock.EXTRA_DAYS))
-                assertTrue(intent.getBooleanExtra(AlarmClock.EXTRA_SKIP_UI, false))
-            }
-        }
+        try { handlers.execute("files.receive", JSONObject()); fail("files.receive needs pairing credentials") } catch (e: BridgeFailure) { assertEquals("AMBIGUOUS_STATE", e.code) }
     }
     @Test fun stopAndDisconnectPersistAcrossRestoreReceiver() {
         val value = DeviceCredentials("fixture-id", "A".repeat(43), "https://phone.example/", "wss://phone.example/v1/device/ws")
