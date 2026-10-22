@@ -47,7 +47,7 @@ def test_claim_is_atomic_across_connections(store_factory):
     with ThreadPoolExecutor(max_workers=2) as pool:
         values = list(pool.map(claim, [first, second]))
     assert values.count("PAIRING_INVALID") == 1
-    assert len(first.devices()["devices"]) == 1
+    assert first.connection.execute("SELECT count(*) FROM devices WHERE revoked_at IS NULL").fetchone()[0] == 1
     assert first.pairing(pairing["id"])["status"] == "claimed"
 
 
@@ -313,3 +313,15 @@ def test_failed_result_cannot_contain_success_data(store_factory):
         store.result(device_id, session, bad)
     assert invalid.value.code == "INVALID_RESULT"
     assert store.command(command["id"])["status"] == "sent"
+
+
+def test_device_list_shows_only_connected_phones(store_factory):
+    store = store_factory()
+    _, _, online_id, _ = provision(store)
+    _, offline_claim, offline_id, offline_session = provision(store)
+    store.disconnect(offline_id, offline_session)
+    assert [device["id"] for device in store.devices()["devices"]] == [online_id]
+    assert store.device(offline_id)["online"] is False
+    device_id, session = store.connect(offline_claim["device_token"])
+    store.hello(device_id, session, HelloFrame(type="hello", version="0.1.0", capabilities=["device.info"], permissions={}))
+    assert [device["id"] for device in store.devices()["devices"]] == [online_id, offline_id]

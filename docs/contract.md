@@ -22,7 +22,7 @@ Admin routes need `Authorization: Bearer <admin token>`; credentials in query st
 - `POST /v1/pairings {name, ttl_seconds≤900}` → `{id, expires_at, qr_payload:{v:1, server, token, expires_at}}`. `GET /v1/pairings/{id}` → status. `DELETE` revokes the pairing; if it was already claimed the paired device is revoked too.
 - The CLI renders `qr_payload` as a QR PNG and/or as a connection code: `pb1:` followed by the unpadded base64url encoding of the same compact JSON. The app accepts either and applies the same checks (version, HTTPS origin, expiry, hostname confirmation).
 - `POST /v1/pair/claim {token, name, platform:"android"}` (public, one use, rate limited per client) → `{device_id, device_token, ws_url}`.
-- `GET /v1/devices`, `GET /v1/devices/{id}` → `{id, name, online, version, capabilities, permissions}`. `DELETE` revokes the device and tells a connected phone immediately.
+- `GET /v1/devices` → connected phones only, each `{id, name, online, version, capabilities, permissions}`; a paired phone that is offline is left out until it reconnects. `GET /v1/devices/{id}` returns any paired device, online or not. `DELETE` revokes the device and tells a connected phone immediately.
 - `POST /v1/devices/{id}/commands {op, args, ttl_seconds≤86400, idempotency_key?}` → `{id, status:"queued", expires_at}`. The op must be advertised by the device. `files.receive` cannot be created here.
 - `GET /v1/commands/{id}` → `{id, device_id, op, status, data, error, expires_at}`; status is `queued`, `sent`, `succeeded`, `failed` or `expired`.
 - `POST /v1/devices/{id}/files` and `GET /v1/device/files/{transfer}`: see file delivery.

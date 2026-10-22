@@ -314,9 +314,10 @@ class Store:
             self.connection.execute("SELECT 1").fetchone()
 
     def devices(self):
+        """Connected phones only; an offline phone stays paired and is listed again once it reconnects."""
         with self.lock:
             rows = self.connection.execute("SELECT * FROM devices WHERE revoked_at IS NULL ORDER BY created_at,id").fetchall()
-            return {"devices": [self._device_view(row) for row in rows]}
+            return {"devices": [view for view in map(self._device_view, rows) if view["online"]]}
 
     def device(self, device_id):
         with self.lock:

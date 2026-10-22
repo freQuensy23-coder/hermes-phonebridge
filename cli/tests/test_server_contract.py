@@ -33,7 +33,8 @@ def bridge_server(tmp_path):
     listener.listen(128)
     url = f"http://127.0.0.1:{listener.getsockname()[1]}"
     settings = ServerSettings(admin_token=ADMIN_TOKEN, public_url=url, allow_insecure=True,
-                              db_path=tmp_path / "state" / "bridge.sqlite3", http_rate=10000, claim_rate=2000)
+                              db_path=tmp_path / "state" / "bridge.sqlite3", http_rate=10000, claim_rate=2000,
+                              max_connections=1000, online_timeout=3600)
     application = create_app(settings)
     server = uvicorn.Server(uvicorn.Config(application, access_log=False, log_config=None, ws="websockets-sansio"))
     worker = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
@@ -109,9 +110,8 @@ def test_real_server_maximum_device_collection_has_no_drops(bridge_server, envir
     permissions = {f"p{index:03d}" + "x" * 124: bool(index % 2) for index in range(64)}
     capabilities = sorted(OPERATIONS)
     for _ in range(store.settings.max_devices):
-        device_id, session = enroll(store, name="😀" * 128, capabilities=capabilities,
-                                    permissions=permissions, version="1.1.1+" + "x" * 26)
-        store.disconnect(device_id, session)
+        enroll(store, name="😀" * 128, capabilities=capabilities,
+               permissions=permissions, version="1.1.1+" + "x" * 26)
     expected = store.devices()
     assert len(expected["devices"]) == store.settings.max_devices == 1000
     assert len(encode_json(expected).encode("utf-8")) > MAX_RESPONSE
