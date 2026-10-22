@@ -13,6 +13,14 @@ cleanup() {
   python3 ci/prepare_emulator_server.py stop
 }
 trap cleanup EXIT
+settle_emulator() {
+  adb shell settings put global hide_error_dialogs 1 || true
+  adb shell am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS >/dev/null 2>&1 || true
+  adb shell input keyevent KEYCODE_WAKEUP || true
+  adb shell wm dismiss-keyguard || true
+  adb shell input keyevent KEYCODE_HOME || true
+}
+settle_emulator
 (
   cd android
   chmod +x gradlew
@@ -26,8 +34,10 @@ PHONEBRIDGE_URL=http://127.0.0.1:18940 PHONEBRIDGE_TOKEN="$admin_token" \
   phonebridge pair --name QR-CI --ttl 900 --qr "$RUNNER_TEMP/qr-fixture/pairing.png" > "$RUNNER_TEMP/qr-fixture/pairing.json"
 python3 -m http.server 18941 --protocol HTTP/1.1 --bind 127.0.0.1 --directory "$RUNNER_TEMP/qr-fixture" > "$RUNNER_TEMP/qr-fixture-http.log" 2>&1 &
 fixture_pid=$!
+settle_emulator
+(
 cd android
-./gradlew --no-daemon connectedDebugAndroidTest \
+./gradlew --no-daemon :app:connectedDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.serverUrl=http://10.0.2.2:18940 \
   "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
   "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \
@@ -35,3 +45,4 @@ cd android
   -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DebugControlInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.qrFixtureUrl=http://10.0.2.2:18941/pairing.png
+)
