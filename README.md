@@ -9,7 +9,7 @@ Ask Hermes to check something in a phone app, type a reply, or deliver a report.
 | Read visible text, take screenshots, tap, swipe, type, press Back/Home/Recents | Save documents to `Download/PhoneBridge` and images to `Pictures/PhoneBridge` |
 | Requires Android Accessibility and a duration chosen on the phone | Works while connected, without Accessibility |
 
-Android 12 or newer. No root, ADB or inbound phone port. The phone opens an authenticated WebSocket to your HTTPS server. This is a remote-control companion, not a chat app or an on-device model.
+Android 12 or newer. No root, ADB or inbound phone port. The phone opens an authenticated WebSocket to your HTTPS server. PhoneBridge is a remote-control companion for a server-hosted agent.
 
 ## What it looks like
 
@@ -49,7 +49,9 @@ Put nginx with a valid TLS certificate in front of it. Expose only `/v1/pair/cla
 
 ### 2. Pair the phone
 
-Install a trusted APK on the phone. On the server, in another terminal with the virtual environment active:
+Install an APK signed with a private key you trust. For your own phone, build the debug APK under [Build and check](#build-and-check); it uses your local signing key. **Replace the old preview APK** as described under [Security and preview builds](#security-and-preview-builds).
+
+On the server, in another terminal with the virtual environment active:
 
 ```sh
 export PHONEBRIDGE_URL='http://127.0.0.1:18940'
@@ -75,12 +77,12 @@ Use `phonebridge install-skill --replace` to update an existing installation. Th
 Replace `DEVICE` with the ID printed by `phonebridge devices list`.
 
 ```sh
-phonebridge files send DEVICE ./report.pdf
-phonebridge images send DEVICE ./photo.jpg
-phonebridge screen tree DEVICE
+phonebridge files send DEVICE ./report.pdf --wait
+phonebridge images send DEVICE ./photo.jpg --wait
+phonebridge screen tree DEVICE --wait
 phonebridge screen screenshot DEVICE --output /private/path/screen.jpg
-phonebridge screen input DEVICE --text 'Hello from Hermes'
-phonebridge screen global DEVICE --action home
+phonebridge screen input DEVICE --text 'Hello from Hermes' --wait
+phonebridge screen global DEVICE --action home --wait
 ```
 
 Screen commands require active screen access. Typing targets the focused field unless you pass `--resource-id`. Screenshots are scaled; use the returned native screen bounds when choosing tap coordinates. A dispatched action is not proof the desired UI change happened: inspect the screen again. See [screen control](docs/screen-control.md), [file delivery](docs/file-delivery.md) and [CLI commands](cli/README.md).
