@@ -125,7 +125,7 @@ def test_pair_file_failure_retains_pairing_id(tmp_path, wire):
 
 
 def test_pair_requires_name_and_png_destination(wire):
-    for args in (["pair"], ["pair", "--name", "Pixel"], ["pair", "--qr", "scan.png"]):
+    for args in (["pair"], ["pair", "--name", "Pixel"], ["pair", "--qr", "scan.png"], ["pair", "--code"]):
         with pytest.raises(BridgeError):
             dispatch(parser().parse_args(args), wire.client)
     assert not wire.requests
@@ -153,3 +153,47 @@ def test_oversized_payload_refused_with_pairing_id(tmp_path, wire):
     assert caught.value.code == "INVALID_RESPONSE"
     assert caught.value.details["pairing_id"] == "pair"
     assert not (tmp_path / "pair.png").exists()
+
+
+def decode_code(code):
+    import base64
+
+    assert code.startswith("pb1:")
+    body = code[4:]
+    return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+
+
+def test_pair_code_only_prints_copyable_code(wire, environment, monkeypatch, capsys):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    response = pairing(int(time.time()) + 300)
+    wire.respond(response)
+    assert main(["pair", "--name", "Pixel", "--code"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert set(output) == {"id", "expires_at", "status", "pairing_code"}
+    assert "qr_path" not in output
+    assert decode_code(output["pairing_code"]) == response["qr_payload"]
+    assert all(char.isalnum() or char in "-_:" for char in output["pairing_code"])
+
+
+def test_pair_code_and_qr_carry_the_same_pairing(tmp_path, wire, environment, monkeypatch, capsys):
+    monkeypatch.setenv("PHONEBRIDGE_URL", wire.url)
+    monkeypatch.setenv("PHONEBRIDGE_TOKEN", wire.client.settings.token)
+    response = pairing(int(time.time()) + 300)
+    wire.respond(response)
+    path = tmp_path / "scan.png"
+    assert main(["pair", "--name", "Pixel", "--qr", str(path), "--code"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["qr_path"] == str(path)
+    decoded = zxingcpp.read_barcode(Image.open(path).convert("RGB"))
+    assert decode_code(output["pairing_code"]) == json.loads(decoded.text)
+    assert len(wire.requests) == 1
+
+
+def test_expired_pairing_never_yields_a_code(wire):
+    wire.client.wall_clock = lambda: 3000
+    wire.respond(pairing(2000))
+    with pytest.raises(BridgeError) as caught:
+        dispatch(parser().parse_args(["pair", "--name", "Pixel", "--code"]), wire.client)
+    assert caught.value.code == "PAIRING_EXPIRED"
+    assert caught.value.details["pairing_id"] == "pair"

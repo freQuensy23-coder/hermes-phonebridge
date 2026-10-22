@@ -7,7 +7,7 @@ from . import files
 from .client import Client, Settings, bounded_number, error_code, safe_message, segment
 from .errors import BridgeError
 from .jsonio import object_args, sanitize
-from .local import install_skill, pairing_qr
+from .local import install_skill, pairing_code, pairing_qr
 from .screen import COORDINATE_MAX, COORDINATE_MIN, GLOBAL_ACTIONS, export_screenshot, screen_args
 
 
@@ -65,10 +65,11 @@ def parser():
     commands = root.add_subparsers(dest="command", required=True)
     install = commands.add_parser("install-skill", help="Install the bundled skill in HERMES_HOME")
     install.add_argument("--replace", action="store_true", help="Replace an older installed PhoneBridge skill")
-    pair = commands.add_parser("pair", help="Create a one-use local QR PNG or inspect/revoke a pairing")
+    pair = commands.add_parser("pair", help="Create a one-use pairing as a local QR PNG and/or a copyable code, or inspect/revoke a pairing")
     pair.add_argument("--name")
     pair.add_argument("--ttl", type=integer(1, 900), default=300)
-    pair.add_argument("--qr")
+    pair.add_argument("--qr", help="Write the QR to this new PNG path")
+    pair.add_argument("--code", action="store_true", help="Print a one-use connection code to paste in the app")
     pairing_actions = pair.add_subparsers(dest="pair_action")
     for action in ("status", "revoke"):
         pairing_actions.add_parser(action).add_argument("id")
@@ -149,11 +150,14 @@ def dispatch(options, client):
             return client.request("GET", f"/v1/pairings/{segment(options.id)}")
         if options.pair_action == "revoke":
             return revoke(client, f"/v1/pairings/{segment(options.id)}", options.id)
-        if not options.name or len(options.name) > 128 or not options.name.strip() or any(ord(char) < 32 for char in options.name) or not options.qr:
-            raise BridgeError("VALIDATION_ERROR", "Pair requires a bounded --name and a new --qr PNG path.")
+        if not options.name or len(options.name) > 128 or not options.name.strip() or any(ord(char) < 32 for char in options.name) or not (options.qr or options.code):
+            raise BridgeError("VALIDATION_ERROR", "Pair requires a bounded --name and --qr PNG path, --code, or both.")
         result = client.request("POST", "/v1/pairings", {"name": options.name, "ttl_seconds": options.ttl})
         try:
-            return pairing_qr(result, options.qr, client.wall_clock())
+            output = pairing_qr(result, options.qr, client.wall_clock()) if options.qr else {}
+            if options.code:
+                output.update(pairing_code(result, client.wall_clock()))
+            return output
         except BridgeError as error:
             if isinstance(result.get("id"), str):
                 error.details["pairing_id"] = result["id"]

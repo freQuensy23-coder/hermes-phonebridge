@@ -34,6 +34,7 @@ umask 077
 mkdir -p "$RUNNER_TEMP/qr-fixture"
 PHONEBRIDGE_URL=http://127.0.0.1:18940 PHONEBRIDGE_TOKEN="$admin_token" \
   phonebridge pair --name QR-CI --ttl 900 --qr "$RUNNER_TEMP/qr-fixture/pairing.png" > "$RUNNER_TEMP/qr-fixture/pairing.json"
+pairing_code=$(PHONEBRIDGE_URL=http://127.0.0.1:18940 PHONEBRIDGE_TOKEN="$admin_token" phonebridge pair --name Tour-CI --ttl 900 --code | python3 -c 'import json,sys; print(json.load(sys.stdin)["pairing_code"])')
 python3 -m http.server 18941 --protocol HTTP/1.1 --bind 127.0.0.1 --directory "$RUNNER_TEMP/qr-fixture" > "$RUNNER_TEMP/qr-fixture-http.log" 2>&1 &
 fixture_pid=$!
 settle_emulator
@@ -46,6 +47,7 @@ cd android
   -Pandroid.testInstrumentationRunnerArguments.automaticDebugCi=true \
   -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DebugControlInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest \
   -Pandroid.testInstrumentationRunnerArguments.screenshotTour=true \
+  "-Pandroid.testInstrumentationRunnerArguments.pairingCode=$pairing_code" \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.qrFixtureUrl=http://10.0.2.2:18941/pairing.png
 )

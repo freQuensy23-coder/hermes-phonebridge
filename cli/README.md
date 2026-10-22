@@ -4,7 +4,7 @@
 
 ## Commands
 
-    phonebridge pair --name 'My phone' --ttl 300 --qr /private/new/pair.png
+    phonebridge pair --name 'My phone' --ttl 300 --qr /private/new/pair.png [--code]
     phonebridge pair status PAIRING_ID
     phonebridge pair revoke PAIRING_ID
     phonebridge devices list | show DEVICE | revoke DEVICE
@@ -19,6 +19,8 @@
     phonebridge install-skill [--replace]
 
 Screen helpers: `tree` (`--package` optional), `screenshot` (`--package`, `--output new.jpg` writes a private JPEG), `tap` (`--package --x --y`), `swipe` (`--package --x1 --y1 --x2 --y2 [--duration-ms]`), `input` (`--package --resource-id --text [--expected-text]`), `global` (`--action back|home|recents|notifications|quick_settings`). See [../docs/screen-control.md](../docs/screen-control.md).
+
+`pair --code` adds a `pairing_code` (`pb1:` followed by base64url of the QR payload) that can be pasted in the app instead of scanning the QR; `--qr` can then be omitted. Both are one-use and expire after `--ttl` seconds.
 
 `files send` uploads a regular local file (no symlinks, at most 32 MiB) and queues delivery; `images send` and `--image` save PNG, JPEG, WebP or GIF to the gallery. See [../docs/file-delivery.md](../docs/file-delivery.md).
 

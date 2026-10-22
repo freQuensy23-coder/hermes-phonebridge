@@ -46,6 +46,7 @@ class ScreenshotTourTest {
     private lateinit var server: String
     private lateinit var publicServer: String
     private lateinit var adminToken: String
+    private lateinit var pairingCode: String
     private var deviceId: String? = null
     private var originalServices: String? = null
     private var scenario: ActivityScenario<MainActivity>? = null
@@ -164,6 +165,7 @@ class ScreenshotTourTest {
         server = arguments.getString("serverUrl") ?: error("serverUrl required")
         publicServer = arguments.getString("expectedPublicServerUrl") ?: error("expectedPublicServerUrl required")
         adminToken = arguments.getString("adminToken") ?: error("adminToken required")
+        pairingCode = arguments.getString("pairingCode") ?: error("pairingCode from phonebridge pair --code required")
         BridgeService.stop(context, true)
         waitUntil { BridgeService.current == null }
         originalServices = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
@@ -172,6 +174,7 @@ class ScreenshotTourTest {
         shell("input keyevent KEYCODE_WAKEUP")
         shell("wm dismiss-keyguard")
         if (Build.VERSION.SDK_INT >= 33) shell("pm grant org.nous.phonebridge android.permission.POST_NOTIFICATIONS")
+        context.getSystemService(android.app.NotificationManager::class.java).cancelAll()
         shell("rm -rf $directory")
         shell("mkdir -p $directory")
     }
@@ -190,16 +193,19 @@ class ScreenshotTourTest {
         showMain()
         snap("01-not-paired")
 
-        val pairing = http("POST", "/v1/pairings", JSONObject().put("name", "Pixel demo").put("ttl_seconds", 300))
-        val qr = PairingQr.parse(pairing.getJSONObject("qr_payload").toString(), false)
-        val claimed = BridgeHttp.claim(qr, "Pixel demo", false)
+        scenario!!.onActivity { activity -> activity.findViewById<android.widget.EditText>(R.id.pairing_code).setText(pairingCode) }
+        tap(reveal("org.nous.phonebridge:id/pair_with_code"))
+        waitUntil { nodes().any { it.viewIdResourceName == "android:id/button1" && it.isVisibleToUser } }
+        allowCapture()
+        snap("02-pair-with-code")
+        tap(nodes().single { it.viewIdResourceName == "android:id/button1" })
+        waitUntil { Credentials(context).load() != null }
+        val claimed = Credentials(context).load()!!
         deviceId = claimed.deviceId
-        Credentials(context).save(claimed)
-        BridgeService.start(context)
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").optBoolean("online") }
         showMain()
         waitUntil { nodes().any { it.text?.toString()?.startsWith("Status: Connected") == true } }
-        snap("02-connected")
+        snap("03-connected")
 
         shell("settings put secure enabled_accessibility_services $component")
         shell("settings put secure accessibility_enabled 1")
@@ -208,27 +214,27 @@ class ScreenshotTourTest {
         tap(reveal("org.nous.phonebridge:id/debug_enable_10"))
         waitUntil { nodes().any { it.viewIdResourceName == "android:id/button1" && it.isVisibleToUser } }
         allowCapture()
-        snap("03-consent-dialog")
+        snap("04-consent-dialog")
         tap(nodes().single { it.viewIdResourceName == "android:id/button1" })
         waitUntil { DebugAccess.snapshot().enabled }
         reveal("org.nous.phonebridge:id/debug_status")
-        snap("04-screen-control-on")
-        notificationShade("05-ongoing-notification")
+        snap("05-screen-control-on")
+        notificationShade("06-ongoing-notification")
 
         val image = send("hermes-photo.png", "image/png", "image", sampleImage())
         val document = send("meeting-notes.txt", "text/plain", "file", "Agenda\n1. Ship PhoneBridge MVP\n2. Review screenshots\n".toByteArray())
-        writeFile("$directory/06-delivery-results.json", JSONObject().put("image", image).put("document", document).toString(2).toByteArray())
-        notificationShade("06-files-received")
+        writeFile("$directory/07-delivery-results.json", JSONObject().put("image", image).put("document", document).toString(2).toByteArray())
+        notificationShade("07-files-received")
 
         val session = DebugAccess.snapshot().debugSession ?: error("Screen control session missing")
         shell("am start -W -n $fixture/.FixtureActivity")
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() == fixture }
-        snap("07-app-on-phone")
+        snap("08-app-on-phone")
         val tree = command("screen.tree", JSONObject().put("debug_session", session).put("expected_package", fixture))
-        writeFile("$directory/08-agent-screen-tree.json", tree.toString(2).toByteArray())
+        writeFile("$directory/09-agent-screen-tree.json", tree.toString(2).toByteArray())
         if (Build.VERSION.SDK_INT >= 34) {
             val capture = command("screen.screenshot", JSONObject().put("debug_session", session).put("expected_package", fixture))
-            writeFile("$directory/09-agent-screenshot.jpg", Base64.decode(capture.getString("base64"), Base64.NO_WRAP))
+            writeFile("$directory/10-agent-screenshot.jpg", Base64.decode(capture.getString("base64"), Base64.NO_WRAP))
         }
         val nodes = tree.getJSONArray("nodes")
         val button = (0 until nodes.length()).map { nodes.getJSONObject(it) }.single { it.optString("resource_id") == "$fixture:id/increment" }
@@ -236,6 +242,6 @@ class ScreenshotTourTest {
         command("screen.tap", JSONObject().put("debug_session", session).put("expected_package", fixture)
             .put("x", (bounds.getInt(0) + bounds.getInt(2)) / 2).put("y", (bounds.getInt(1) + bounds.getInt(3)) / 2))
         waitUntil { nodes().any { it.text?.toString() == "Counter: 1" } }
-        snap("10-after-agent-tap")
+        snap("11-after-agent-tap")
     }
 }

@@ -17,11 +17,13 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.google.zxing.integration.android.IntentIntegrator
+import okhttp3.HttpUrl
 import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var name: EditText
+    private lateinit var code: EditText
     private lateinit var debugStatus: TextView
     private var debugDialog: AlertDialog? = null
     private val worker = Executors.newSingleThreadExecutor()
@@ -57,6 +59,25 @@ class MainActivity : Activity() {
             requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
             if (!Access.has(this, Manifest.permission.CAMERA)) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else scan()
         }
+        code = EditText(this).apply {
+            id = R.id.pairing_code
+            hint = "Or paste a connection code (pb1:…)"
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            isSingleLine = true
+            isSaveEnabled = false
+            filters = arrayOf(android.text.InputFilter.LengthFilter(8192))
+        }
+        layout.addView(code)
+        layout.addView(Button(this).apply {
+            text = "Connect with code"
+            id = R.id.pair_with_code
+            setOnClickListener {
+                try {
+                    requireBridge(Credentials(this@MainActivity).load() == null, "Disconnect before pairing again")
+                    confirmPairing(PairingQr.parseInput(code.text.toString(), BuildConfig.DEBUG))
+                } catch (e: BridgeFailure) { message(e.message) } catch (_: Exception) { message("Invalid connection code") }
+            }
+        })
         button("Start / resume connection") { BridgeService.start(this); render() }
         button("Stop connection") { pairingGeneration++; pairing = false; BridgeService.stop(this); render() }
         button("Disconnect and erase local token/data") {
@@ -122,14 +143,17 @@ class MainActivity : Activity() {
         if (result != null) {
             result.contents?.let { contents ->
                 try {
-                    val qr = PairingQr.parse(contents, BuildConfig.DEBUG)
-                    val deviceName = name.text.toString().trim()
-                    requireBridge(deviceName.isNotEmpty(), "Enter a device name")
-                    val host = "${qr.server.host}:${qr.server.port}"
-                    AlertDialog.Builder(this).setTitle("Trust $host?").setMessage("Server: ${qr.server}\nExpires: ${java.util.Date(qr.expiresAt * 1000)}\n\nThis server will control only the capabilities you grant. Confirm that this hostname belongs to your Hermes host.").setNegativeButton("Cancel", null).setPositiveButton("Pair") { _, _ -> claim(qr, deviceName) }.show()
+                    confirmPairing(PairingQr.parseInput(contents, BuildConfig.DEBUG))
                 } catch (e: BridgeFailure) { message(e.message) } catch (_: Exception) { message("Invalid server QR") }
             }
         } else super.onActivityResult(requestCode, resultCode, data)
+    }
+    private fun confirmPairing(qr: PairingQr) {
+        val deviceName = name.text.toString().trim()
+        requireBridge(deviceName.isNotEmpty(), "Enter a device name")
+        val host = if (qr.server.port == HttpUrl.defaultPort(qr.server.scheme)) qr.server.host else "${qr.server.host}:${qr.server.port}"
+        AlertDialog.Builder(this).setTitle("Trust $host?").setMessage("Server: ${qr.server}\nCode expires: ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(qr.expiresAt * 1000))}\n\nPair only if this is your own Hermes server. It will be able to send you files and, only while you enable it, see and operate the screen.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Pair") { _, _ -> code.text.clear(); claim(qr, deviceName) }.show()
     }
     private fun claim(qr: PairingQr, deviceName: String) {
         if (pairing) return

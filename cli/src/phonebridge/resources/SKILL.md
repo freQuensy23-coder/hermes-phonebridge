@@ -23,8 +23,9 @@ Nothing else is available: no SMS, calls, notifications API, clock or calendar h
 ## Pairing (once)
 
     phonebridge pair --name 'My phone' --ttl 300 --qr /private/new/path/pair.png
+    phonebridge pair --name 'My phone' --ttl 300 --code
 
-Show the PNG only to the owner. They scan it in the PhoneBridge app, confirm the hostname and grant Accessibility in Android settings. Then `phonebridge devices list` shows the device and `online`. `phonebridge pair status ID` shows whether it was claimed. `phonebridge devices revoke DEVICE` unpairs the phone; `phonebridge pair revoke ID` also unpairs the phone if that QR was already used. Run either only when the owner asks.
+`--qr` writes a QR image, `--code` prints a `pairing_code` such as `pb1:eyJ2Ijox…` that the owner can copy instead of scanning; pass both to get both. The QR and the code are one-use credentials that expire after `--ttl` seconds: give them only to the owner, in a private chat. The owner scans the QR or pastes the code under "Or paste a connection code" and taps Connect with code, confirms the hostname, then grants Accessibility in Android settings. Then `phonebridge devices list` shows the device and `online`. `phonebridge pair status ID` shows whether it was claimed. `phonebridge devices revoke DEVICE` unpairs the phone; `phonebridge pair revoke ID` also unpairs the phone if that QR was already used. Run either only when the owner asks.
 
 ## Screen control
 

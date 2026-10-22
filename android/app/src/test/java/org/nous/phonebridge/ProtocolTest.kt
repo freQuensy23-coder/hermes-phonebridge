@@ -25,6 +25,22 @@ class ProtocolTest {
     @Test fun pairingRejectsCredentialsFragmentsPathsAndQueryTokens() {
         for (url in listOf("https://u:p@phone.example", "https://phone.example/#token", "https://phone.example/path", "https://phone.example?token=secret", "file:///etc/passwd", "http://phone.example")) rejected { PairingQr.parse(qr(url), false, 1000) }
     }
+    private fun code(json: String) = PairingQr.CODE_PREFIX + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(json.toByteArray())
+    @Test fun connectionCodeCarriesTheSameValidatedPairing() {
+        assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(code(qr()), false, 1000))
+        val wrapped = code(qr()).chunked(20).joinToString("\n  ")
+        assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(" $wrapped \n", false, 1000))
+        assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(code(qr()).removePrefix(PairingQr.CODE_PREFIX), false, 1000))
+        assertEquals(PairingQr.parse(qr(), false, 1000), PairingQr.parseInput(qr(), false, 1000))
+    }
+    @Test fun connectionCodeKeepsEveryQrCheck() {
+        rejected { PairingQr.parseInput(code(qr(expiry = 1000)), false, 1000) }
+        rejected { PairingQr.parseInput(code(qr("http://phone.example")), false, 1000) }
+        rejected { PairingQr.parseInput(code(qr()).dropLast(12), false, 1000) }
+        rejected { PairingQr.parseInput("pb1:%%%", false, 1000) }
+        rejected { PairingQr.parseInput("pb1:" + java.util.Base64.getUrlEncoder().encodeToString("hello".toByteArray()), false, 1000) }
+        rejected { PairingQr.parseInput("   ", false, 1000) }
+    }
     @Test fun debugHttpIsLimitedToEmulatorHost() {
         assertEquals("10.0.2.2", PairingQr.parse(qr("http://10.0.2.2:18940"), true, 1000).server.host)
         rejected { PairingQr.parse(qr("http://10.0.2.2:18940"), false, 1000) }

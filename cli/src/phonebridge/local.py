@@ -32,11 +32,12 @@ def write_private_new(path, content):
             os.close(descriptor)
 
 
-def pairing_qr(result, path, now):
+CODE_PREFIX = "pb1:"
+
+
+def pairing_payload(result, now):
     import json
     import math
-
-    import qrcode
 
     payload = result.get("qr_payload")
     if not isinstance(payload, dict) or set(payload) != {"v", "server", "token", "expires_at"}:
@@ -54,17 +55,32 @@ def pairing_qr(result, path, now):
     token = payload["token"]
     if not isinstance(token, str) or re.fullmatch(r"[A-Za-z0-9_-]{43}", token) is None:
         raise BridgeError("INVALID_RESPONSE", "Pairing response has an invalid credential.")
-    output = Path(path).expanduser().absolute()
-    if output.suffix.lower() != ".png":
-        raise BridgeError("VALIDATION_ERROR", "QR output must be a PNG path.")
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     if len(encoded.encode("ascii")) > 2048:
         raise BridgeError("INVALID_RESPONSE", "Pairing payload exceeds the local QR size limit.")
+    return encoded, {"id": result["id"], "expires_at": expiry, "status": "pending"}
+
+
+def pairing_qr(result, path, now):
+    import qrcode
+
+    encoded, metadata = pairing_payload(result, now)
+    output = Path(path).expanduser().absolute()
+    if output.suffix.lower() != ".png":
+        raise BridgeError("VALIDATION_ERROR", "QR output must be a PNG path.")
     image = qrcode.make(encoded, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     write_private_new(output, buffer.getvalue())
-    return {"id": result["id"], "expires_at": expiry, "status": "pending", "qr_path": str(output)}
+    return {**metadata, "qr_path": str(output)}
+
+
+def pairing_code(result, now):
+    import base64
+
+    encoded, metadata = pairing_payload(result, now)
+    code = CODE_PREFIX + base64.urlsafe_b64encode(encoded.encode("ascii")).decode("ascii").rstrip("=")
+    return {**metadata, "pairing_code": code}
 
 
 def install_skill(replace=False):

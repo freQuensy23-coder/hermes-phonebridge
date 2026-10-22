@@ -50,6 +50,18 @@ class Arguments(val json: JSONObject) {
 
 data class PairingQr(val server: HttpUrl, val token: String, val expiresAt: Long) {
     companion object {
+        const val CODE_PREFIX = "pb1:"
+        fun parseInput(text: String, allowEmulator: Boolean, now: Long = System.currentTimeMillis() / 1000): PairingQr {
+            val compact = text.filterNot { it.isWhitespace() }
+            requireBridge(compact.isNotEmpty() && compact.length <= 8192, "Paste the whole connection code")
+            if (compact.startsWith("{")) return parse(compact, allowEmulator, now)
+            val body = compact.removePrefix(CODE_PREFIX)
+            val json = try { String(java.util.Base64.getUrlDecoder().decode(body), Charsets.UTF_8) } catch (_: IllegalArgumentException) {
+                failure("VALIDATION_ERROR", "The connection code is damaged; copy it again")
+            }
+            requireBridge(json.startsWith("{"), "This is not a PhoneBridge connection code")
+            return parse(json, allowEmulator, now)
+        }
         fun parse(text: String, allowEmulator: Boolean, now: Long = System.currentTimeMillis() / 1000): PairingQr {
             requireBridge(text.toByteArray().size <= 4096, "QR is too large")
             val obj = try { JSONObject(text) } catch (_: Exception) { failure("VALIDATION_ERROR", "Invalid QR JSON") }
