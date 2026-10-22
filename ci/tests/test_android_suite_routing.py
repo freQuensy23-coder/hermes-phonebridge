@@ -44,7 +44,7 @@ def test_physical_positive_suite_is_separate_and_required_for_promotion():
     assert "  android-physical:\n" in workflow
     assert "--app-apk \"$RUNNER_TEMP/physical-input/android/outputs/apk/debug/app-debug.apk\"" in workflow
     assert "--test-apk \"$RUNNER_TEMP/physical-input/android/outputs/apk/androidTest/debug/app-debug-androidTest.apk\"" in workflow
-    assert "    name: release-input\n    needs: [security, python, android-build, android-e2e, android-physical]" in workflow
+    assert "    name: release\n    needs: [version, lint, typecheck, no-comments, security, python, android-build, image, android-e2e, android-physical]" in workflow
     assert "    name: deployment-artifact\n    needs: [security, python, android-build, android-e2e, android-physical]" in workflow
     assert "          version: '589.0.0'" in workflow
     assert "      id-token: write" in workflow

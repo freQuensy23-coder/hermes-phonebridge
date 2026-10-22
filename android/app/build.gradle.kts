@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val releaseNumber = providers.gradleProperty("phonebridge.release").orNull?.toInt()
+
 android {
     namespace = "org.nous.phonebridge"
     compileSdk = 35
@@ -10,7 +12,7 @@ android {
         applicationId = "org.nous.phonebridge"
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
+        versionCode = releaseNumber ?: 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,6 +35,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            versionNameSuffix = releaseNumber?.let { "+$it" }
             signingConfig = signingConfigs.findByName("stableRelease")
         }
     }
