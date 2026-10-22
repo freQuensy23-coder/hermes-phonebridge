@@ -238,7 +238,7 @@ class ScreenControlInstrumentationTest {
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").optBoolean("online") }
         waitForScreenCapabilities(false)
-        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_manual).performClick() }
+        scenario!!.onActivity { ScreenControl.enable(it, null) }
         waitForScreenCapabilities(true)
     }
 

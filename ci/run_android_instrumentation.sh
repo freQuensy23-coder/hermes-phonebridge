@@ -10,6 +10,7 @@ cleanup() {
   fi
   mkdir -p "$RUNNER_TEMP/screenshots"
   adb pull /sdcard/Download/phonebridge-tour "$RUNNER_TEMP/screenshots" >/dev/null 2>&1 || true
+  adb pull /sdcard/Download/phonebridge-redesign "$RUNNER_TEMP/screenshots" >/dev/null 2>&1 || true
   adb shell am force-stop org.nous.phonebridge >/dev/null 2>&1 || true
   adb uninstall org.nous.phonebridge.debugfixture >/dev/null 2>&1 || true
   python3 ci/prepare_emulator_server.py stop
@@ -45,8 +46,9 @@ cd android
   "-Pandroid.testInstrumentationRunnerArguments.expectedPublicServerUrl=$PHONEBRIDGE_CI_PUBLIC_URL" \
   "-Pandroid.testInstrumentationRunnerArguments.adminToken=$admin_token" \
   -Pandroid.testInstrumentationRunnerArguments.emulatorCi=true \
-  -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest,org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest,org.nous.phonebridge.OwnerUiTourTest \
   -Pandroid.testInstrumentationRunnerArguments.screenshotTour=true \
+  -Pandroid.testInstrumentationRunnerArguments.ownerUiTour=true \
   "-Pandroid.testInstrumentationRunnerArguments.pairingCode=$pairing_code" \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.qrFixtureUrl=http://10.0.2.2:18941/pairing.png

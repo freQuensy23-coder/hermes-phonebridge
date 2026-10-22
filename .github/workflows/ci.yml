@@ -3,7 +3,7 @@ on:
   push:
     branches: [main, 'feat/**', 'fix/**', 'ci/**']
   pull_request:
-    branches: [main]
+    branches: [main, feat/accessibility-mvp]
 permissions:
   contents: read
 concurrency:

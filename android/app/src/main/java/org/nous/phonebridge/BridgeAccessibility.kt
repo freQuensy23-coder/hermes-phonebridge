@@ -34,6 +34,16 @@ class BridgeAccessibility : AccessibilityService() {
         BridgeService.refresh()
         super.onDestroy()
     }
+    private fun checkScreenAccess(mutating: Boolean = false) {
+        ExecutionGuard.check()
+        if (!ScreenControl.enabled(this)) failure("PERMISSION_REQUIRED", "Screen control has stopped or expired")
+        // Never let an agent extend its own consent or alter the app's trust settings.
+        // Check again on the UI thread immediately before dispatch, including overlays.
+        if (mutating && (MainActivity.resumed || rootInActiveWindow?.packageName?.toString() == packageName ||
+                windows.any { it.root?.packageName?.toString() == packageName })) {
+            failure("PERMISSION_REQUIRED", "PhoneBridge controls must be operated by the phone owner")
+        }
+    }
     private fun root(): AccessibilityNodeInfo = rootInActiveWindow ?: failure("NOT_FOUND", "No window is on screen; wake and unlock the phone")
     private fun nodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
         val result = ArrayList<AccessibilityNodeInfo>()
@@ -46,7 +56,7 @@ class BridgeAccessibility : AccessibilityService() {
         return result
     }
     fun handle(op: String, args: Arguments): JSONObject = when (op) {
-        "screen.tree" -> { args.only(); UiThread.call { tree() } }
+        "screen.tree" -> { args.only(); UiThread.call { checkScreenAccess(); tree() } }
         "screen.screenshot" -> { args.only(); screenshot() }
         "screen.tap" -> {
             args.only("x", "y")
@@ -72,7 +82,7 @@ class BridgeAccessibility : AccessibilityService() {
                 "quick_settings" -> GLOBAL_ACTION_QUICK_SETTINGS
                 else -> failure("VALIDATION_ERROR", "action must be back, home, recents, notifications or quick_settings")
             }
-            if (!UiThread.call { performGlobalAction(action) }) failure("UNSUPPORTED", "Android refused the global action")
+            if (!UiThread.call { checkScreenAccess(true); performGlobalAction(action) }) failure("UNSUPPORTED", "Android refused the global action")
             JSONObject().put("outcome", "dispatched").put("verified", false)
         }
         else -> failure("UNSUPPORTED", "Unknown screen operation $op")
@@ -87,7 +97,7 @@ class BridgeAccessibility : AccessibilityService() {
         var bytes = 0
         for (node in informative) {
             val bounds = Rect().also { node.getBoundsInScreen(it) }
-            val value = JSONObject().put("resource_id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString() ?: "").put("text", node.text?.toString()?.take(256) ?: "").put("description", node.contentDescription?.toString()?.take(256) ?: "").put("clickable", node.isClickable).put("editable", node.isEditable).put("scrollable", node.isScrollable).put("focused", node.isFocused).put("checked", node.isChecked).put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
+            val value = JSONObject().put("resource_id", node.viewIdResourceName ?: JSONObject.NULL).put("class", node.className?.toString() ?: "").put("text", if (node.isPassword) "" else node.text?.toString()?.take(256) ?: "").put("description", if (node.isPassword) "" else node.contentDescription?.toString()?.take(256) ?: "").put("clickable", node.isClickable).put("editable", node.isEditable).put("scrollable", node.isScrollable).put("focused", node.isFocused).put("checked", node.isChecked).put("bounds", JSONArray(listOf(bounds.left, bounds.top, bounds.right, bounds.bottom)))
             val size = value.toString().toByteArray().size
             if (result.length() >= TREE_NODES || bytes + size > TREE_BYTES) break
             bytes += size
@@ -101,7 +111,7 @@ class BridgeAccessibility : AccessibilityService() {
             if (resourceId == null) root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: failure("NOT_FOUND", "No text field has focus; tap the field first or pass resource_id")
             else nodes(root).filter { it.viewIdResourceName == resourceId && it.isEditable }.let { matches -> matches.firstOrNull { it.isFocused } ?: matches.firstOrNull() } ?: failure("NOT_FOUND", "No editable field with resource_id $resourceId on screen")
         }
-        val accepted = UiThread.call { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }) }
+        val accepted = UiThread.call { checkScreenAccess(true); node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }) }
         if (!accepted) failure("UNSUPPORTED", "This field does not accept text from Accessibility; tap the keyboard keys instead")
         var verified = false
         for (attempt in 0 until 10) {
@@ -116,6 +126,7 @@ class BridgeAccessibility : AccessibilityService() {
         var finished = false
         val gesture = GestureDescription.Builder().setDisplayId(Display.DEFAULT_DISPLAY).addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build()
         val dispatched = UiThread.call {
+            checkScreenAccess(true)
             dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) { finished = true; completed.countDown() }
                 override fun onCancelled(gestureDescription: GestureDescription?) { completed.countDown() }
@@ -131,6 +142,7 @@ class BridgeAccessibility : AccessibilityService() {
         var error: BridgeFailure? = null
         val pkg = rootInActiveWindow?.packageName?.toString()
         UiThread.call {
+            checkScreenAccess()
             takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     val buffer = result.hardwareBuffer

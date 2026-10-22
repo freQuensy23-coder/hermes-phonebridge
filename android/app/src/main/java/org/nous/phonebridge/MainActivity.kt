@@ -10,10 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
-import android.widget.Button
 import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import com.google.zxing.integration.android.IntentIntegrator
 import okhttp3.HttpUrl
@@ -23,79 +20,72 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var name: EditText
     private lateinit var code: EditText
-    private lateinit var screenControl: TextView
     private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
     private var pairing = false
-    private var pairingGeneration = 0L
+    @Volatile private var pairingGeneration = 0L
     private val updater = object : Runnable {
         override fun run() { render(); handler.postDelayed(this, 1000) }
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val density = resources.displayMetrics.density
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding((20 * density).toInt(), (24 * density).toInt(), (20 * density).toInt(), (24 * density).toInt()) }
-        val scroll = ScrollView(this).apply { addView(layout) }
-        val root = android.widget.FrameLayout(this).apply {
-            addView(scroll)
-            setOnApplyWindowInsetsListener { view, insets ->
-                val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() or android.view.WindowInsets.Type.displayCutout())
-                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-                insets
-            }
-        }
-        setContentView(root)
-        fun text(value: String) { layout.addView(TextView(this).apply { text = value; setPadding(0, 12, 0, 12) }) }
-        fun button(label: String, action: () -> Unit) { layout.addView(Button(this).apply { text = label; setOnClickListener { try { action() } catch (e: BridgeFailure) { message(e.message) } catch (_: Exception) { message("Android refused this action. Open system settings to grant access.") } } }) }
-        text("PhoneBridge ${BuildConfig.VERSION_NAME}")
-        status = TextView(this).also { layout.addView(it) }
-        name = EditText(this).apply { id = R.id.device_name; hint = "Device name"; setText(Build.MODEL); filters = arrayOf(android.text.InputFilter.LengthFilter(80)); isSaveEnabled = false }
-        layout.addView(name)
-        text("Pair only with a server you trust. Scan the one-time server QR and confirm its hostname. The server can send files to Download/PhoneBridge and Pictures/PhoneBridge, and it can see and operate the screen while screen control is on.")
-        button("Scan server QR") {
-            requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
-            if (!Access.has(this, Manifest.permission.CAMERA)) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else scan()
-        }
-        code = EditText(this).apply {
-            id = R.id.pairing_code
-            hint = "Or paste a connection code (pb1:…)"
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            isSingleLine = true
-            isSaveEnabled = false
-            filters = arrayOf(android.text.InputFilter.LengthFilter(8192))
-        }
-        layout.addView(code)
-        layout.addView(Button(this).apply {
-            text = "Connect with code"
-            id = R.id.pair_with_code
-            setOnClickListener {
-                try {
-                    requireBridge(Credentials(this@MainActivity).load() == null, "Disconnect before pairing again")
-                    confirmPairing(PairingQr.parseInput(code.text.toString(), BuildConfig.DEBUG))
-                } catch (e: BridgeFailure) { message(e.message) } catch (_: Exception) { message("Invalid connection code") }
-            }
-        })
-        button("Start / resume connection") { BridgeService.start(this); render() }
-        button("Stop connection") { pairingGeneration++; pairing = false; BridgeService.stop(this); render() }
-        button("Disconnect and erase local token/data") {
-            AlertDialog.Builder(this).setTitle("Disconnect?").setMessage("Erase encrypted credentials, command history and queued events. Reconnect requires a new server QR. Revoke the old device on the server to remove its registration.").setNegativeButton("Cancel", null).setPositiveButton("Disconnect") { _, _ -> pairingGeneration++; pairing = false; BridgeService.stop(this, true); render() }.show()
-        }
-        if (Build.VERSION.SDK_INT >= 33) button("Allow notifications") { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11) }
-        button("Grant Accessibility (screen control)") {
-            AlertDialog.Builder(this).setTitle("Grant Accessibility?").setMessage("PhoneBridge uses Accessibility to read and operate the screen for your server while screen control is on. If Android shows \"Restricted setting\", open App info, tap the menu and allow restricted settings first.").setNegativeButton("Cancel", null).setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
-        }
-        screenControl = TextView(this).apply { id = R.id.screen_control_status; setPadding(0, 12, 0, 12) }.also { layout.addView(it) }
-        fun screenButton(label: String, resourceId: Int, action: () -> Unit) {
-            layout.addView(Button(this).apply { text = label; id = resourceId; setOnClickListener { action(); render() } })
-        }
-        screenButton("Enable screen control for 10 minutes", R.id.screen_enable_10) { ScreenControl.enable(this, 10) }
-        screenButton("Enable screen control for 15 minutes", R.id.screen_enable_15) { ScreenControl.enable(this, 15) }
-        screenButton("Enable screen control for 1 hour", R.id.screen_enable_60) { ScreenControl.enable(this, 60) }
-        screenButton("Enable screen control until stopped", R.id.screen_enable_manual) { ScreenControl.enable(this, null) }
-        screenButton("Stop screen control", R.id.screen_stop) { ScreenControl.stop(this) }
-        button("App permissions / battery settings") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
-        text("Persistent connection uses a visible foreground service and no permanent wake lock. Android force-stop prevents boot restore until you open the app. Samsung: remove PhoneBridge from sleeping/deep-sleeping apps and select unrestricted battery use. Pixel: select unrestricted battery use. OEM restrictions or network loss can interrupt delivery.")
+        window.statusBarColor = android.graphics.Color.rgb(18, 35, 44)
+        window.navigationBarColor = android.graphics.Color.rgb(245, 247, 246)
+        window.decorView.systemUiVisibility = android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        // Credentials and one-time pairing codes must not appear in Recents or screenshots.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+        ui = OwnerUi(this, ::action)
+        setContentView(ui.root)
+        status = ui.status
+        name = ui.name
+        code = ui.code
         render()
+    }
+    private lateinit var ui: OwnerUi
+    private fun action(key: String) {
+        try {
+            when (key) {
+                "scan" -> {
+                    requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
+                    if (!Access.has(this, Manifest.permission.CAMERA)) requestPermissions(arrayOf(Manifest.permission.CAMERA), 10) else scan()
+                }
+                "pair" -> {
+                    requireBridge(Credentials(this).load() == null, "Disconnect before pairing again")
+                    confirmPairing(PairingQr.parseInput(code.text.toString(), BuildConfig.DEBUG))
+                }
+                "connection" -> {
+                    if (getSharedPreferences("connection", MODE_PRIVATE).getBoolean("enabled", false)) {
+                        cancelPairing(); BridgeService.stop(this)
+                    } else BridgeService.start(this)
+                }
+                "disconnect" -> AlertDialog.Builder(this).setTitle("Forget this server?")
+                    .setMessage("This stops remote access and erases credentials and command history on this phone. You will need a new connection code. To delete its server registration too, run phonebridge devices revoke DEVICE on the server.")
+                    .setNegativeButton("Keep server", null).setPositiveButton("Forget server") { _, _ -> cancelPairing(); BridgeService.stop(this, true); render() }.show()
+                "notifications" -> if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
+                "accessibility" -> AlertDialog.Builder(this).setTitle("Allow screen access in Android")
+                    .setMessage("Your server can read and operate other apps while screen control is on. Enable PhoneBridge in Accessibility settings, then return here to choose a duration.\n\nSamsung: if blocked, open App info → ⋮ → Allow restricted settings first.")
+                    .setNegativeButton("Cancel", null).setPositiveButton("Open settings") { _, _ -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }.show()
+                "10", "15", "60", "manual" -> {
+                    requireBridge(Credentials(this).load() != null, "Connect your server first")
+                    requireBridge(BridgeAccessibility.current != null, "Enable PhoneBridge Accessibility first")
+                    if (key == "manual") AlertDialog.Builder(this).setTitle("Allow until you stop it?")
+                        .setMessage("Your server will keep screen access without a time limit, including after reconnecting. You can end access here or stop the connection from the notification.")
+                        .setNegativeButton("Cancel", null).setPositiveButton("Allow until stopped") { _, _ -> ScreenControl.enable(this, null); render() }.show()
+                    else ScreenControl.enable(this, key.toInt())
+                }
+                "screen_stop" -> ScreenControl.stop(this)
+                "files" -> startActivity(Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                "settings" -> startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                "help" -> AlertDialog.Builder(this).setTitle("Keep the connection available")
+                    .setMessage("Set PhoneBridge battery use to Unrestricted. On Samsung, also remove it from Sleeping and Deep sleeping apps.\n\nForce-stop blocks automatic reconnect until you reopen the app. Internet loss pauses delivery; PhoneBridge retries when the network returns.")
+                    .setPositiveButton("App settings") { _, _ -> action("settings") }.setNegativeButton("Close", null).show()
+            }
+            render()
+        } catch (e: BridgeFailure) { message(e.message) }
+          catch (_: Exception) { message("Android could not open this action. Check app permissions in Settings.") }
+    }
+    private fun cancelPairing() {
+        synchronized(MainActivity) { pairingGeneration++; pairing = false }
     }
     private fun scan() {
         if (pairing) return
@@ -121,21 +111,24 @@ class MainActivity : Activity() {
     private fun claim(qr: PairingQr, deviceName: String) {
         if (pairing) return
         pairing = true
-        val generation = ++pairingGeneration
-        status.text = "Claiming one-time pairing…"
+        val generation = synchronized(MainActivity) { ++pairingGeneration }
+        status.text = "Connecting to server…"
+        ui.pairing(true)
         val appContext = applicationContext
         worker.execute {
             try {
                 val value = BridgeHttp.claim(qr, deviceName, BuildConfig.DEBUG)
                 synchronized(MainActivity) {
+                    if (generation != pairingGeneration) return@execute
                     if (Credentials(appContext).load() != null) failure("PAIRING_FAILED", "A device was already paired; disconnect before replacing it")
                     DurableStore(appContext).use { it.clearAll() }
                     Credentials(appContext).save(value)
                 }
                 handler.post {
+                    if (generation != pairingGeneration) return@post
                     pairing = false
                     if (!isDestroyed) {
-                        try { BridgeService.start(this); render() } catch (e: Exception) { render(); message((e as? BridgeFailure)?.message ?: "Paired, but the connection did not start; tap Start / resume connection.") }
+                        try { BridgeService.start(this); render() } catch (e: Exception) { render(); message((e as? BridgeFailure)?.message ?: "Paired, but the connection did not start; tap Resume connection.") }
                     }
                 }
             } catch (e: Exception) {
@@ -145,12 +138,9 @@ class MainActivity : Activity() {
     }
     private fun render() {
         if (!::status.isInitialized || pairing) return
+        ui.pairing(false)
         val value = try { Credentials(this).load() } catch (_: Exception) { null }
-        val prefs = getSharedPreferences("connection", MODE_PRIVATE)
-        val permissions = Access.permissions(this)
-        fun mark(key: String) = if (permissions.optBoolean(key)) "yes" else "no"
-        status.text = "Status: ${prefs.getString("status", "Not connected")}\nServer: ${value?.server?.removeSuffix("/") ?: "not paired"}\nAccessibility granted: ${mark("accessibility")}\nNotifications allowed: ${mark("post_notifications")}"
-        screenControl.text = ScreenControl.describe(this)
+        ui.render(value, Access.permissions(this), getSharedPreferences("connection", MODE_PRIVATE), ScreenControl.remaining(this))
     }
     private fun message(value: String) { if (!isFinishing && !isDestroyed) AlertDialog.Builder(this).setMessage(value).setPositiveButton("OK", null).show() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -173,7 +163,8 @@ class MainActivity : Activity() {
     }
     override fun onDestroy() {
         handler.removeCallbacks(updater)
-        worker.shutdown()
+        cancelPairing()
+        worker.shutdownNow()
         super.onDestroy()
     }
     companion object { @Volatile var resumed = false }

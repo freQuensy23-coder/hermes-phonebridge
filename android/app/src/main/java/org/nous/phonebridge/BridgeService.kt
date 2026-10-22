@@ -309,6 +309,7 @@ class BridgeService : Service() {
     private fun halt(message: String, erase: Boolean) {
         active = false
         connected = false
+        ScreenControl.stop(this)
         prefs.edit().putBoolean("enabled", false).putString("status", message).commit()
         socket?.cancel()
         socket = null
@@ -339,6 +340,7 @@ class BridgeService : Service() {
             context.startForegroundService(Intent(context, BridgeService::class.java))
         }
         fun stop(context: Context, disconnect: Boolean = false) {
+            ScreenControl.stop(context)
             context.getSharedPreferences("connection", MODE_PRIVATE).edit().putBoolean("enabled", false).putString("status", if (disconnect) "Disconnected" else "Stopped").commit()
             val service = current
             if (service != null) service.halt(if (disconnect) "Disconnected" else "Stopped", disconnect) else if (disconnect) {

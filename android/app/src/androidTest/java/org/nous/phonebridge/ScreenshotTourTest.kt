@@ -109,6 +109,7 @@ class ScreenshotTourTest {
         nodes().firstOrNull { it.isScrollable }?.performAction(if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) == true
     private fun scrollTop() { repeat(20) { if (!scroll(false)) return; Thread.sleep(100) } }
     private fun reveal(id: String): AccessibilityNodeInfo {
+        scenario!!.onActivity { it.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE) }
         scrollTop()
         repeat(30) {
             nodes().singleOrNull { it.viewIdResourceName == id && it.isVisibleToUser }?.let { node ->
@@ -130,6 +131,7 @@ class ScreenshotTourTest {
         if (scenario == null) scenario = ActivityScenario.launch(MainActivity::class.java)
         else shell("am start -W -f 0x00020000 -n org.nous.phonebridge/.MainActivity")
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() == context.packageName }
+        scenario!!.onActivity { it.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE) }
         scrollTop()
     }
     private fun notificationShade(name: String) {
@@ -196,17 +198,17 @@ class ScreenshotTourTest {
         deviceId = claimed.deviceId
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").optBoolean("online") }
         showMain()
-        waitUntil { nodes().any { it.text?.toString()?.startsWith("Status: Connected") == true } }
+        waitUntil { nodes().any { it.text?.toString()?.startsWith("Connected to Hermes") == true } }
         snap("03-connected")
 
         shell("settings put secure enabled_accessibility_services $component")
         shell("settings put secure accessibility_enabled 1")
         waitUntil { BridgeAccessibility.current != null }
         showMain()
-        waitUntil { nodes().any { it.text?.toString()?.contains("Accessibility granted: yes") == true } }
+        waitUntil { nodes().any { it.viewIdResourceName == "org.nous.phonebridge:id/screen_enable_10" && it.isVisibleToUser } }
         snap("04-accessibility-granted")
         tap(reveal("org.nous.phonebridge:id/screen_enable_10"))
-        waitUntil { nodes().any { it.text?.toString()?.startsWith("Screen control: ON") == true } }
+        waitUntil { nodes().any { it.text?.toString()?.startsWith("On ·") == true } }
         snap("05-screen-control-on")
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         notificationShade("06-ongoing-notification")

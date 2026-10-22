@@ -16,3 +16,4 @@ android/local.properties
 *.sqlite*
 *.png
 local/
+!docs/screenshots/*.png
