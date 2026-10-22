@@ -197,7 +197,7 @@ class QrPipelineInstrumentationTest {
             assertEquals(bounds.outHeight, bitmap.height)
             val pixels = IntArray(bitmap.width * bitmap.height)
             bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-            val decoder = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE)).createDecoder(emptyMap<DecodeHintType, Any>())
+            val decoder = DefaultDecoderFactory(listOf(BarcodeFormat.QR_CODE)).createDecoder(mapOf<DecodeHintType, Any>(DecodeHintType.TRY_HARDER to true))
             val result = decoder.decode(RGBLuminanceSource(bitmap.width, bitmap.height, pixels))
                 ?: error("Production JourneyApps decoder did not find a QR in the real CLI PNG")
             assertEquals(BarcodeFormat.QR_CODE, result.barcodeFormat)
