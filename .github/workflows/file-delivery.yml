@@ -25,7 +25,9 @@ jobs:
       - name: Install real server and CLI with test dependencies
         run: python -m pip install './server[test]' './cli[test]'
       - name: Required file upload server and installed CLI tests
-        run: python3 ci/run_file_delivery.py python-tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/file-delivery-python-evidence"
+          python -m pytest cli/tests/test_file_delivery_cli.py server/tests/test_file_delivery.py -x -q --junitxml="$RUNNER_TEMP/file-delivery-python-evidence/results.xml"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
