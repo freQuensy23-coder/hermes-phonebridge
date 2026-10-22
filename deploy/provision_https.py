@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import signal
 import stat
+import subprocess
 import tempfile
 import uuid
 
@@ -91,6 +92,11 @@ def install_config(content):
     transaction(lambda: promote(content))
 
 
+def root_file_exists(path):
+    return subprocess.run(["sudo", "-n", "test", "-f", str(path)], stdin=subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+
+
 def provision(domain):
     certificate = Path("/etc/letsencrypt/live") / domain / "fullchain.pem"
     http = f"""server {{
@@ -101,7 +107,7 @@ def provision(domain):
     location / {{ return 301 https://$host$request_uri; }}
 }}
 """
-    if not certificate.exists():
+    if not root_file_exists(certificate):
         promote(http)
         run("sudo", "-n", "certbot", "certonly", "--webroot", "-w", "/var/www/letsencrypt", "-d", domain, "--non-interactive", "--agree-tos", "--register-unsafely-without-email", timeout=120)
     https = f"""server {{
