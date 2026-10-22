@@ -8,7 +8,7 @@ from .client import Client, Settings, bounded_number, error_code, safe_message, 
 from .errors import BridgeError
 from .jsonio import object_args, sanitize
 from .local import install_skill, pairing_code, pairing_qr
-from .screen import COORDINATE_MAX, COORDINATE_MIN, GLOBAL_ACTIONS, export_screenshot, screen_args
+from .screen import GLOBAL_ACTIONS, POINT_MAX, POINT_MIN, export_screenshot, screen_args
 
 
 class Parser(argparse.ArgumentParser):
@@ -98,7 +98,7 @@ def parser():
             item.add_argument("--output", help="Export to a new mode-0600 .jpg/.jpeg file; implies --wait")
         if action in {"tap", "swipe"}:
             for coordinate in (("x", "y") if action == "tap" else ("x1", "y1", "x2", "y2")):
-                item.add_argument(f"--{coordinate}", type=integer(COORDINATE_MIN, COORDINATE_MAX))
+                item.add_argument(f"--{coordinate}", type=integer(POINT_MIN, POINT_MAX))
         if action == "swipe":
             item.add_argument("--duration-ms", type=integer(50, 5000))
         if action == "input":

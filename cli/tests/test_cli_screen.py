@@ -84,6 +84,8 @@ def test_removed_commands_and_flags_are_usage_errors(cli_wire, capsys, arguments
     ("tap", ["--args", '{"x":true,"y":0}']),
     ("tap", ["--args", '{"x":1.5,"y":0}']),
     ("tap", ["--args", '{"x":2147483648,"y":0}']),
+    ("tap", ["--args", '{"x":-1,"y":0}']),
+    ("tap", ["--args", '{"x":100001,"y":0}']),
     ("tap", ["--x", "1", "--y", "2", "--args", '{"x":1}']),
     ("swipe", ["--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":49}']),
     ("swipe", ["--args", '{"x1":0,"y1":0,"x2":1,"y2":1,"duration_ms":5001}']),
@@ -106,7 +108,8 @@ def test_invalid_screen_json_is_rejected_before_http(cli_wire, capsys, action, f
 
 @pytest.mark.parametrize("flags", [
     ["--x", "nan", "--y", "0"], ["--x", "1.5", "--y", "0"],
-    ["--x", "2147483648", "--y", "0"], ["--x", "0", "--y", "0", "--timeout", "nan"],
+    ["--x", "2147483648", "--y", "0"], ["--x", "-1", "--y", "0"], ["--x", "100001", "--y", "0"],
+    ["--x", "0", "--y", "0", "--timeout", "nan"],
     ["--x", "0", "--y", "0", "--ttl", "0"],
 ])
 def test_invalid_numeric_flags_are_usage_errors(cli_wire, capsys, flags):
@@ -244,9 +247,9 @@ def test_skill_contract_is_bundled_exactly():
 
 def test_screen_parser_retains_submit_once_options():
     options = parser().parse_args(["screen", "tap", "device",
-                                  "--args", '{"x":-2147483648,"y":2147483647}', "--ttl", "1", "--timeout", "0.1",
+                                  "--args", '{"x":0,"y":100000}', "--ttl", "1", "--timeout", "0.1",
                                   "--poll-interval", "0.05", "--idempotency-key", "Case-Key"])
-    assert options.args == {"x": -2147483648, "y": 2147483647}
+    assert options.args == {"x": 0, "y": 100000}
     assert options.ttl == 1
     assert options.timeout == 0.1
     assert options.poll_interval == 0.05
@@ -254,13 +257,13 @@ def test_screen_parser_retains_submit_once_options():
     assert options.wait is False
 
 
-def test_exact_identities_and_negative_native_coordinates_are_not_rewritten(cli_wire, capsys):
+def test_exact_identities_and_coordinates_are_not_rewritten(cli_wire, capsys):
     cli_wire.respond({"id": "cmd", "status": "queued", "expires_at": time.time() + 60})
     assert main(["screen", "tap", "Device-Case",
-                 "--x", "-10", "--y", "20", "--idempotency-key", "Key-Case"]) == 0
+                 "--x", "10", "--y", "20", "--idempotency-key", "Key-Case"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "queued"
     assert cli_wire.requests[0]["path"] == "/v1/devices/Device-Case/commands"
-    assert cli_wire.requests[0]["body"]["args"] == {"x": -10, "y": 20}
+    assert cli_wire.requests[0]["body"]["args"] == {"x": 10, "y": 20}
     assert [request["method"] for request in cli_wire.requests] == ["POST"]
 
 

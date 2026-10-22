@@ -98,6 +98,7 @@ fun calendarDays(days: JSONArray): IntArray {
 object PayloadBounds {
     const val SCREENSHOT_RESULT_BYTES = 384 * 1024
     const val SCREENSHOT_JPEG_BYTES = 240 * 1024
+    const val RESULT_DATA_BYTES = 100000
 
     fun validate(value: Any?, maxBytes: Int = 32768) = validateBounded(value, maxBytes, false)
 
@@ -117,7 +118,7 @@ object PayloadBounds {
             val padding = encoded.takeLast(2).count { it == '=' }
             requireBridge(encoded.length / 4 * 3 - padding <= SCREENSHOT_JPEG_BYTES, "Screenshot JPEG exceeds bound")
         } else if (frame.optBoolean("ok", false)) {
-            validate(frame.getJSONObject("data"))
+            validate(frame.getJSONObject("data"), RESULT_DATA_BYTES)
         }
         validateBounded(frame, if (screenshot) SCREENSHOT_RESULT_BYTES else 120000, screenshot)
     }

@@ -19,4 +19,4 @@ The phone connects out to the server over an authenticated WebSocket; no inbound
     python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests
     cd android && ./gradlew testDebugUnitTest assembleDebug
 
-Emulator instrumentation runs in GitHub CI (`.github/workflows/ci.yml`) and locally with `bash ci/run_android_instrumentation.sh` against a booted emulator.
+Emulator instrumentation runs in GitHub CI (`.github/workflows/ci.yml`) through `ci/run_android_instrumentation.sh`, which needs the CI server and tunnel that `ci/prepare_emulator_server.py` starts.

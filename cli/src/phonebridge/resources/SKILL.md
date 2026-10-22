@@ -47,7 +47,13 @@ Works whenever the phone is online and Accessibility is granted (`phonebridge ca
 
 Example, "open Notes and write 123": `screen global --action home`, `screen tree`, tap the Notes icon (swipe up to the app drawer if it is not on the home screen), `screen tree`, tap the new-note button, tap the text area, `screen input --text 123`, `screen tree` to confirm.
 
-Error codes: `PERMISSION_REQUIRED`: Accessibility for PhoneBridge is off; ask the owner to turn it on in Android settings. `NOT_FOUND`: no window or no such field; the screen may be off or locked, ask the owner to unlock. `UNSUPPORTED`: Android refused the action (for example a field that does not accept text); try another way. `AMBIGUOUS_STATE`: the effect may or may not have happened; observe, do not repeat blindly.
+Errors:
+- `UNSUPPORTED` with "not advertised by this device" or "Capability no longer advertised", or `PERMISSION_REQUIRED`: screen control is unavailable. Run `phonebridge capabilities DEVICE`: if the phone is offline, ask the owner to open PhoneBridge; if `screen.*` is missing, ask the owner to turn on PhoneBridge in Android Accessibility settings.
+- Other `UNSUPPORTED`: Android refused the action (for example a field that does not accept text); try another way, such as tapping the keyboard keys.
+- `NOT_FOUND`: no window or no such field; the screen may be off or locked, ask the owner to unlock it.
+- `VALIDATION_ERROR`: fix the arguments (coordinates are 0..100000 screen pixels).
+- `EXPIRED`: the phone did not take the command before `--ttl` ran out; check that it is online.
+- `AMBIGUOUS_STATE`: the effect may or may not have happened; observe, do not repeat blindly.
 
 ## Sending files
 

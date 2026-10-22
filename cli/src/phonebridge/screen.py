@@ -9,6 +9,8 @@ from .errors import BridgeError
 
 COORDINATE_MIN = -2147483648
 COORDINATE_MAX = 2147483647
+POINT_MIN = 0
+POINT_MAX = 100000
 GLOBAL_ACTIONS = ("back", "home", "recents", "notifications", "quick_settings")
 SCREEN_FIELDS = {
     "tree": set(),
@@ -49,8 +51,8 @@ def screen_args(options):
     if "text" in args and not bounded_text(args["text"], 4096, empty=True):
         raise BridgeError("VALIDATION_ERROR", "Screen text must be a string of at most 4096 UTF-16 code units without NUL.")
     for key in ("x", "y", "x1", "y1", "x2", "y2"):
-        if key in args and (type(args[key]) is not int or not COORDINATE_MIN <= args[key] <= COORDINATE_MAX):
-            raise BridgeError("VALIDATION_ERROR", "Screen coordinates must be integers in screen pixels.")
+        if key in args and (type(args[key]) is not int or not POINT_MIN <= args[key] <= POINT_MAX):
+            raise BridgeError("VALIDATION_ERROR", "Screen coordinates must be integers in screen pixels, 0..100000.")
     if "duration_ms" in args and (type(args["duration_ms"]) is not int or not 50 <= args["duration_ms"] <= 5000):
         raise BridgeError("VALIDATION_ERROR", "Swipe duration must be an integer in 50..5000 milliseconds.")
     if "action" in args and args["action"] not in GLOBAL_ACTIONS:

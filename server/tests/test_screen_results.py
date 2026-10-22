@@ -421,9 +421,10 @@ def test_mock_phone_large_commands_still_rejected(service, settings):
     with connected(client, claim, capabilities=["device.info"]):
         path = f"/v1/devices/{claim['device_id']}/commands"
         for args in ({"text": "x" * 16385}, {"a": "x" * 16380, "b": "y" * 16380, "c": "z" * 100}):
-            response = client.post(path, headers=ADMIN, json={"op": "debug.status", "args": args})
+            response = client.post(path, headers=ADMIN, json={"op": "device.info", "args": args})
             assert response.status_code == 422
-        assert client.post(path, headers=ADMIN, json={"op": "debug.status", "args": {"text": "x" * settings.max_body_bytes}}).status_code == 413
+            assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+        assert client.post(path, headers=ADMIN, json={"op": "device.info", "args": {"text": "x" * settings.max_body_bytes}}).status_code == 413
         assert app.state.store.connection.execute("SELECT count(*) FROM commands").fetchone()[0] == 0
 
 

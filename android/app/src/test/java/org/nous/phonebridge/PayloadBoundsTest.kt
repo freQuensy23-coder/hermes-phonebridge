@@ -17,6 +17,20 @@ class PayloadBoundsTest {
         rejected { PayloadBounds.validate(data, 15000) }
         rejected { PayloadBounds.validateResult(Results.ok("tree", data), "screen.tree") }
     }
+    @Test fun fullScreenTreeFitsTheResultBound() {
+        val nodes = JSONArray()
+        while (nodes.length() < BridgeAccessibility.TREE_NODES) {
+            nodes.put(JSONObject().put("resource_id", "com.samsung.android.app.notes:id/item_title").put("class", "android.widget.TextView")
+                .put("text", "Заметка о поездке на дачу в субботу утром, купить хлеб".repeat(4).take(120)).put("description", "")
+                .put("clickable", true).put("editable", false).put("scrollable", false).put("focused", false).put("checked", false)
+                .put("bounds", JSONArray(listOf(0, 0, 1080, 2400))))
+        }
+        val data = JSONObject().put("package", "com.samsung.android.app.notes").put("nodes", nodes).put("truncated", false).put("untrusted", true)
+        assertTrue(data.toString().toByteArray().size in 32769..BridgeAccessibility.TREE_BYTES + 1000)
+        PayloadBounds.validateResult(Results.ok("tree", data), "screen.tree")
+        for (index in 0 until 4) data.put("padding$index", "x".repeat(16000))
+        rejected { PayloadBounds.validateResult(Results.ok("tree", data), "screen.tree") }
+    }
     @Test fun screenshotExceptionIsOnlyForTopLevelImageBase64() {
         rejected { PayloadBounds.validateResult(Results.ok("shot", image().put("text", "x".repeat(16385))), "screen.screenshot") }
         rejected { PayloadBounds.validateResult(Results.ok("shot", image().put("nested", JSONObject().put("base64", "A".repeat(20000)))), "screen.screenshot") }
