@@ -377,9 +377,9 @@ class BridgeService : Service() {
         val stop = PendingIntent.getService(this, 2, Intent(this, BridgeService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val debug = DebugAccess.snapshot()
         val stopDebug = PendingIntent.getService(this, 3, Intent(this, BridgeService::class.java).setAction(STOP_DEBUG), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val debugText = if (!debug.enabled) "Debug OFF" else "Experimental debug ON: ${debug.remainingSeconds?.let { "${it}s remaining" } ?: "until stopped"}"
+        val debugText = if (!debug.enabled) "screen control off" else "screen control ON ${debug.remainingSeconds?.let { "(%d:%02d left)".format(it / 60, it % 60) } ?: "(until stopped)"}"
         return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText("$status — $debugText").setContentIntent(open).setOngoing(true).setCategory(Notification.CATEGORY_SERVICE)
-            .addAction(Notification.Action.Builder(null, "Stop debug", stopDebug).build())
+            .addAction(Notification.Action.Builder(null, "Stop screen control", stopDebug).build())
             .addAction(Notification.Action.Builder(null, "Stop connection", stop).build()).build()
     }
     private fun halt(message: String, erase: Boolean) {

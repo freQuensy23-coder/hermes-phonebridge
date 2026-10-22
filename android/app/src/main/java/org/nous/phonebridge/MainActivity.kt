@@ -97,10 +97,10 @@ class MainActivity : Activity() {
     private fun confirmDebug(minutes: Int?) {
         Access.unlocked(this)
         debugDialog?.dismiss()
-        val duration = minutes?.let { "$it minutes" } ?: "until manually stopped (this process/connection only)"
-        val dialog = AlertDialog.Builder(this).setTitle("Enable experimental remote debug?")
-            .setMessage("For $duration your authorized server can read ordinary screen content and operate apps as you. This is high risk and experimental, not ADB or root. It cannot bypass the lock screen, passwords, secure windows or Android permission/credential consent. PhoneBridge consent/settings cannot be remotely controlled. Stop debug here or in the persistent notification at any time. A dispatched gesture may finish after Stop; later commands and late screenshots are blocked. Never authorize payments, sending, deletion or permission grants without your own separate intent.")
-            .setNegativeButton("Cancel", null).setPositiveButton("Enable debug", null).create()
+        val duration = minutes?.let { if (it == 60) "1 hour" else "$it minutes" } ?: "as long as this connection lasts"
+        val dialog = AlertDialog.Builder(this).setTitle("Enable screen control?")
+            .setMessage("For $duration your paired server can see what is on the screen and tap, swipe and type as you. It cannot unlock the phone, see password fields or secure screens, approve Android permission prompts or operate PhoneBridge itself. Stop it here or from the notification at any time. Only enable it while you want your agent to act on the phone.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Enable", null).create()
         debugDialog = dialog
         dialog.setOnShowListener {
             dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -158,10 +158,12 @@ class MainActivity : Activity() {
     private fun render() {
         if (!::status.isInitialized || pairing) return
         val debug = DebugAccess.snapshot()
-        if (::debugStatus.isInitialized) debugStatus.text = if (!debug.enabled) "Experimental debug: OFF" else "Experimental debug: ON — ${debug.remainingSeconds?.let { "${it}s remaining" } ?: "until manually stopped"}"
+        if (::debugStatus.isInitialized) debugStatus.text = if (!debug.enabled) "Screen control: OFF" else "Screen control: ON — ${debug.remainingSeconds?.let { "%d:%02d left".format(it / 60, it % 60) } ?: "until stopped"}"
         val value = try { Credentials(this).load() } catch (_: Exception) { null }
         val prefs = getSharedPreferences("connection", MODE_PRIVATE)
-        status.text = "${prefs.getString("status", "Not connected")}\nServer: ${value?.server ?: "not paired"}\nDevice: ${value?.deviceId ?: "none"}\nGranted: ${Access.permissions(this)}"
+        val permissions = Access.permissions(this)
+        fun mark(key: String) = if (permissions.optBoolean(key)) "yes" else "no"
+        status.text = "Status: ${prefs.getString("status", "Not connected")}\nServer: ${value?.server?.removeSuffix("/") ?: "not paired"}\nAccessibility granted: ${mark("accessibility")}\nNotifications allowed: ${mark("post_notifications")}"
     }
     private fun message(value: String) { if (!isFinishing && !isDestroyed) AlertDialog.Builder(this).setMessage(value).setPositiveButton("OK", null).show() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

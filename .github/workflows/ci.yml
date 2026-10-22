@@ -148,6 +148,7 @@ jobs:
             ${{ runner.temp }}/phonebridge-server.log
             ${{ runner.temp }}/phonebridge-tunnel.log
             ${{ runner.temp }}/qr-fixture-http.log
+            ${{ runner.temp }}/screenshots/
           if-no-files-found: error
 
   release-input:
