@@ -9,7 +9,97 @@ permissions:
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  queue: ${{ github.ref == 'refs/heads/main' && 'max' || 'single' }}
 jobs:
+  version:
+    name: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      number: ${{ steps.next.outputs.number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Compute release number from existing vN tags
+        id: next
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[] | "\(.ref) \(.object.sha)"' | python3 ci/next_release.py "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+      - run: python -m pip install ruff==0.11.13 shellcheck-py==0.11.0.1 actionlint-py==1.7.12.25
+      - name: Python lint
+        run: python -m ruff check server cli deploy ci
+      - name: Shell lint
+        run: shellcheck --shell=bash --severity=warning ci/*.sh
+      - name: Workflow lint
+        run: actionlint -ignore 'unexpected key "queue" for "concurrency" section'
+      - name: Android lint
+        run: chmod +x gradlew && ./gradlew --no-daemon lintDebug
+        working-directory: android
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: lint-${{ github.sha }}
+          overwrite: true
+          path: |
+            android/app/build/reports/lint-results-debug.*
+            android/debugfixture/build/reports/lint-results-debug.*
+          if-no-files-found: warn
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
+      - run: python -m pip install ./server ./cli mypy==2.4.0 types-qrcode==8.2.0.20260518 types-PyYAML==6.0.12.20260906
+      - name: Python type check
+        run: python -m mypy
+      - name: Kotlin type check
+        run: chmod +x gradlew && ./gradlew --no-daemon compileDebugKotlin compileDebugUnitTestKotlin compileDebugAndroidTestKotlin compileReleaseKotlin
+        working-directory: android
+  no-comments:
+    name: no-comments
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - run: python -m pip install pyyaml==6.0.3
+      - name: Reject comments in tracked code
+        run: python ci/check_no_comments.py
   security:
     name: security
     runs-on: ubuntu-24.04
@@ -58,10 +148,11 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.11'
-      - run: python -m pip install './server[test]' './cli[test]' ruff==0.11.13
-      - run: python -m ruff check server cli deploy ci release
-      - run: python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests -q --junitxml=python-results.xml
-      - run: python -m build server --outdir dist && python -m build cli --outdir dist
+      - run: python -m pip install './server[test]' './cli[test]' pyyaml==6.0.3
+      - name: Python unit tests
+        run: python -m pytest server/tests cli/tests deploy/tests ci/tests -q --junitxml=python-results.xml
+      - name: Build server and CLI wheels
+        run: python -m build server --outdir dist && python -m build cli --outdir dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -73,8 +164,11 @@ jobs:
           if-no-files-found: error
   android-build:
     name: android-build
+    needs: [version]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      RELEASE_NUMBER: ${{ needs.version.outputs.number }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -84,7 +178,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
-      - run: chmod +x gradlew && ./gradlew --no-daemon --refresh-dependencies testDebugUnitTest assembleDebug assembleDebugAndroidTest assembleRelease
+      - name: Android unit tests
+        run: chmod +x gradlew && ./gradlew --no-daemon --refresh-dependencies -Pphonebridge.release="$RELEASE_NUMBER" testDebugUnitTest
+        working-directory: android
+      - name: Build debug, instrumentation and release APKs
+        run: ./gradlew --no-daemon -Pphonebridge.release="$RELEASE_NUMBER" assembleDebug assembleDebugAndroidTest assembleRelease
         working-directory: android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -94,6 +192,36 @@ jobs:
           path: |
             android/app/build/outputs/apk/
             android/app/build/test-results/
+          if-no-files-found: error
+  image:
+    name: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build server image
+        run: docker build --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag phonebridge-server:ci server
+      - name: Smoke test server image
+        run: |
+          docker run --detach --name phonebridge --publish 127.0.0.1:18940:18940 --env PHONEBRIDGE_ADMIN_TOKEN="$(openssl rand -hex 32)" --env PHONEBRIDGE_PUBLIC_URL=https://phonebridge.invalid --env PHONEBRIDGE_REVISION="$GITHUB_SHA" phonebridge-server:ci
+          trap 'docker logs phonebridge; docker rm --force phonebridge' EXIT
+          for _ in $(seq 30); do
+            curl --fail --silent --max-time 5 --output "$RUNNER_TEMP/health.json" http://127.0.0.1:18940/healthz && break
+            sleep 1
+          done
+          python3 -c 'import json,os; from pathlib import Path; d=json.loads((Path(os.environ["RUNNER_TEMP"])/"health.json").read_text()); assert d["status"]=="ok" and d["version"]=="0.1.0" and d["revision"]==os.environ["GITHUB_SHA"], d; print(json.dumps(d))'
+      - name: Export server image
+        run: docker save phonebridge-server:ci | gzip > "$RUNNER_TEMP/phonebridge-server.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-${{ github.sha }}
+          overwrite: true
+          path: ${{ runner.temp }}/phonebridge-server.tar.gz
           if-no-files-found: error
   android-e2e:
     name: android-e2e (${{ matrix.api }})
@@ -157,7 +285,6 @@ jobs:
             ${{ runner.temp }}/google-clock-evidence/
             ${{ runner.temp }}/foreground-evidence/
           if-no-files-found: error
-
   android-physical:
     name: android-physical
     needs: [security, python, android-build, android-e2e]
@@ -213,40 +340,6 @@ jobs:
           path: ${{ runner.temp }}/physical-evidence/
           overwrite: true
           if-no-files-found: error
-
-  release-input:
-    name: release-input
-    needs: [security, python, android-build, android-e2e, android-physical]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          persist-credentials: false
-      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
-        with:
-          distribution: temurin
-          java-version: '17'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: python-${{ github.sha }}
-          path: ${{ runner.temp }}/input/python
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: android-${{ github.sha }}
-          path: ${{ runner.temp }}/input/android
-      - name: Package exact accepted CI outputs without rebuilding
-        run: python release/prepare.py --python-dist "$RUNNER_TEMP/input/python/dist" --apk "$RUNNER_TEMP/input/android/outputs/apk/release/app-release-unsigned.apk" --output "$RUNNER_TEMP/release-input" --lock server/requirements.txt --lock server/pyproject.toml --lock cli/pyproject.toml --lock android/app/build.gradle.kts --lock android/build.gradle.kts --lock android/gradle/wrapper/gradle-wrapper.properties
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: phonebridge-release-input-${{ github.sha }}
-          path: ${{ runner.temp }}/release-input/
-          overwrite: true
-          if-no-files-found: error
   deployment-artifact:
     name: deployment-artifact
     needs: [security, python, android-build, android-e2e, android-physical]
@@ -284,7 +377,6 @@ jobs:
           path: ${{ runner.temp }}/deployment-artifact/
           overwrite: true
           if-no-files-found: error
-
   offline-runtime:
     name: offline-runtime
     needs: [python]
@@ -308,3 +400,104 @@ jobs:
         run: |
           python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/offline-wheelhouse" --requirement server/requirements.txt "$RUNNER_TEMP/offline-input/python/dist/phonebridge_server-0.1.0-py3-none-any.whl" "$RUNNER_TEMP/offline-input/python/dist/phonebridge_cli-0.1.0-py3-none-any.whl"
           python ci/smoke_offline_runtime.py --wheelhouse "$RUNNER_TEMP/offline-wheelhouse" --revision "$GITHUB_SHA"
+  release:
+    name: release
+    needs: [version, lint, typecheck, no-comments, security, python, android-build, image, offline-runtime, android-e2e, android-physical]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'freQuensy23-coder/hermes-phonebridge'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    concurrency:
+      group: phonebridge-release
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_NUMBER: ${{ needs.version.outputs.number }}
+    steps:
+      - name: Ensure release tag is free or already on this revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$RELEASE_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          if target=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$RELEASE_NUMBER" --jq .object.sha 2>/dev/null); then
+            if [[ "$target" != "$GITHUB_SHA" ]]; then
+              echo "::error::Tag v$RELEASE_NUMBER already points to $target; re-run all jobs to compute a fresh number"
+              exit 1
+            fi
+            echo "Resuming v$RELEASE_NUMBER on $GITHUB_SHA"
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: android-${{ github.sha }}
+          path: ${{ runner.temp }}/release-input/android
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: python-${{ github.sha }}
+          path: ${{ runner.temp }}/release-input/python
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: image-${{ github.sha }}
+          path: ${{ runner.temp }}/release-input/image
+      - name: Sign release APK with the stable key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGNER_SHA256: ${{ vars.PHONEBRIDGE_SIGNER_SHA256 }}
+        run: |
+          umask 077
+          [[ "$SIGNER_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD"
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          input="$RUNNER_TEMP/release-input"
+          assets="$RUNNER_TEMP/release-assets"
+          keystore="$RUNNER_TEMP/phonebridge.keystore"
+          apk="$assets/phonebridge-v$RELEASE_NUMBER.apk"
+          trap 'rm -f "$keystore"' EXIT
+          mkdir -p "$assets"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          "$tools/zipalign" -p -f 4 "$input/android/outputs/apk/release/app-release-unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" sign --ks "$keystore" --ks-key-alias phonebridge --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEYSTORE_PASSWORD --out "$apk" "$RUNNER_TEMP/aligned.apk"
+          "$tools/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/signers.txt"
+          signers=$(sed -n 's/^Signer #[0-9]* certificate SHA-256 digest: //p' "$RUNNER_TEMP/signers.txt" | sort -u)
+          test "$signers" = "$SIGNER_SHA256"
+          cp "$input"/python/dist/*.whl "$assets/"
+          (cd "$assets" && sha256sum -- * > SHA256SUMS)
+          cat "$assets/SHA256SUMS"
+      - name: Publish server image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/phonebridge-server"
+          docker load --input "$RUNNER_TEMP/release-input/image/phonebridge-server.tar.gz"
+          docker tag phonebridge-server:ci "$image:v$RELEASE_NUMBER"
+          docker tag phonebridge-server:ci "$image:latest"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          docker push "$image:v$RELEASE_NUMBER"
+          docker push "$image:latest"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$RELEASE_NUMBER"
+          assets=("$RUNNER_TEMP"/release-assets/*)
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --silent 2>/dev/null; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
+          fi
+          if published=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then
+            missing=0
+            for asset in "${assets[@]}"; do
+              grep -qxF "$(basename "$asset")" <<<"$published" || missing=1
+            done
+            if [[ "$missing" == 1 ]]; then
+              gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+            else
+              echo "Release $tag is already complete"
+            fi
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --title "PhoneBridge $tag" --generate-notes "${assets[@]}"
+          fi

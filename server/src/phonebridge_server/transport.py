@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from starlette.responses import JSONResponse
+from starlette.websockets import WebSocket
 
+from .config import Settings
 from .protocol import BridgeError, decode_json, encode_json
 
 
@@ -155,8 +157,8 @@ class RequestBoundary:
 
 @dataclass
 class Peer:
-    websocket: object
-    settings: object
+    websocket: WebSocket
+    settings: Settings
     queue: asyncio.Queue
     lock: asyncio.Lock
     closed: bool = False

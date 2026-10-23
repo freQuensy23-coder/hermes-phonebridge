@@ -37,6 +37,7 @@ def pairing_qr(result, path, now):
     import math
 
     import qrcode
+    from qrcode.image.pil import PilImage
 
     payload = result.get("qr_payload")
     if not isinstance(payload, dict) or set(payload) != {"v", "server", "token", "expires_at"}:
@@ -60,7 +61,7 @@ def pairing_qr(result, path, now):
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
     if len(encoded.encode("ascii")) > 2048:
         raise BridgeError("INVALID_RESPONSE", "Pairing payload exceeds the local QR size limit.")
-    image = qrcode.make(encoded, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
+    image = qrcode.make(encoded, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4, image_factory=PilImage)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     write_private_new(output, buffer.getvalue())
