@@ -184,7 +184,7 @@ def interrupted(signum, frame):
 
 def start(root, temporary):
     root.mkdir(mode=0o700)
-    records = []
+    records: list[dict] = []
     try:
         signal.signal(signal.SIGTERM, interrupted)
         signal.signal(signal.SIGINT, interrupted)

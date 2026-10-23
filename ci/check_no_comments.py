@@ -30,7 +30,7 @@ def python_comments(text):
 
 def c_style_comments(text):
     found = []
-    stack = [["code", 0, False]]
+    stack: list[list] = [["code", 0, False]]
     index = text.find("\n") if text.startswith("#!") else 0
     index = len(text) if index < 0 else index
     while index < len(text):
@@ -103,20 +103,20 @@ def xml_comments(text):
 def shell_comments(text):
     found = []
     pending = []
-    quote = None
+    quote = ""
     index = text.find("\n") if text.startswith("#!") else 0
     index = len(text) if index < 0 else index
     while index < len(text):
         char = text[index]
         if quote == "'":
-            quote = None if char == "'" else quote
+            quote = "" if char == "'" else quote
             index += 1
         elif quote in ('"', "$'"):
             if char == "\\":
                 index += 2
                 continue
             if char == quote[-1]:
-                quote = None
+                quote = ""
             index += 1
         elif char == "\\":
             index += 2
@@ -190,7 +190,7 @@ def run_scripts(text):
 
 
 def yaml_comments(text):
-    found = []
+    found: list[int] = []
     position = 0
     for token in yaml.scan(text, Loader=yaml.SafeLoader):
         start = token.start_mark.index
@@ -261,7 +261,7 @@ def tracked_files():
 
 
 def scan(paths):
-    findings = []
+    findings: list[str] = []
     checked = 0
     for path in paths:
         if path.is_symlink() or not path.is_file():

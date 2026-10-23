@@ -89,7 +89,7 @@ class GoogleApi:
         self.deadline = deadline
         self.opener = urllib.request.build_opener(NoRedirect())
         self.token = None
-        self.token_time = 0
+        self.token_time = 0.0
 
     def access_token(self):
         if self.token is None or time.monotonic() - self.token_time > 180:
@@ -367,7 +367,7 @@ def sanitized_evidence(data, name, secret, binding=None, devices=None):
         cleaned = text.replace(secret, "[synthetic-admin-redacted]").encode()
     require(len(cleaned) <= 32 * 1024 * 1024, "SANITIZED_EVIDENCE_SIZE_BOUND_EXCEEDED")
     require(secret.encode() not in cleaned, "EVIDENCE_SECRET_REDACTION_FAILED")
-    entry = {"content": cleaned, "suffix": suffix}
+    entry: dict[str, object] = {"content": cleaned, "suffix": suffix}
     if report is not None:
         entry["source_report_sha256"] = source_report_sha256
         entry["original_validation"] = proof
@@ -444,9 +444,9 @@ class Publication:
         self.manifest = []
         self.inventories = []
         self.source_digests = set()
-        self.pending_inventory = None
-        self.staging = None
-        self.pending_paths = []
+        self.pending_inventory: tuple[str, bytes, dict] | None = None
+        self.staging: Path | None = None
+        self.pending_paths: list[str] = []
         self.staged_files = set()
         self.pending_size = 0
 
@@ -481,7 +481,8 @@ class Publication:
                 except OSError:
                     pass
             return
-        require(self.staging is not None and filename in self.pending_paths and filename not in self.staged_files, "INVENTORY_PUBLICATION_BINDING_MISMATCH")
+        if self.staging is None or filename not in self.pending_paths or filename in self.staged_files:
+            raise Blocked("INVENTORY_PUBLICATION_BINDING_MISMATCH")
         path = self.staging / Path(filename).name
         require(not path.exists() and not path.is_symlink(), "LOCAL_EVIDENCE_PATH_COLLISION")
         with path.open("xb") as stream:
@@ -525,6 +526,8 @@ class Publication:
         return pending
 
     def retain_inventory(self, index):
+        if self.pending_inventory is None or self.staging is None:
+            raise Blocked("INVENTORY_PUBLICATION_BINDING_MISMATCH")
         filename, content, metadata = self.pending_inventory
         batch = f"batch-{index:03d}"
         require(filename == f"{batch}/inventory-{index:03d}.json" and self.staged_files == set(self.pending_paths) - {filename}, "INVENTORY_PUBLICATION_BINDING_MISMATCH")
@@ -600,7 +603,7 @@ def evidence_objects(api, prefix, output, secret, deadline, binding=None, device
     emitted_bytes = 0
     manifest = []
     reports = []
-    report_sources = {}
+    report_sources: dict[str, str] = {}
     conflicting = False
     seen = set()
     for index, item in enumerate(objects):
@@ -710,7 +713,7 @@ def original_proof(report, source_digest, binding, devices):
 
 def validate_original_proofs(proofs, binding, devices, source_digests):
     context = validation_context(binding, devices)
-    unique = {}
+    unique: dict = {}
     retained = set()
     for proof in proofs:
         require(isinstance(proof, OriginalProof) and proof.context_digest == context and proof.source_digest in source_digests, "OEM_ORIGINAL_VALIDATION_BINDING_MISMATCH")
@@ -737,7 +740,7 @@ def run(args, api, deadline, binding, test_args, output):
     matrix_id = None
     payload = None
     publication = Publication(output, test_args["adminToken"])
-    proofs = []
+    proofs: list = []
     try:
         report["preflight"] = free_guard(api)
         catalog = api.request("GET", f"https://testing.googleapis.com/v1/testEnvironmentCatalog/ANDROID?projectId={PROJECT}")

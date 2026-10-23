@@ -44,7 +44,7 @@ def reviewed_trigger(finding):
 def classify(findings):
     if not isinstance(findings, list):
         raise ValueError("Workflow audit must be a complete JSON-v1 findings array")
-    result = {"blocking": [], "documented_exceptions": [], "non_blocking": []}
+    result: dict[str, list] = {"blocking": [], "documented_exceptions": [], "non_blocking": []}
     for finding in findings:
         if not isinstance(finding, dict):
             raise ValueError("Malformed workflow audit finding")

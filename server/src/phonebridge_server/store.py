@@ -430,7 +430,7 @@ class Store:
                     raise BridgeError("INVALID_RESULT", "Invalid or oversized JPEG screenshot", 422) from error
             if frame.ok and row["op"] in NATIVE_CLOCK_OPERATIONS:
                 package = data.get("package") if data is not None else None
-                if not isinstance(package, str) or len(package) > 255 or not PACKAGE_PATTERN.fullmatch(package):
+                if data is None or not isinstance(package, str) or len(package) > 255 or not PACKAGE_PATTERN.fullmatch(package):
                     raise BridgeError("INVALID_RESULT", "Native clock dispatch requires its resolved package", 422)
                 data["outcome"] = "dispatched"
                 data["verified"] = False

@@ -56,7 +56,7 @@ def package(wheelhouse, destination, source, environment):
             or environment.get("GITHUB_EVENT_NAME") != "push" or environment.get("GITHUB_REF") != "refs/heads/main"
             or environment.get("GITHUB_WORKFLOW_REF") != f"{REPOSITORY}/{WORKFLOW}@refs/heads/main"):
         raise RuntimeError("Deployment artifacts must be produced by exact push/main CI")
-    producer = {"repository": REPOSITORY, "workflow_path": WORKFLOW, "event": "push", "ref": "refs/heads/main"}
+    producer: dict[str, object] = {"repository": REPOSITORY, "workflow_path": WORKFLOW, "event": "push", "ref": "refs/heads/main"}
     for name, variable in (("repository_id", "GITHUB_REPOSITORY_ID"), ("workflow_id", "PHONEBRIDGE_CI_WORKFLOW_ID"), ("run_id", "GITHUB_RUN_ID"), ("run_attempt", "GITHUB_RUN_ATTEMPT")):
         value = environment.get(variable, "")
         if not re.fullmatch(r"[1-9][0-9]*", value):

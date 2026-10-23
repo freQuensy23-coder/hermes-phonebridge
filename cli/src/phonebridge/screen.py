@@ -156,25 +156,25 @@ def write_screenshot(path, content):
             if primary is None:
                 primary = error
     if stream is not None:
-        released, stream = stream, None
+        released_stream, stream = stream, None
         try:
-            released.close()
+            released_stream.close()
         except BaseException as error:
             if primary is None:
                 primary = error
     if descriptor is not None:
-        released, descriptor = descriptor, None
+        released_descriptor, descriptor = descriptor, None
         try:
-            os.close(released)
+            os.close(released_descriptor)
         except BaseException as error:
             if primary is None:
                 primary = error
     if primary is not None:
         remove_created(directory)
     while directories:
-        released = directories.pop()
+        released_directory = directories.pop()
         try:
-            os.close(released)
+            os.close(released_directory)
         except BaseException as error:
             if primary is None:
                 primary = error
