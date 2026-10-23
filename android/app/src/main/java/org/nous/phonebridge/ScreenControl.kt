@@ -31,9 +31,9 @@ object ScreenControl {
         BridgeService.refresh()
     }
 
-    fun describe(context: Context): String = when (val left = remaining(context)) {
-        null -> "Screen control: OFF"
+    fun summary(left: Long?): String? = when (left) {
+        null -> null
         UNTIL_STOPPED -> "Screen control: ON until stopped"
-        else -> ((left + 999) / 1000).let { "Screen control: ON, %d:%02d left".format(it / 60, it % 60) }
+        else -> "Screen control: ON, ${(left + 59999) / 60000} min left"
     }
 }

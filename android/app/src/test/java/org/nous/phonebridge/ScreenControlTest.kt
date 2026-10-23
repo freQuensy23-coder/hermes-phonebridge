@@ -18,4 +18,12 @@ class ScreenControlTest {
         assertEquals(ScreenControl.UNTIL_STOPPED, ScreenControl.remaining(until, Long.MAX_VALUE - 1))
         assertNull(ScreenControl.remaining(0L, 5L))
     }
+
+    @Test fun notificationSummaryRoundsUpToWholeMinutesAndDisappearsWhenOff() {
+        assertNull(ScreenControl.summary(null))
+        assertEquals("Screen control: ON until stopped", ScreenControl.summary(ScreenControl.UNTIL_STOPPED))
+        assertEquals("Screen control: ON, 10 min left", ScreenControl.summary(10 * 60000L))
+        assertEquals("Screen control: ON, 10 min left", ScreenControl.summary(9 * 60000L + 1))
+        assertEquals("Screen control: ON, 1 min left", ScreenControl.summary(1L))
+    }
 }
