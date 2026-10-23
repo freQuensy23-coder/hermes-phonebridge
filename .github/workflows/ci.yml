@@ -86,7 +86,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
         with:
           cache-read-only: false
-      - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest assembleRelease
+      - run: chmod +x gradlew && ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest assembleRelease :debugfixture:assembleDebug
         working-directory: android
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -98,13 +98,14 @@ jobs:
             android/app/build/test-results/
           if-no-files-found: error
   android-e2e:
-    name: android-e2e (${{ matrix.api }})
+    name: android-e2e (${{ matrix.api }})${{ matrix.part == 2 && ' part 2' || '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         api: [31, 35]
+        part: [1, 2]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -117,8 +118,6 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a
-        with:
-          cache-read-only: false
       - name: Prepare isolated Android runner capacity and KVM
         run: |
           sudo chmod 666 /dev/kvm
@@ -134,6 +133,8 @@ jobs:
           PHONEBRIDGE_REVISION: ${{ github.sha }}
         run: python3 ci/prepare_emulator_server.py start
       - uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
+        env:
+          PHONEBRIDGE_TEST_PART: ${{ matrix.part }}
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
@@ -148,7 +149,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: emulator-api${{ matrix.api }}-${{ github.sha }}
+          name: emulator-api${{ matrix.api }}-part${{ matrix.part }}-${{ github.sha }}
           overwrite: true
           path: |
             android/app/build/reports/androidTests/
