@@ -3,6 +3,7 @@ package org.nous.phonebridge
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -20,10 +21,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var name: EditText
     private lateinit var code: EditText
-    private val worker = Executors.newSingleThreadExecutor()
     private val handler = Handler(Looper.getMainLooper())
-    private var pairing = false
-    @Volatile private var pairingGeneration = 0L
     private val updater = object : Runnable {
         override fun run() { render(); handler.postDelayed(this, 1000) }
     }
@@ -33,7 +31,6 @@ class MainActivity : Activity() {
         window.statusBarColor = android.graphics.Color.rgb(245, 247, 246)
         window.navigationBarColor = android.graphics.Color.rgb(245, 247, 246)
 
-        // Credentials and one-time pairing codes must not appear in Recents or screenshots.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         ui = OwnerUi(this, ::action)
         setContentView(ui.root)
@@ -44,6 +41,7 @@ class MainActivity : Activity() {
         status = ui.status
         name = ui.name
         code = ui.code
+        visible = this
         render()
     }
     private lateinit var ui: OwnerUi
@@ -93,7 +91,6 @@ class MainActivity : Activity() {
     private fun cancelPairing() {
         synchronized(MainActivity) {
             pairingGeneration++
-            // A response may have saved credentials just before its UI callback ran.
             if (pairing) BridgeService.stop(this, true)
             pairing = false
         }
@@ -127,7 +124,7 @@ class MainActivity : Activity() {
         ui.pairing(true)
         val appContext = applicationContext
         worker.execute {
-            try {
+            val failed = try {
                 val value = BridgeHttp.claim(qr, deviceName, BuildConfig.DEBUG)
                 synchronized(MainActivity) {
                     if (generation != pairingGeneration) return@execute
@@ -135,23 +132,24 @@ class MainActivity : Activity() {
                     DurableStore(appContext).use { it.clearAll() }
                     Credentials(appContext).save(value)
                 }
-                handler.post {
-                    if (generation != pairingGeneration) return@post
-                    pairing = false
-                    if (!isDestroyed) {
-                        try { BridgeService.start(this); render() } catch (e: Exception) { render(); message((e as? BridgeFailure)?.message ?: "Paired, but the connection did not start; tap Resume connection.") }
-                    }
-                }
+                null
             } catch (e: Exception) {
-                handler.post { if (!isDestroyed && generation == pairingGeneration) { pairing = false; render(); message((e as? BridgeFailure)?.message ?: "Pairing failed. A claimed token cannot be reused; generate a fresh QR.") } }
+                (e as? BridgeFailure)?.message ?: "Pairing failed. A claimed token cannot be reused; generate a fresh QR."
             }
+            mainHandler.post { finishPairing(appContext, generation, failed) }
         }
     }
     private fun render() {
-        if (!::status.isInitialized || pairing) return
+        if (!::status.isInitialized) return
+        if (pairing) {
+            status.text = "Connecting to server…"
+            ui.pairing(true)
+            return
+        }
         ui.pairing(false)
         val value = try { Credentials(this).load() } catch (_: Exception) { null }
         ui.render(value, Access.permissions(this), getSharedPreferences("connection", MODE_PRIVATE), ScreenControl.remaining(this))
+        pendingMessage?.let { pendingMessage = null; message(it) }
     }
     private fun message(value: String) { if (!isFinishing && !isDestroyed) AlertDialog.Builder(this).setMessage(value).setPositiveButton("OK", null).show() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -174,9 +172,31 @@ class MainActivity : Activity() {
     }
     override fun onDestroy() {
         handler.removeCallbacks(updater)
-        cancelPairing()
-        worker.shutdownNow()
+        if (visible === this) visible = null
+        if (isFinishing && !isChangingConfigurations) cancelPairing()
         super.onDestroy()
     }
-    companion object { @Volatile var resumed = false }
+    companion object {
+        @Volatile var resumed = false
+        private val worker = Executors.newSingleThreadExecutor()
+        private val mainHandler = Handler(Looper.getMainLooper())
+        @Volatile private var pairing = false
+        @Volatile private var pairingGeneration = 0L
+        private var pendingMessage: String? = null
+        private var visible: MainActivity? = null
+
+        private fun finishPairing(context: Context, generation: Long, failed: String?) {
+            if (generation != pairingGeneration) return
+            pairing = false
+            val problem = failed ?: try {
+                BridgeService.start(context)
+                null
+            } catch (e: Exception) {
+                (e as? BridgeFailure)?.message ?: "Paired, but the connection did not start; tap Resume connection."
+            }
+            val activity = visible
+            if (problem != null) pendingMessage = problem
+            activity?.render()
+        }
+    }
 }

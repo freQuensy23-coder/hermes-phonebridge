@@ -65,6 +65,7 @@ class BridgeService : Service() {
     @Volatile private var epoch = 0L
     private var retry: java.util.concurrent.ScheduledFuture<*>? = null
     private var helloState = ""
+    @Volatile private var notifiedScreen: String? = null
     private val sentEvents = EventSendWindow()
     private data class PendingResult(val expires: Long, val id: String, val text: String)
     private val pendingResults = ArrayDeque<PendingResult>()
@@ -85,7 +86,7 @@ class BridgeService : Service() {
         startForeground(18940, notification("Starting"))
         store.recover()
         manager.registerDefaultNetworkCallback(network)
-        control.scheduleWithFixedDelay({ dispatch { advertise(); flush() } }, 3, 3, TimeUnit.SECONDS)
+        control.scheduleWithFixedDelay({ dispatch { refreshScreenNotice(); advertise(); flush() } }, 3, 3, TimeUnit.SECONDS)
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP || intent?.action == DISCONNECT) {
@@ -303,10 +304,15 @@ class BridgeService : Service() {
         prefs.edit().putString("status", value).apply()
         getSystemService(NotificationManager::class.java).notify(18940, notification(value))
     }
+    private fun refreshScreenNotice() {
+        if (ScreenControl.summary(ScreenControl.remaining(this)) != notifiedScreen) getSystemService(NotificationManager::class.java).notify(18940, notification(prefs.getString("status", "Connected") ?: "Connected"))
+    }
     private fun notification(status: String): Notification {
+        val screen = ScreenControl.summary(ScreenControl.remaining(this))
+        notifiedScreen = screen
         val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val stop = PendingIntent.getService(this, 2, Intent(this, BridgeService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText(if (ScreenControl.enabled(this)) "${ScreenControl.describe(this)} · $status" else status).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
+        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("PhoneBridge").setContentText(if (screen != null) "$screen · $status" else status).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE)
             .addAction(Notification.Action.Builder(null, "Stop connection", stop).build()).build()
     }
     private fun halt(message: String, erase: Boolean) {

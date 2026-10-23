@@ -102,7 +102,7 @@ def open_connection(parsed, deadline):
                 active_socket.connect(address)
                 if parsed.scheme == "https":
                     deadline.remaining()
-                    active_socket = connection._context.wrap_socket(
+                    active_socket = getattr(connection, "_context").wrap_socket(
                         active_socket, server_hostname=connection.host, do_handshake_on_connect=False,
                     )
                     deadline.track(active_socket)

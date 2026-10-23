@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from .auth import require_admin
+from .config import Settings
 from .protocol import BridgeError, decode_json, encode_json
 
 
@@ -104,7 +105,6 @@ class RequestBoundary:
             return
         upload = scope.get("method") == "POST" and UPLOAD_PATH.fullmatch(scope["path"]) is not None
         if upload:
-            # File bodies can be 32 MiB: authenticate before allocating or awaiting any bytes.
             try:
                 require_admin(Headers(scope=scope), self.settings)
             except BridgeError as error:
@@ -187,8 +187,8 @@ class RequestBoundary:
 
 @dataclass
 class Peer:
-    websocket: object
-    settings: object
+    websocket: WebSocket
+    settings: Settings
     queue: asyncio.Queue
     lock: asyncio.Lock
     closed: bool = False

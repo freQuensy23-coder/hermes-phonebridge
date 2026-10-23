@@ -8,8 +8,7 @@ REVIEWED_DEPLOY_WORKFLOW_SHA256 = "df3e0b60a11f537754eb7e543a33f114043b813bed80d
 TRIGGER_REASON = "The reviewed workflow_run job never checks out or executes upstream code/artifacts. It authenticates the exact repository, CI workflow path, successful push/main run, owner actors and current main before passing a SHA to a separately restricted host gate. The complete workflow bytes are pinned here; any change requires re-review. The generic high-severity trigger finding remains visible."
 EXCEPTIONS = {
     (".github/workflows/deploy.yml", "deploy"): "Private environment protection is unavailable. Only owner-originated completed main CI is accepted; the restricted host command independently verifies the merged PR and coherent CI producer.",
-    (".github/workflows/release.yml", "sign"): "Private environment protection is unavailable. Signing is isolated from build execution on a fresh runner, gated by owner-merged source and accepted CI provenance.",
-    (".github/workflows/release.yml", "publish"): "Private environment protection is unavailable. A fresh publisher receives only validated inert release assets and an ephemeral least-scope publication token.",
+    (".github/workflows/ci.yml", "release"): "Signing secrets reach only the main-push release job after every CI gate succeeds. It has no checkout and runs no build tooling or project code; it signs and publishes artifacts produced by the same run.",
 }
 SEVERITIES = {"Informational", "Low", "Medium", "High"}
 
@@ -45,7 +44,7 @@ def reviewed_trigger(finding):
 def classify(findings):
     if not isinstance(findings, list):
         raise ValueError("Workflow audit must be a complete JSON-v1 findings array")
-    result = {"blocking": [], "documented_exceptions": [], "non_blocking": []}
+    result: dict[str, list] = {"blocking": [], "documented_exceptions": [], "non_blocking": []}
     for finding in findings:
         if not isinstance(finding, dict):
             raise ValueError("Malformed workflow audit finding")

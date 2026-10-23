@@ -13,7 +13,6 @@ import android.view.WindowInsets
 import android.widget.*
 import org.json.JSONObject
 
-/** Native views shared by the setup and daily-use flows. No network or permission side effects. */
 class OwnerUi(private val activity: Activity, private val action: (String) -> Unit) {
     private val ink = Color.rgb(18, 35, 44)
     private val muted = Color.rgb(91, 108, 115)
@@ -65,7 +64,6 @@ class OwnerUi(private val activity: Activity, private val action: (String) -> Un
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         isSingleLine = true; isSaveEnabled = false; importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
         filters = arrayOf(InputFilter.LengthFilter(8192)); setTextColor(ink)
-        // Prevent third-party keyboards from retaining the one-time secret.
         imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
     }
     private val content = column().apply { setPadding(dp(20), dp(4), dp(20), dp(24)) }

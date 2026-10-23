@@ -92,7 +92,6 @@ def file_wire(environment, monkeypatch):
             responses.append((status, content, headers))
 
         def wait_for_requests(self, count, timeout=5):
-            # See the wire fixture in conftest.py: recording can lag a client that already gave up.
             with recorded:
                 return recorded.wait_for(lambda: len(requests) >= count, timeout)
 
@@ -399,7 +398,6 @@ def test_invalid_delivery_flags_are_rejected_without_upload(file_wire, tmp_path,
 def test_wait_uploads_once_then_only_polls_original_command_for_confirmed_result(file_wire, tmp_path, capsys,
                                                                             monkeypatch, group):
     sleeps = []
-    # Record the poll pause instead of really sleeping the default 0.5 s between the two reads.
     monkeypatch.setattr("phonebridge.cli.Client", lambda settings: Client(settings, sleep=sleeps.append))
     path = local_file(tmp_path, "photo.png", image_bytes("PNG"))
     queued = command_resource()

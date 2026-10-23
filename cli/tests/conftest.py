@@ -61,8 +61,6 @@ def wire():
         do_DELETE = respond
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    # serve_forever only notices shutdown() between polls; the 0.5 s default made every
-    # teardown sleep half a second.
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_port}"
@@ -78,8 +76,6 @@ def wire():
             responses.append((status, content, headers))
 
         def wait_for_requests(self, count, timeout=5):
-            # The server thread records a request on its own schedule; a client that gives up
-            # before any response arrives can return before that happens on a loaded machine.
             with recorded:
                 return recorded.wait_for(lambda: len(requests) >= count, timeout)
 

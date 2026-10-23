@@ -13,7 +13,6 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Real Android view screenshots with synthetic state, no server or personal credentials. */
 @RunWith(AndroidJUnit4::class)
 class OwnerUiTourTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -39,7 +38,6 @@ class OwnerUiTourTest {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
                 lateinit var ui: OwnerUi
                 scenario.onActivity { activity ->
-                    // Production windows are secure. Only this synthetic-state test clears the flag.
                     activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     ui = OwnerUi(activity) { events.add(it) }
                     activity.setContentView(ui.root)

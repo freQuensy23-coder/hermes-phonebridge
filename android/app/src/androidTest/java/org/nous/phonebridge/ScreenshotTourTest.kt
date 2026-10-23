@@ -60,11 +60,9 @@ class ScreenshotTourTest {
     }
     private fun snap(name: String) {
         instrumentation.waitForIdleSync()
-        // Capture once the UI has settled: no accessibility event for 300 ms (bounded, so a busy screen still gets captured).
         try { automation.waitForIdle(300, 3000) } catch (_: java.util.concurrent.TimeoutException) { }
         shell("screencap -p $directory/$name.png")
     }
-    /** Waits (bounded) until [pkg] owns the active window; the tour continues either way, as it did with fixed delays. */
     private fun awaitActiveWindow(pkg: String) {
         val deadline = SystemClock.elapsedRealtime() + 3000
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -98,7 +96,6 @@ class ScreenshotTourTest {
     }
     private fun command(op: String, args: JSONObject): JSONObject =
         finished(http("POST", "/v1/devices/$deviceId/commands", JSONObject().put("op", op).put("args", args).put("ttl_seconds", 60)).getString("id"))
-    /** Queues a file for the phone and returns the command ID; [received] waits for the phone's result. */
     private fun send(name: String, mime: String, kind: String, bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         val url = "$server/v1/devices/$deviceId/files".toHttpUrl().newBuilder().addQueryParameter("name", name)
@@ -245,7 +242,6 @@ class ScreenshotTourTest {
         waitUntil { http("GET", "/v1/devices/${claimed.deviceId}").getJSONArray("capabilities").toString().contains("screen.tap") }
         notificationShade("06-ongoing-notification")
 
-        // Both files are queued before waiting; the phone still receives them one after the other.
         val imageCommand = send("hermes-photo.png", "image/png", "image", sampleImage())
         val documentCommand = send("meeting-notes.txt", "text/plain", "file", "Agenda\n1. Ship PhoneBridge MVP\n2. Review screenshots\n".toByteArray())
         val image = received(imageCommand)

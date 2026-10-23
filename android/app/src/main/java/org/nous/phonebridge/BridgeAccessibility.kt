@@ -37,8 +37,6 @@ class BridgeAccessibility : AccessibilityService() {
     private fun checkScreenAccess(mutating: Boolean = false) {
         ExecutionGuard.check()
         if (!ScreenControl.enabled(this)) failure("PERMISSION_REQUIRED", "Screen control has stopped or expired")
-        // Never let an agent extend its own consent or alter the app's trust settings.
-        // Check again on the UI thread immediately before dispatch, including overlays.
         if (mutating && (MainActivity.resumed || rootInActiveWindow?.packageName?.toString() == packageName ||
                 windows.any { it.root?.packageName?.toString() == packageName })) {
             failure("PERMISSION_REQUIRED", "PhoneBridge controls must be operated by the phone owner")
