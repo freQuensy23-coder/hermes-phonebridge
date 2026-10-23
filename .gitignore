@@ -7,6 +7,7 @@ __pycache__/
 build/
 dist/
 android/.gradle/
+android/.clock-source/
 android/local.properties
 *.jks
 *.keystore
@@ -15,3 +16,4 @@ android/local.properties
 *.sqlite*
 *.png
 local/
+!docs/screenshots/*.png

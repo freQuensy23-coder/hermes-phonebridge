@@ -1,0 +1,8 @@
+<resources>
+    <item name="increment" type="id" />
+    <item name="counter" type="id" />
+    <item name="editor" type="id" />
+    <item name="scroll" type="id" />
+    <item name="password" type="id" />
+    <item name="fixture_title" type="id" />
+</resources>

@@ -1,0 +1,23 @@
+[Unit]
+Description=PhoneBridge agent phone relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/phonebridge/current
+EnvironmentFile=%h/.config/phonebridge/server.env
+EnvironmentFile=%h/.local/share/phonebridge/current/revision.env
+ExecStart=%h/.local/share/phonebridge/current/.venv/bin/uvicorn phonebridge_server.app:create_app --factory --host 127.0.0.1 --port 18940 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/phonebridge/state
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

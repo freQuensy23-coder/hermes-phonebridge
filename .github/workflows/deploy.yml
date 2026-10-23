@@ -1,0 +1,53 @@
+name: Deploy
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:
+  group: phonebridge-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    name: deploy
+    if: github.repository == 'freQuensy23-coder/hermes-phonebridge' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.actor == 'freQuensy23-coder' && github.triggering_actor == 'freQuensy23-coder'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Bind completed CI producer and current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python -c 'import os,re; assert re.fullmatch("[0-9]+",os.environ["RUN_ID"]); assert re.fullmatch("[0-9a-f]{40}",os.environ["REVISION"])'
+          gh api "repos/freQuensy23-coder/hermes-phonebridge/actions/runs/$RUN_ID" > "$RUNNER_TEMP/upstream.json"
+          gh api repos/freQuensy23-coder/hermes-phonebridge/commits/main > "$RUNNER_TEMP/main.json"
+          python -c 'import json,os; from pathlib import Path; root=Path(os.environ["RUNNER_TEMP"]); d=json.loads((root/"upstream.json").read_text()); main=json.loads((root/"main.json").read_text()); repo="freQuensy23-coder/hermes-phonebridge"; assert d["id"]==int(os.environ["RUN_ID"]); assert d["repository"]["full_name"]==repo and d["head_repository"]["full_name"]==repo; assert d["path"].split("@",1)[0]==".github/workflows/ci.yml"; assert d["event"]=="push" and d["head_branch"]=="main"; assert d["status"]=="completed" and d["conclusion"]=="success"; assert d["head_sha"]==os.environ["REVISION"]==main["sha"]; assert d["actor"]["login"]=="freQuensy23-coder" and d["triggering_actor"]["login"]=="freQuensy23-coder"; print("Accepted CI",d["id"],d["head_sha"],d["run_attempt"])'
+      - name: Promote accepted immutable release
+        env:
+          SSH_KEY: ${{ secrets.PHONEBRIDGE_DEPLOY_KEY }}
+          SSH_HOST: ${{ vars.PHONEBRIDGE_SSH_HOST }}
+          SSH_KNOWN_HOSTS: ${{ vars.PHONEBRIDGE_SSH_KNOWN_HOSTS }}
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          umask 077
+          test -n "$SSH_KEY" && test -n "$SSH_HOST" && test -n "$SSH_KNOWN_HOSTS"
+          install -m 700 -d "$HOME/.ssh"
+          trap 'rm -f "$HOME/.ssh/phonebridge"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/phonebridge"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          timeout 660 ssh -i "$HOME/.ssh/phonebridge" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 "private@$SSH_HOST" "deploy $REVISION"
+      - name: Read public HTTPS revision from independent runner
+        env:
+          PUBLIC_URL: ${{ vars.PHONEBRIDGE_PUBLIC_URL }}
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python -c 'import os; from urllib.parse import urlsplit; u=urlsplit(os.environ["PUBLIC_URL"]); assert u.scheme=="https" and u.hostname and not u.username and not u.password and not u.query and not u.fragment and u.path in ("","/")'
+          status=$(curl --fail --silent --show-error --max-time 15 --max-redirs 0 --proto '=https' --tlsv1.2 --output "$RUNNER_TEMP/public-health.json" --write-out '%{http_code}' "${PUBLIC_URL%/}/healthz")
+          test "$status" = 200
+          python -c 'import json,os; from pathlib import Path; p=Path(os.environ["RUNNER_TEMP"])/"public-health.json"; assert p.stat().st_size<=8192; d=json.loads(p.read_text()); assert d["status"]=="ok" and d["version"]=="0.1.0" and d["revision"]==os.environ["REVISION"]; print(json.dumps({k:d[k] for k in ("status","version","revision")}))'

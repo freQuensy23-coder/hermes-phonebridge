@@ -1,0 +1,11 @@
+<resources>
+    <item name="device_name" type="id" />
+    <item name="screen_control_status" type="id" />
+    <item name="screen_enable_10" type="id" />
+    <item name="screen_enable_15" type="id" />
+    <item name="screen_enable_60" type="id" />
+    <item name="screen_enable_manual" type="id" />
+    <item name="screen_stop" type="id" />
+    <item name="pairing_code" type="id" />
+    <item name="pair_with_code" type="id" />
+</resources>
