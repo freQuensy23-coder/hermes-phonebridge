@@ -241,7 +241,7 @@ def create_app(settings: Settings | None = None, clock=time.time):
                 raise BridgeError("INVALID_FRAME", "Frame does not match the contract", 422) from error
 
     async def sender(peer, device_id, session_id):
-        sent = set()
+        sent: set[str] = set()
         while not peer.closed:
             await execute("touch", device_id, session_id)
             for _ in range(settings.outbound_queue_size):

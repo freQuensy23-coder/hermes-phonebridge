@@ -25,10 +25,10 @@ You need a Linux server running Python 3.11+, a hostname with HTTPS, and an Andr
 
 ### 1. Run the server
 
-Clone the branch containing the app (the current preview development branch is `feat/accessibility-mvp`):
+Clone the repository:
 
 ```sh
-git clone --branch feat/accessibility-mvp https://github.com/freQuensy23-coder/hermes-phonebridge.git
+git clone https://github.com/freQuensy23-coder/hermes-phonebridge.git
 cd hermes-phonebridge
 python3 -m venv .venv
 . .venv/bin/activate
@@ -49,7 +49,7 @@ Put nginx with a valid TLS certificate in front of it. Expose only `/v1/pair/cla
 
 ### 2. Pair the phone
 
-Install an APK signed with a private key you trust. For your own phone, build the debug APK under [Build and check](#build-and-check); it uses your local signing key. **Replace the old preview APK** as described under [Security and preview builds](#security-and-preview-builds).
+Install `phonebridge-vN.apk` from the latest [release](https://github.com/freQuensy23-coder/hermes-phonebridge/releases/latest), signed with the project's private release key, or build the debug APK under [Build and check](#build-and-check) with your local signing key. **Replace the old preview APK** as described under [Security and preview builds](#security-and-preview-builds).
 
 On the server, in another terminal with the virtual environment active:
 
@@ -101,7 +101,7 @@ Your server and its admin token have broad access to your phone while screen con
 
 The app encrypts device credentials with Android Keystore, disables backup, protects its window from screenshots/Recents, and refuses remote input on its own controls. The server hashes pairing/device tokens and checks per-device file access. See the [security review](docs/security-review.md) for findings, fixes and limits.
 
-**The old `mvp-preview-0f059c7` APK was signed with a private key published in this repository.** Anyone holding that key can sign a replacement APK. Deleting the key from the branch cannot make installed copies trustworthy. Uninstall that preview, install a build signed by a private key you trust, and pair again. Normal debug builds now use the developer's local Android debug key; use a private release key for distribution. No new signed release is published by this PR.
+**The old `mvp-preview-0f059c7` APK was signed with a private key published in this repository.** Anyone holding that key can sign a replacement APK. Deleting the key from the branch cannot make installed copies trustworthy. Uninstall that preview, install a build signed by a private key you trust, and pair again. Normal debug builds now use the developer's local Android debug key; use a private release key for distribution. Releases from `main` are signed with the private release key described under [CI/CD](#cicd).
 
 ## Build and check
 
@@ -109,9 +109,22 @@ JDK 17 and Android SDK 35 are required for Android; the minimum supported phone 
 
 ```sh
 python -m pip install -e './server[test]' -e './cli[test]'
-python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests
+python -m pytest server/tests cli/tests deploy/tests ci/tests
 cd android
 ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest
 ```
 
 CI exercises the server/CLI, Android unit tests and emulator flows on API 31 and 35. The owner UI screenshot test uses example data; the separate end-to-end screenshot tour pairs against an isolated real server. Protocol: [contract](docs/contract.md). Android restrictions: [support matrix](docs/support-matrix.md).
+
+## CI/CD
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- `lint`: ruff, shellcheck, actionlint and Android lint.
+- `typecheck`: mypy with `check_untyped_defs` (`mypy.ini`; the host-pinned `deploy/rollout.py` keeps signature-only checking) and Kotlin compilation of main, unit-test and instrumentation sources.
+- `no-comments`: `ci/check_no_comments.py` fails on any comment or docstring in tracked code, YAML, shell, TOML, XML and Docker files.
+- `python` and `android-build`: unit tests, wheels and debug/instrumentation/release APKs.
+- `image`: builds `server/Dockerfile` and smoke-tests `/healthz`.
+- `security`, `offline-runtime` and `android-e2e`: dependency and workflow audits, the offline wheel install, and emulator instrumentation on API 31 and 35.
+
+Main runs are queued, not replaced, so every push to `main` that passes all gates is released as `vN`, where N is the highest existing `vN` tag plus one; a rerun of the same commit reuses its existing tag and completes the same release. The `release` job signs the APK built in the same run with the stable release key, checks its certificate against `PHONEBRIDGE_SIGNER_SHA256`, pushes `ghcr.io/frequensy23-coder/phonebridge-server:vN` and `:latest`, and publishes `phonebridge-vN.apk`, both wheels and `SHA256SUMS` as a GitHub release. The APK has `versionCode` N and `versionName` `0.1.0+N`.

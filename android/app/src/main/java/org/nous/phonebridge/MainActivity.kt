@@ -33,7 +33,6 @@ class MainActivity : Activity() {
         window.statusBarColor = android.graphics.Color.rgb(245, 247, 246)
         window.navigationBarColor = android.graphics.Color.rgb(245, 247, 246)
 
-        // Credentials and one-time pairing codes must not appear in Recents or screenshots.
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         ui = OwnerUi(this, ::action)
         setContentView(ui.root)
@@ -93,7 +92,6 @@ class MainActivity : Activity() {
     private fun cancelPairing() {
         synchronized(MainActivity) {
             pairingGeneration++
-            // A response may have saved credentials just before its UI callback ran.
             if (pairing) BridgeService.stop(this, true)
             pairing = false
         }

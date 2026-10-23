@@ -30,9 +30,6 @@ def test_package_metadata_and_direct_dependency_pins():
 
 def test_wheel_sdist_installed_entry_and_skill_resource(tmp_path, wire):
     artifacts = tmp_path / "artifacts"
-    # A plain `python -m build <dir>` already builds its wheel from the sdist, so building that and
-    # then a second wheel from the extracted sdist paid for the same isolated build twice. Build the
-    # sdist once and the wheel once from the extracted, repository-free sdist, and check that wheel.
     run([sys.executable, "-m", "build", "--sdist", str(CLI_ROOT), "--outdir", str(artifacts)], cwd=tmp_path)
     sdist = next(artifacts.glob("phonebridge_cli-0.1.0.tar.gz"))
     canonical = CLI_ROOT.parent / "skills" / "phonebridge" / "SKILL.md"

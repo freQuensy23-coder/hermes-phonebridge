@@ -104,7 +104,6 @@ class AccessibilityInstrumentationTest {
         assertEquals(context.packageName, tree.getString("package"))
         val nodes = tree.getJSONArray("nodes")
         assertTrue((0 until nodes.length()).any { nodes.getJSONObject(it).optString("resource_id") == "org.nous.phonebridge:id/device_name" })
-        // Remote commands must never operate the app's own consent/trust controls.
         refused("PERMISSION_REQUIRED") { handlers.execute("screen.input", screenArgs("screen.input")) }
         refused("PERMISSION_REQUIRED") { handlers.execute("screen.tap", JSONObject().put("x", 100).put("y", 100)) }
         refused("PERMISSION_REQUIRED") { handlers.execute("screen.global", JSONObject().put("action", "notifications")) }

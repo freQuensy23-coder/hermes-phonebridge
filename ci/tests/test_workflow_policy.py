@@ -46,6 +46,13 @@ def test_environment_exception_does_not_cover_build_job():
     assert policy.classify([item])["blocking"] == [item]
 
 
+def test_release_signing_secrets_are_documented_only_for_release_job():
+    item = finding("secrets-outside-env", "Medium", ".github/workflows/ci.yml", "release")
+    assert policy.classify([item])["documented_exceptions"][0]["finding"] == item
+    build = finding("secrets-outside-env", "Medium", ".github/workflows/ci.yml", "android-build")
+    assert policy.classify([build])["blocking"] == [build]
+
+
 def test_info_and_low_findings_are_retained():
     items = [finding("anonymous-definition", "Informational"), finding("undocumented-permissions", "Low")]
     assert policy.classify(items)["non_blocking"] == items

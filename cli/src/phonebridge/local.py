@@ -63,12 +63,13 @@ def pairing_payload(result, now):
 
 def pairing_qr(result, path, now):
     import qrcode
+    from qrcode.image.pil import PilImage
 
     encoded, metadata = pairing_payload(result, now)
     output = Path(path).expanduser().absolute()
     if output.suffix.lower() != ".png":
         raise BridgeError("VALIDATION_ERROR", "QR output must be a PNG path.")
-    image = qrcode.make(encoded, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4)
+    image = qrcode.make(encoded, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=8, border=4, image_factory=PilImage)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     write_private_new(output, buffer.getvalue())

@@ -187,9 +187,6 @@ class ServerInstrumentationTest {
         val prefix = "ci-${UUID.randomUUID().toString().take(8)}"
         val binary = ByteArray(300_000) { ((it * 31 + 7) and 255).toByte() }
         val image = png()
-        // Queue every delivery up front. The phone still receives them one at a time and in this order (the server
-        // dispatches by queue order and the service runs commands serially), so the second same-name file still
-        // arrives after the first is published; only the server dispatch delay and the polling no longer add up.
         val deliveries = listOf(
             queueDelivery(id, "$prefix-binary.bin", "application/octet-stream", "file", binary),
             queueDelivery(id, "$prefix-empty.txt", "text/plain", "file", byteArrayOf()),
@@ -219,7 +216,6 @@ class ServerInstrumentationTest {
         scenario!!.onActivity { BridgeService.stop(it) }
         waitUntil { BridgeService.current == null && !http("GET", "/v1/devices/$id").getBoolean("online") }
         val expired = enqueue(id, "device.info", ttl = 1)
-        // The phone is offline, so only the 1 s TTL can make this command terminal; terminal() waits exactly that long.
         assertEquals("expired", terminal(expired.getString("id")).getString("status"))
         scenario!!.onActivity { BridgeService.start(it) }
         waitUntil { online(id) }

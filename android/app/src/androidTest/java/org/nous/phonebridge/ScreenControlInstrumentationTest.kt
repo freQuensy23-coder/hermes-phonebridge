@@ -30,12 +30,6 @@ import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
 import java.util.concurrent.TimeUnit
 
-/**
- * Pairing through the public tunnel, starting the service and the first hello take seconds, so the tests in this
- * class share one paired device and one Accessibility grant. [setup] re-checks that state before every test and
- * pairs a fresh device if an earlier test broke it; [tearDownClass] revokes the device and restores every setting,
- * so the class leaves nothing behind and still runs alone, in any order or on its own shard.
- */
 @RunWith(AndroidJUnit4::class)
 class ScreenControlInstrumentationTest {
     private var scenario: ActivityScenario<MainActivity>? = null
@@ -76,8 +70,6 @@ class ScreenControlInstrumentationTest {
         waitUntil { localText("counter") == "Counter: 1" }
         val firstIncrement = SystemClock.elapsedRealtime()
         assertEquals("Counter: 1", treeNode(tree(), "counter").getString("text"))
-        // One tap must increment exactly once: the counter has to stay at 1 for at least 300 ms after it changed.
-        // The tree round trip above usually covers that window already; sleep only for whatever is left of it.
         (300 - (SystemClock.elapsedRealtime() - firstIncrement)).takeIf { it > 0 }?.let { Thread.sleep(it) }
         assertEquals("Counter: 1", localText("counter"))
         val requested = "Synthetic HTTP WSS input"
@@ -97,7 +89,6 @@ class ScreenControlInstrumentationTest {
         assertTrue(swipe.getBoolean("gesture_completed"))
         waitUntil { localNodes().filter { it.isVisibleToUser && it.text?.startsWith("Synthetic scroll row") == true }.map { it.text.toString() } != before }
         assertEquals("Counter: 1", localText("counter"))
-        // Last, because tapping the field opens the soft keyboard over the lower part of the screen.
         val editor = center(treeNode(tree(), "editor"))
         success(command("screen.tap", JSONObject().put("x", editor.first).put("y", editor.second)))
         waitUntil { localNodes().any { it.viewIdResourceName == "$fixture:id/editor" && it.isFocused } }
@@ -144,7 +135,6 @@ class ScreenControlInstrumentationTest {
         refused(command("screen.tap", JSONObject().put("x", 100).put("y", 100)), "PERMISSION_REQUIRED")
         refused(command("screen.global", JSONObject().put("action", "notifications")), "PERMISSION_REQUIRED")
         scenario!!.onActivity { assertEquals("Before", it.findViewById<android.widget.EditText>(R.id.device_name).text.toString()) }
-        // An agent may safely leave the dashboard after the owner enables a session.
         dispatched(success(command("screen.global", JSONObject().put("action", "home"))))
         waitUntil { automation.rootInActiveWindow?.packageName?.toString() != context.packageName }
 
@@ -249,7 +239,6 @@ class ScreenControlInstrumentationTest {
             failure?.let { throw it }
         }
 
-        /** Awake, unlocked, PhoneBridge Accessibility granted and connected: re-applied before every test. */
         private fun prepareDevice() {
             retrieveInteractiveWindows()
             val services = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty().split(':').filter { it.isNotEmpty() }
@@ -259,7 +248,6 @@ class ScreenControlInstrumentationTest {
             shell("wm dismiss-keyguard")
             waitUntil { BridgeAccessibility.current != null }
         }
-        /** Brings the shared session to the state every test starts from; pairs a new device only when needed. */
         private fun ensureConnected(scenario: ActivityScenario<MainActivity>) {
             val id = deviceId
             if (id != null && BridgeService.current != null && Credentials(context).load()?.deviceId == id) {
@@ -267,7 +255,6 @@ class ScreenControlInstrumentationTest {
                 return
             }
             if (id != null) {
-                // An earlier test left the shared device unusable: revoke it and pair a fresh one.
                 deviceId = null
                 assertTrue("Stale shared device must be revocable", request("DELETE", "/v1/devices/$id").status in setOf(204, 404))
                 assertNotListed(id)
@@ -398,12 +385,6 @@ class ScreenControlInstrumentationTest {
             return nodes
         }
         private fun localText(name: String): String? = localNodes().singleOrNull { it.viewIdResourceName == "$fixture:id/$name" }?.text?.toString()
-        /**
-         * Shows a fresh fixture activity (NEW_TASK | CLEAR_TASK replaces any earlier instance, so the counter, text and
-         * scroll position start over) and waits until the PhoneBridge service itself reads the fixture as the active
-         * window, which is what the commands under test act on. A warm process starts much faster than a cold one;
-         * [tearDownClass] force-stops the fixture.
-         */
         private fun showFixture(mode: String = "ordinary") {
             shell("am start -W -f 0x10008000 -n $fixture/.FixtureActivity --es screen $mode")
             waitUntil {

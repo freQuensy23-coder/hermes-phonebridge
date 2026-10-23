@@ -1,5 +1,4 @@
 set -euo pipefail
-# CI splits the instrumentation classes into two parts that run on separate emulators.
 part1=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest
 part2=org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest,org.nous.phonebridge.OwnerUiTourTest
 case "${PHONEBRIDGE_TEST_PART:-all}" in
@@ -34,7 +33,6 @@ settle_emulator() {
 }
 settle_emulator
 if [ -n "${RUNNER_TEMP:-}" ] && [ -e "$RUNNER_TEMP/gradle-build.log" ]; then
-  # CI starts this build before the emulator boots; wait for it here.
   waited=0
   until [ -s "$RUNNER_TEMP/gradle-build.status" ]; do
     waited=$((waited + 1))

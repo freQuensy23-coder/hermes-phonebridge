@@ -118,7 +118,7 @@ class Settings:
         if not isinstance(token, str) or not token or len(token) > 8192 or not token.isascii() or any(ord(char) <= 32 or ord(char) == 127 for char in token):
             raise BridgeError("CONFIG_ERROR", "Set PHONEBRIDGE_TOKEN or a token in the private config file.")
         bounded_number(request_timeout, 0.1, 120, "Request timeout")
-        return cls(selected_url.rstrip("/"), token, request_timeout)
+        return cls(str(selected_url).rstrip("/"), token, request_timeout)
 
 
 class Client:

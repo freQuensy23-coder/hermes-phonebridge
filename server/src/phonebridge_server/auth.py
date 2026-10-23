@@ -1,4 +1,3 @@
-"""Shared bearer parsing for routes and checks before large request bodies are read."""
 
 import hashlib
 import hmac

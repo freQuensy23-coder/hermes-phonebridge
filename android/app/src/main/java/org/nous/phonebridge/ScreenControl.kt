@@ -2,13 +2,11 @@ package org.nous.phonebridge
 
 import android.content.Context
 
-/** Screen control is on only while the owner has switched it on in the app: for a number of minutes or until stopped. */
 object ScreenControl {
     private const val PREFS = "screen_control"
     private const val UNTIL = "until"
     const val UNTIL_STOPPED = Long.MAX_VALUE
 
-    /** Remaining milliseconds for a stored deadline: null when off, [UNTIL_STOPPED] when on until stopped. */
     fun remaining(until: Long, now: Long): Long? = when {
         until == UNTIL_STOPPED -> UNTIL_STOPPED
         until > now -> until - now

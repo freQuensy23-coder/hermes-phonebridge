@@ -21,3 +21,4 @@ def test_ci_workflow_runs_the_emulator_suite_on_both_api_levels():
     assert "part: [1, 2]" in workflow
     assert "PHONEBRIDGE_TEST_PART: ${{ matrix.part }}" in workflow
     assert "script: bash ci/run_android_instrumentation.sh" in workflow
+    assert "    name: release\n    needs: [version, lint, typecheck, no-comments, security, python, android-build, image, offline-runtime, android-e2e]" in workflow

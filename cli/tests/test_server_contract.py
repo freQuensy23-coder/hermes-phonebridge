@@ -109,10 +109,6 @@ def test_real_server_maximum_device_collection_has_no_drops(bridge_server, envir
     client, store = bridge_server
     permissions = {f"p{index:03d}" + "x" * 124: bool(index % 2) for index in range(64)}
     capabilities = sorted(OPERATIONS)
-    # Enrolling 1000 phones is 4000 real store transactions; with synchronous=FULL each one waits
-    # for an fsync, which made this setup take 25-50 s. Power-loss durability of fixture rows is not
-    # what this test checks, so skip the fsyncs for the bulk setup only and restore the server's
-    # setting before the CLI reads the collection.
     with store.lock:
         store.connection.execute("PRAGMA synchronous=OFF")
     try:
