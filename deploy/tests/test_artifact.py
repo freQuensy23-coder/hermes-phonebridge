@@ -12,11 +12,11 @@ import pytest
 SHA = "a" * 40
 
 
-def wheel(directory, name, version="0.1.0", tag="py3-none-any"):
+def wheel(directory, name, version="0.1.0", tag="py3-none-any", description=""):
     filename = directory / f"{name}-{version}-{tag}.whl"
     info = f"{name}-{version}.dist-info"
     files = {f"{name}/__init__.py": f"VERSION = '{version}'\n",
-             f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name.replace('_', '-')}\nVersion: {version}\nRequires-Python: >=3.11\n\n",
+             f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name.replace('_', '-')}\nVersion: {version}\nRequires-Python: >=3.11\n\n{description}",
              f"{info}/WHEEL": f"Wheel-Version: 1.0\nGenerator: phonebridge-ci-tests\nRoot-Is-Purelib: true\nTag: {tag}\n\n"}
     files[f"{info}/RECORD"] = "".join(f"{path},,\n" for path in [*files, f"{info}/RECORD"])
     with zipfile.ZipFile(filename, "w") as archive:
@@ -76,6 +76,15 @@ def test_packager_cannot_produce_tag_or_other_workflow_artifacts(bundle, tmp_pat
     environment[field] = value
     with pytest.raises(RuntimeError, match="exact push/main"):
         packager.package(wheelhouse, tmp_path / "rejected", Path(__file__).parents[1], environment)
+
+
+def test_wheel_with_long_description_is_accepted_but_unbounded_metadata_is_not(modules, tmp_path):
+    packager = modules["package_artifact"]
+    long_description = wheel(tmp_path, "pydantic", "2.14.1", description="changelog\n" * 13000)
+    assert packager.wheel_identity(long_description) == ("pydantic", "2.14.1")
+    oversized = wheel(tmp_path, "huge", "1.0", description="x" * (packager.MAX_WHEEL_METADATA + 1))
+    with pytest.raises(RuntimeError, match="Invalid wheel metadata"):
+        packager.wheel_identity(oversized)
 
 
 def test_no_sdist_or_git_install_inputs(bundle, tmp_path):

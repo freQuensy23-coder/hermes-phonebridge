@@ -16,6 +16,8 @@ REPOSITORY = "freQuensy23-coder/hermes-phonebridge"
 WORKFLOW = ".github/workflows/ci.yml"
 TRUST_FILES = ("bootstrap.py", "rollout.py", "phonebridge.service", "provision_https.py")
 MAX_WHEEL = 128 * 1024 * 1024
+MAX_WHEEL_METADATA = 1024 * 1024
+MAX_WHEEL_TAGS = 65536
 
 
 def sha256(path):
@@ -33,7 +35,7 @@ def wheel_identity(path):
     with zipfile.ZipFile(path) as archive:
         metadata = [entry for entry in archive.infolist() if entry.filename.endswith(".dist-info/METADATA")]
         wheels = [entry for entry in archive.infolist() if entry.filename.endswith(".dist-info/WHEEL")]
-        if len(metadata) != 1 or len(wheels) != 1 or metadata[0].file_size > 65536 or wheels[0].file_size > 65536:
+        if len(metadata) != 1 or len(wheels) != 1 or metadata[0].file_size > MAX_WHEEL_METADATA or wheels[0].file_size > MAX_WHEEL_TAGS:
             raise RuntimeError("Invalid wheel metadata")
         data = BytesParser().parsebytes(archive.read(metadata[0]))
         tags = BytesParser().parsebytes(archive.read(wheels[0])).get_all("Tag", [])
