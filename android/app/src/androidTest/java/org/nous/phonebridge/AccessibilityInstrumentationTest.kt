@@ -95,26 +95,31 @@ class AccessibilityInstrumentationTest {
         assertFalse(Access.permissions(context).getBoolean("screen_control"))
         assertTrue(screenCapabilities().isEmpty())
         for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
-        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_10).performClick() }
+        scenario!!.onActivity { ScreenControl.enable(it, 10) }
         assertTrue(Access.permissions(context).getBoolean("screen_control"))
-        scenario!!.onActivity { assertTrue(it.findViewById<android.widget.TextView>(R.id.screen_control_status).text.startsWith("Screen control: ON")) }
+        scenario!!.onActivity { assertTrue(ScreenControl.enabled(it)) }
         assertEquals(screenOps.toSet(), screenCapabilities())
         waitUntil("accessible-app-root") { ForegroundFixture.focused() && UiThread.call { service.rootInActiveWindow?.packageName?.toString() == context.packageName } }
         val tree = handlers.execute("screen.tree", JSONObject())
         assertEquals(context.packageName, tree.getString("package"))
         val nodes = tree.getJSONArray("nodes")
         assertTrue((0 until nodes.length()).any { nodes.getJSONObject(it).optString("resource_id") == "org.nous.phonebridge:id/device_name" })
-        val input = handlers.execute("screen.input", screenArgs("screen.input"))
-        assertTrue(input.getBoolean("verified"))
-        scenario!!.onActivity { activity -> assertEquals("Typed by Accessibility", activity.findViewById<EditText>(R.id.device_name).text.toString()) }
+        // Remote commands must never operate the app's own consent/trust controls.
+        refused("PERMISSION_REQUIRED") { handlers.execute("screen.input", screenArgs("screen.input")) }
+        refused("PERMISSION_REQUIRED") { handlers.execute("screen.tap", JSONObject().put("x", 100).put("y", 100)) }
+        refused("PERMISSION_REQUIRED") { handlers.execute("screen.global", JSONObject().put("action", "notifications")) }
+        scenario!!.onActivity { activity -> assertEquals(android.os.Build.MODEL, activity.findViewById<EditText>(R.id.device_name).text.toString()) }
         refused("VALIDATION_ERROR") { handlers.execute("screen.global", JSONObject().put("action", "unlock")) }
         for (op in listOf("debug.status", "debug.enable")) refused("UNSUPPORTED") { handlers.execute(op, JSONObject()) }
         scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_stop).performClick() }
         assertFalse(Access.permissions(context).getBoolean("screen_control"))
         assertTrue(screenCapabilities().isEmpty())
         for (op in screenOps) refused("PERMISSION_REQUIRED") { handlers.execute(op, screenArgs(op)) }
-        scenario!!.onActivity { it.findViewById<android.widget.Button>(R.id.screen_enable_manual).performClick() }
+        scenario!!.onActivity { ScreenControl.enable(it, null) }
         assertEquals(screenOps.toSet(), screenCapabilities())
+        BridgeService.stop(context)
+        assertFalse("Pausing must revoke even indefinite screen access", ScreenControl.enabled(context))
+        ScreenControl.enable(context, null)
         restoreSetting(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, null)
         waitUntil("service-revoked") { BridgeAccessibility.current == null }
         assertFalse(Access.permissions(context).getBoolean("accessibility"))

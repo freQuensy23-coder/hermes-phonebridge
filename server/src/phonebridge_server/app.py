@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import hmac
 import os
 import sqlite3
 import tempfile
@@ -18,6 +17,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
 from . import __version__
+from .auth import bearer, require_admin
 from .config import Settings
 from .protocol import (
     IMAGE_SIGNATURES,
@@ -34,16 +34,6 @@ from .protocol import (
 )
 from .store import Store
 from .transport import Hub, Peer, RateLimiter, RequestBoundary
-
-
-def bearer(headers):
-    values = headers.getlist("authorization")
-    if len(values) != 1:
-        raise BridgeError("UNAUTHORIZED", "Bearer authorization required", 401)
-    parts = values[0].split(" ")
-    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1] or len(parts[1]) > 512:
-        raise BridgeError("UNAUTHORIZED", "Bearer authorization required", 401)
-    return parts[1]
 
 
 def create_app(settings: Settings | None = None, clock=time.time):
@@ -83,12 +73,10 @@ def create_app(settings: Settings | None = None, clock=time.time):
     application.add_middleware(RequestBoundary, settings=settings, limiter=limiter)
 
     async def admin(request: Request):
-        token = bearer(request.headers)
+        require_admin(request.headers, settings)
         if any(key.lower() in {"token", "access_token", "authorization", "admin_token", "device_token"}
                for key in request.query_params):
             raise BridgeError("UNAUTHORIZED", "Query-string authorization is not accepted", 401)
-        if not hmac.compare_digest(hashlib.sha256(token.encode()).digest(), settings.admin_hash):
-            raise BridgeError("UNAUTHORIZED", "Bearer authorization required", 401)
 
     async def execute(method, *args):
         store = application.state.store

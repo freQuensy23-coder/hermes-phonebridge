@@ -1,7 +1,7 @@
 set -euo pipefail
 # CI splits the instrumentation classes into two parts that run on separate emulators.
 part1=org.nous.phonebridge.AccessibilityInstrumentationTest,org.nous.phonebridge.DurabilityInstrumentationTest,org.nous.phonebridge.QrPipelineInstrumentationTest,org.nous.phonebridge.ScreenControlInstrumentationTest
-part2=org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest
+part2=org.nous.phonebridge.ServerInstrumentationTest,org.nous.phonebridge.ScreenshotTourTest,org.nous.phonebridge.OwnerUiTourTest
 case "${PHONEBRIDGE_TEST_PART:-all}" in
   1) classes=$part1 ;;
   2) classes=$part2 ;;
@@ -19,6 +19,7 @@ cleanup() {
   fi
   mkdir -p "$RUNNER_TEMP/screenshots"
   adb pull /sdcard/Download/phonebridge-tour "$RUNNER_TEMP/screenshots" >/dev/null 2>&1 || true
+  adb pull /sdcard/Download/phonebridge-redesign "$RUNNER_TEMP/screenshots" >/dev/null 2>&1 || true
   adb shell am force-stop org.nous.phonebridge >/dev/null 2>&1 || true
   adb uninstall org.nous.phonebridge.debugfixture >/dev/null 2>&1 || true
   python3 ci/prepare_emulator_server.py stop
@@ -70,6 +71,7 @@ cd android
   -Pandroid.testInstrumentationRunnerArguments.emulatorCi=true \
   "-Pandroid.testInstrumentationRunnerArguments.class=$classes" \
   -Pandroid.testInstrumentationRunnerArguments.screenshotTour=true \
+  -Pandroid.testInstrumentationRunnerArguments.ownerUiTour=true \
   "-Pandroid.testInstrumentationRunnerArguments.pairingCode=$pairing_code" \
   -Pandroid.testInstrumentationRunnerArguments.qrFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.qrFixtureUrl=http://10.0.2.2:18941/pairing.png

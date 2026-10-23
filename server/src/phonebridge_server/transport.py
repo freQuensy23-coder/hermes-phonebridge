@@ -5,9 +5,11 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
+from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
+from .auth import require_admin
 from .protocol import BridgeError, decode_json, encode_json
 
 
@@ -83,9 +85,13 @@ class RequestBoundary:
             return
 
         async def respond(code, message, status):
+            headers = {"Cache-Control": "no-store"}
+            if status == 429:
+                headers["Retry-After"] = "60"
+            if status == 401:
+                headers["WWW-Authenticate"] = "Bearer"
             response = JSONResponse({"error": {"code": code, "message": message}}, status_code=status,
-                                    headers={"Cache-Control": "no-store", "Retry-After": "60"} if status == 429
-                                    else {"Cache-Control": "no-store"})
+                                    headers=headers)
             await response(scope, receive, send)
 
         address = scope.get("client")
@@ -97,6 +103,13 @@ class RequestBoundary:
             await respond("RATE_LIMITED", "Pairing attempt rate limit exceeded", 429)
             return
         upload = scope.get("method") == "POST" and UPLOAD_PATH.fullmatch(scope["path"]) is not None
+        if upload:
+            # File bodies can be 32 MiB: authenticate before allocating or awaiting any bytes.
+            try:
+                require_admin(Headers(scope=scope), self.settings)
+            except BridgeError as error:
+                await respond(error.code, error.message, error.status)
+                return
         limit = self.settings.max_file_bytes if upload else self.settings.max_body_bytes
         lengths = [value for key, value in scope["headers"] if key == b"content-length"]
         if len(lengths) > 1:

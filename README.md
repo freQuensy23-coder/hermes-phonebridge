@@ -1,22 +1,117 @@
-# Hermes PhoneBridge
+# PhoneBridge
 
-Lets a Hermes agent on your server operate your Android phone:
+**Let a Hermes agent on your server use your Android phone and send you files.**
 
-- **Screen control** through Android Accessibility: read the UI tree, take screenshots, tap, swipe, type, press back/home. Grant PhoneBridge Accessibility in Android settings once, then switch screen control on in the app for 10 minutes, 15 minutes, 1 hour or until stopped. See [docs/screen-control.md](docs/screen-control.md).
-- **File delivery**: `phonebridge files send DEVICE ./report.pdf` puts the file into `Download/PhoneBridge`, `phonebridge images send` into the gallery. See [docs/file-delivery.md](docs/file-delivery.md).
+Ask Hermes to check something in a phone app, type a reply, or deliver a report. PhoneBridge connects your phone to your server. Screen access is off until you turn it on; receiving files does not require screen access.
 
-The phone connects out to the server over an authenticated WebSocket; no inbound port, root or ADB is needed. Protocol and API: [docs/contract.md](docs/contract.md). Platform limits: [docs/support-matrix.md](docs/support-matrix.md).
+| Screen control | Files from your agent |
+| --- | --- |
+| Read visible text, take screenshots, tap, swipe, type, press Back/Home/Recents | Save documents to `Download/PhoneBridge` and images to `Pictures/PhoneBridge` |
+| Requires Android Accessibility and a duration chosen on the phone | Works while connected, without Accessibility |
 
-## Setup
+Android 12 or newer. No root, ADB or inbound phone port. The phone opens an authenticated WebSocket to your HTTPS server. PhoneBridge is a remote-control companion for a server-hosted agent.
 
-1. Server: `deploy/bootstrap.py` provisions the systemd user service and `deploy/provision_https.py` the nginx site (see [deploy/README.md](deploy/README.md)).
-2. CLI and skill: `pip install ./cli`, then `phonebridge install-skill` (add `--replace` to update an older skill). Set `PHONEBRIDGE_TOKEN` to the admin token.
-3. Phone: install the APK, run `phonebridge pair --name 'My phone' --qr /private/path/pair.png` and scan the QR in the app, or run `phonebridge pair --name 'My phone' --code` and paste the printed code in the app. Confirm the hostname, allow notifications and grant Accessibility.
+## What it looks like
 
-## Development
+Screenshots from the Android app with synthetic example connection states. [Capture source](android/app/src/androidTest/java/org/nous/phonebridge/OwnerUiTourTest.kt).
 
-    python -m pip install -e './server[test]' -e './cli[test]'
-    python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests
-    cd android && ./gradlew testDebugUnitTest assembleDebug
+| Connect your phone | Everyday use | Screen access on |
+| --- | --- | --- |
+| <img src="docs/screenshots/01-setup.png" width="240" alt="Connection setup"> | <img src="docs/screenshots/02-connected.png" width="240" alt="Connected"> | <img src="docs/screenshots/03-screen-active.png" width="240" alt="Screen control active"> |
 
-Emulator instrumentation runs in GitHub CI (`.github/workflows/ci.yml`) through `ci/run_android_instrumentation.sh`, which needs the CI server and tunnel that `ci/prepare_emulator_server.py` starts.
+## Connect it
+
+You need a Linux server running Python 3.11+, a hostname with HTTPS, and an Android phone. Run the CLI and Hermes on the same server as the relay.
+
+### 1. Run the server
+
+Clone the branch containing the app (the current preview development branch is `feat/accessibility-mvp`):
+
+```sh
+git clone --branch feat/accessibility-mvp https://github.com/freQuensy23-coder/hermes-phonebridge.git
+cd hermes-phonebridge
+python3 -m venv .venv
+. .venv/bin/activate
+pip install ./server ./cli
+mkdir -m 700 -p "$HOME/.local/share/phonebridge"
+```
+
+Generate a token with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`. Save it privately and set these variables in the server's environment:
+
+```sh
+export PHONEBRIDGE_ADMIN_TOKEN='<the generated token>'
+export PHONEBRIDGE_PUBLIC_URL='https://phone.example.com'
+export PHONEBRIDGE_DB_PATH="$HOME/.local/share/phonebridge/phonebridge.sqlite3"
+uvicorn phonebridge_server.app:create_app --factory --host 127.0.0.1 --port 18940 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+```
+
+Put nginx with a valid TLS certificate in front of it. Expose only `/v1/pair/claim`, `/v1/device/ws`, `/v1/device/files/` and `/healthz`; keep administrative routes on loopback. The checked-in [HTTPS provisioner](deploy/provision_https.py) contains the nginx configuration. [Deployment guide](deploy/README.md) covers systemd and the repository's CI artifact deployment process.
+
+### 2. Pair the phone
+
+Install an APK signed with a private key you trust. For your own phone, build the debug APK under [Build and check](#build-and-check); it uses your local signing key. **Replace the old preview APK** as described under [Security and preview builds](#security-and-preview-builds).
+
+On the server, in another terminal with the virtual environment active:
+
+```sh
+export PHONEBRIDGE_URL='http://127.0.0.1:18940'
+export PHONEBRIDGE_TOKEN='<the same admin token>'
+phonebridge pair --name 'My phone' --code
+```
+
+Open PhoneBridge, paste the `pb1:…` code and confirm your server's address. Or create a QR with `phonebridge pair --name 'My phone' --qr /private/path/pair.png` and scan it. Codes expire and work once. The app starts the connection after pairing.
+
+Allow notifications to see connection status and received files. For screen control, enable PhoneBridge in Android Accessibility settings, return to the app, then choose **10 min**, **15 min**, **1 hour**, or **Until stopped**. On Samsung, you may first need App info → ⋮ → Allow restricted settings.
+
+### 3. Give Hermes the skill
+
+```sh
+phonebridge install-skill
+phonebridge devices list
+```
+
+Use `phonebridge install-skill --replace` to update an existing installation. The skill teaches Hermes the available CLI commands and their limits.
+
+## Try it from the terminal
+
+Replace `DEVICE` with the ID printed by `phonebridge devices list`.
+
+```sh
+phonebridge files send DEVICE ./report.pdf --wait
+phonebridge images send DEVICE ./photo.jpg --wait
+phonebridge screen tree DEVICE --wait
+phonebridge screen screenshot DEVICE --output /private/path/screen.jpg
+phonebridge screen input DEVICE --text 'Hello from Hermes' --wait
+phonebridge screen global DEVICE --action home --wait
+```
+
+Screen commands require active screen access. Typing targets the focused field unless you pass `--resource-id`. Screenshots are scaled; use the returned native screen bounds when choosing tap coordinates. A dispatched action is not proof the desired UI change happened: inspect the screen again. See [screen control](docs/screen-control.md), [file delivery](docs/file-delivery.md) and [CLI commands](cli/README.md).
+
+## Pause, stop or remove access
+
+**Stop screen control** ends screen access and keeps file delivery connected. **Pause connection** stops both and clears screen consent; resuming does not re-enable screen control. You can also stop the connection from its Android notification.
+
+**Forget server** erases credentials, local command history and queued events from this phone. Files already saved to Downloads/Gallery remain. To remove the server registration as well, run `phonebridge devices revoke DEVICE` on the server.
+
+If delivery is unreliable, choose Unrestricted battery use for PhoneBridge. On Samsung, also remove it from sleeping/deep-sleeping apps. Android force-stop prevents automatic reconnect until the app is opened again.
+
+## Security and preview builds
+
+Your server and its admin token have broad access to your phone while screen control is on. Keep that token out of chat, logs and screenshots. Pair only with a server you control. HTTPS protects transit; it does not hide screen results or files from the server, agent or their operators. Password fields are omitted from UI-tree text, but screen access can still expose private information in other apps.
+
+The app encrypts device credentials with Android Keystore, disables backup, protects its window from screenshots/Recents, and refuses remote input on its own controls. The server hashes pairing/device tokens and checks per-device file access. See the [security review](docs/security-review.md) for findings, fixes and limits.
+
+**The old `mvp-preview-0f059c7` APK was signed with a private key published in this repository.** Anyone holding that key can sign a replacement APK. Deleting the key from the branch cannot make installed copies trustworthy. Uninstall that preview, install a build signed by a private key you trust, and pair again. Normal debug builds now use the developer's local Android debug key; use a private release key for distribution. No new signed release is published by this PR.
+
+## Build and check
+
+JDK 17 and Android SDK 35 are required for Android; the minimum supported phone is API 31.
+
+```sh
+python -m pip install -e './server[test]' -e './cli[test]'
+python -m pytest server/tests cli/tests deploy/tests ci/tests release/tests
+cd android
+./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest
+```
+
+CI exercises the server/CLI, Android unit tests and emulator flows on API 31 and 35. The owner UI screenshot test uses example data; the separate end-to-end screenshot tour pairs against an isolated real server. Protocol: [contract](docs/contract.md). Android restrictions: [support matrix](docs/support-matrix.md).
